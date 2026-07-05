@@ -4,6 +4,6 @@ ersion = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "An algorithmic backtesting & trading library"
-repository = "https://github.com/Tacivus/kabod"
+repository = "https://github.com/Tacivus/kavod"
 
 [dependencies]
