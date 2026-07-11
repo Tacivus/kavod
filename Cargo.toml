@@ -7,5 +7,4 @@ description = "An algorithmic backtesting & trading library"
 repository = "https://github.com/Tacivus/kavod"
 
 [dependencies]
-rust_decimal = "1.42.1"
 thiserror = "2.0.18"
