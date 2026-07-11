@@ -26,7 +26,7 @@ enum HandlerFn {
 /// A single handler registered for a specific message type, together with
 /// the set of message types it declares that it will produce. The
 /// registration order within a group determines execution order.
-struct HandlerEntry {
+pub(crate) struct HandlerEntry {
     message_type: TypeId,
     handler_fn: HandlerFn,
     produces: HashSet<TypeId>,
@@ -54,6 +54,15 @@ enum Group {
         state: Box<dyn Any + Send>,
         handlers: Vec<HandlerEntry>,
     },
+}
+
+impl Group {
+    fn entries(&self) -> &[HandlerEntry] {
+        match self {
+            Group::Stateless(handlers) => handlers,
+            Group::Stateful { handlers, .. } => handlers,
+        }
+    }
 }
 
 /// Registry of all handler groups, stored in registration order.
@@ -101,7 +110,7 @@ impl HandlerRegistry {
     ///
     /// Handlers registered on the handle share `&mut S`, see each
     /// other's modifications, and fire in registration order.
-    pub(crate) fn state<S: State + Send + 'static>(&mut self, init: S) -> StateGroupHandle<S> {
+    pub(crate) fn state<S: State + Send + 'static>(&mut self, init: S) -> StateGroupHandle<'_, S> {
         self.groups.push(Group::Stateful {
             state: Box::new(init),
             handlers: Vec::new(),
@@ -184,6 +193,46 @@ impl HandlerRegistry {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// Returns every `TypeId` that at least one handler is registered to
+    /// receive (via `.on::<M>()`).
+    pub(crate) fn subscribed_types(&self) -> HashSet<TypeId> {
+        let mut types = HashSet::new();
+        for group in &self.groups {
+            for entry in group.entries() {
+                types.insert(entry.message_type);
+            }
+        }
+        types
+    }
+
+    /// Returns every `TypeId` declared via `.produces::<M>()` across all
+    /// handlers.
+    pub(crate) fn produced_types(&self) -> HashSet<TypeId> {
+        let mut types = HashSet::new();
+        for group in &self.groups {
+            for entry in group.entries() {
+                types.extend(&entry.produces);
+            }
+        }
+        types
+    }
+
+    /// Returns one `(subscribed_type, produced_set)` pair per handler
+    /// entry that declares at least one production. Entries with an empty
+    /// `.produces` set are omitted — they contribute no edges to the
+    /// message graph.
+    pub(crate) fn edges(&self) -> Vec<(TypeId, HashSet<TypeId>)> {
+        let mut out = Vec::new();
+        for group in &self.groups {
+            for entry in group.entries() {
+                if !entry.produces.is_empty() {
+                    out.push((entry.message_type, entry.produces.clone()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -361,7 +410,7 @@ mod tests {
     fn stateless_handler_ignores_wrong_type() {
         let mut reg = HandlerRegistry::new();
 
-        reg.on::<Bar>(|ctx, bar| {
+        reg.on::<Bar>(|ctx, _bar| {
             ctx.send(Signal { strength: 1.0 });
         })
         .produces::<Signal>();
@@ -393,7 +442,7 @@ mod tests {
         let mut reg = HandlerRegistry::new();
 
         reg.state(SmaCounter { count: 0 })
-            .on::<Bar>(|state, ctx, bar| {
+            .on::<Bar>(|state, ctx, _bar| {
                 state.count += 1;
                 ctx.send(Signal {
                     strength: state.count as f64,
@@ -816,4 +865,3 @@ mod tests {
         assert!(reg.groups.is_empty());
     }
 }
-

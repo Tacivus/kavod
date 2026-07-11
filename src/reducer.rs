@@ -1,6 +1,6 @@
 use std::{
     any::{Any, TypeId},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
 };
 
 use crate::{cache::Cache, message::Message};
@@ -56,6 +56,13 @@ impl ReducerRegistry {
     /// Used by graph validation.
     pub(crate) fn has_reducer_for<M: Message>(&self) -> bool {
         self.reducers.contains_key(&TypeId::of::<M>())
+    }
+
+    /// Returns the set of all `TypeId`s that have at least one reducer
+    /// registered. Used by graph validation to verify every produced
+    /// message type has a consumer.
+    pub(crate) fn subscribed_types(&self) -> HashSet<TypeId> {
+        self.reducers.keys().copied().collect()
     }
 
     pub(crate) fn len(&self) -> usize {
