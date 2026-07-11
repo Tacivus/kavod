@@ -1,3 +1,5 @@
+use std::{any::TypeId, collections::HashSet};
+
 use crate::{
     cache::{Cache, State},
     clock::Clock,
@@ -11,6 +13,7 @@ pub struct Context<'a> {
     clock: &'a dyn Clock,
     seq: &'a SeqNo,
     otubox: &'a mut Vec<(Timestamp, Box<dyn Message>)>,
+    declared_productions: Option<&'a HashSet<TypeId>>,
 }
 
 impl<'a> Context<'a> {
@@ -25,6 +28,25 @@ impl<'a> Context<'a> {
             clock,
             seq,
             otubox,
+            declared_productions: None,
+        }
+    }
+
+    /// Create a Context whose `send` / `send_at` will verify that the
+    /// message type being sent was declared via `.produces::<M>()`.
+    pub(crate) fn new_for_handler(
+        cache: &'a Cache,
+        clock: &'a dyn Clock,
+        seq: &'a SeqNo,
+        otubox: &'a mut Vec<(Timestamp, Box<dyn Message>)>,
+        declared_productions: &'a HashSet<TypeId>,
+    ) -> Self {
+        Self {
+            cache,
+            clock,
+            seq,
+            otubox,
+            declared_productions: Some(declared_productions),
         }
     }
 
@@ -40,12 +62,28 @@ impl<'a> Context<'a> {
         self.cache.get_keyed::<T>(key)
     }
 
+    /// Panics if a declared_productions set is active and `M` is not
+    /// in it. No-op otherwise (used outside of handler dispatch).
+    fn check_produces<M: Message>(&self) {
+        if let Some(allowed) = self.declared_productions {
+            let tid = TypeId::of::<M>();
+            assert!(
+                allowed.contains(&tid),
+                "handler sent message of type `{}` but did not declare `.produces::<{}>()`",
+                std::any::type_name::<M>(),
+                std::any::type_name::<M>(),
+            );
+        }
+    }
+
     pub fn send<M: Message>(&mut self, msg: M) {
+        self.check_produces::<M>();
         self.otubox.push((self.now(), Box::new(msg)));
     }
 
     pub fn send_at<M: Message>(&mut self, ts: Timestamp, msg: M) {
         assert!(ts >= self.now(), "cannot send to the past");
+        self.check_produces::<M>();
         self.otubox.push((ts, Box::new(msg)));
     }
 }
