@@ -21,6 +21,14 @@ impl Scheduler {
     pub(crate) fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Push an already-boxed message into the scheduler.
+    ///
+    /// Used by the kernel drain loop when handler-produced messages
+    /// (which arrive as `Box<dyn Message>`) must re-enter the heap.
+    pub(crate) fn push_boxed(&mut self, ts: Timestamp, seq: SeqNo, payload: Box<dyn Message>) {
+        self.0.push(Event { ts, seq, payload });
+    }
 }
 
 #[derive(Debug)]
@@ -146,6 +154,19 @@ mod tests {
         let event = sched.pop().unwrap();
         assert_eq!(event.ts, Timestamp::new(200));
         assert_eq!(sched.len(), 0);
+    }
+
+    /// Invariant: push_boxed works identically to push for a boxed message
+    #[test]
+    fn push_boxed_roundtrip() {
+        let mut sched = Scheduler::new();
+        let payload: Box<dyn Message> = Box::new(TestMsg(42));
+        sched.push_boxed(Timestamp::new(100), seq(0), payload);
+        let event = sched.pop().unwrap();
+        assert_eq!(event.ts, Timestamp::new(100));
+        assert_eq!(event.seq, seq(0));
+        let p: &dyn Any = &*event.payload;
+        assert_eq!(p.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
     }
 
     // ==================================================================

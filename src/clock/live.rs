@@ -17,6 +17,8 @@ impl Clock for LiveClock {
     fn now(&self) -> Timestamp {
         Timestamp::from(SystemTime::now())
     }
+
+    fn set(&mut self, _ts: Timestamp) {}
 }
 
 #[cfg(test)]

@@ -12,10 +12,6 @@ impl SimClock {
         SimClock(start)
     }
 
-    pub fn set(&mut self, ts: Timestamp) {
-        self.0 = ts
-    }
-
     /// Advances the clock 1 nanosecond.
     ///
     /// Returns an error if adding a nanonsecond would overflow the clock.
@@ -36,6 +32,10 @@ impl SimClock {
 impl Clock for SimClock {
     fn now(&self) -> Timestamp {
         self.0
+    }
+
+    fn set(&mut self, ts: Timestamp) {
+        self.0 = ts
     }
 }
 

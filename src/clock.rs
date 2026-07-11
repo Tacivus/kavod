@@ -8,4 +8,6 @@ pub mod sim;
 /// for an artificial clock or the real system clock.
 pub trait Clock: Send {
     fn now(&self) -> Timestamp;
+
+    fn set(&mut self, ts: Timestamp);
 }
