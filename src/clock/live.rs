@@ -24,6 +24,7 @@ mod tests {
     use super::*;
 
     /// Invariant: now() gives a non-zero timestamp
+    #[test]
     fn test_non_zero_timestamp() {
         let clock = LiveClock::new();
         let ts = clock.now();
