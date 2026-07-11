@@ -33,7 +33,22 @@ Primitives → Messages → Clock → Seq+Log → Scheduler
 
 ---
 
-## Phase 2: Message Trait
+## Phase 2: Clock Trait + Implementations
+
+**Independent swappable component, testable in isolation.**
+
+- `trait Clock: Send { fn now(&self) -> Timestamp; }`
+- `LiveClock` — reads `std::time::SystemTime`, converts to nanos
+- `SimClock` — `Cell<u64>`, manually advanced, default = 0
+
+### Tests
+- `SimClock` starts at 0, advances correctly via setter
+- `LiveClock` returns a non-zero timestamp
+- Trait objects (`Box<dyn Clock>`) work for swapping
+
+---
+
+## Phase 3: Message Trait
 
 **Trivial marker trait, enables the entire type system.**
 
@@ -47,21 +62,6 @@ Primitives → Messages → Clock → Seq+Log → Scheduler
 - Structs implement `Message`
 - Downcasting via `TypeId` works
 - Message can be boxed and sent across thread boundaries
-
----
-
-## Phase 3: Clock Trait + Implementations
-
-**Independent swappable component, testable in isolation.**
-
-- `trait Clock: Send { fn now(&self) -> Timestamp; }`
-- `LiveClock` — reads `std::time::SystemTime`, converts to nanos
-- `SimClock` — `Cell<u64>`, manually advanced, default = 0
-
-### Tests
-- `SimClock` starts at 0, advances correctly via setter
-- `LiveClock` returns a non-zero timestamp
-- Trait objects (`Box<dyn Clock>`) work for swapping
 
 ---
 

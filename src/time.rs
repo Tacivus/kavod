@@ -1,8 +1,11 @@
-pub mod clock;
 pub mod duration;
+pub mod live_clock;
+pub mod sim_clock;
 pub mod timestamp;
 
 use thiserror::Error;
+
+use crate::time::timestamp::Timestamp;
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum TimeError {

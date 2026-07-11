@@ -1,30 +1,7 @@
-use std::time::SystemTime;
-
-use crate::time::{TimeError, duration::Duration, timestamp::Timestamp};
-
-/// Clock is the main clock abstraction used throughout the engine in live
-/// and bakctesting mode. Depending on the context, this will be swapped out
-/// for an artificial clock or the real system clock.
-pub trait Clock: Send {
-    fn now(&self) -> Timestamp;
-}
-
-/// The clock that will be used in live contexts. It gets its time from the
-/// system clock.
-pub struct LiveClock;
-
-impl LiveClock {
-    /// Returns a new LiveClock instance
-    pub fn new() -> Self {
-        LiveClock
-    }
-}
-
-impl Clock for LiveClock {
-    fn now(&self) -> Timestamp {
-        Timestamp::from(SystemTime::now())
-    }
-}
+use crate::{
+    clock::Clock,
+    time::{TimeError, duration::Duration, timestamp::Timestamp},
+};
 
 /// The main clock that is used in non-live contexts. It can be arbitrarily
 /// created/set/advanced programatically.
