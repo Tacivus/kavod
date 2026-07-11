@@ -6,5 +6,6 @@ pub mod log;
 pub mod message;
 pub mod price;
 pub mod quantity;
+pub mod reducer;
 pub mod schedule;
 pub mod time;
