@@ -99,9 +99,7 @@ impl Engine {
                 same_instant_count = 1;
             }
             if same_instant_count > max_events {
-                return Err(EngineError::SameInstantLimitExceeded {
-                    max_events,
-                });
+                return Err(EngineError::SameInstantLimitExceeded { max_events });
             }
 
             self.dispatch_time = t;
@@ -668,7 +666,10 @@ mod tests {
         let mut engine = builder.build().unwrap();
         engine.push_event(t0, MsgA(1)).unwrap();
         engine.run().unwrap();
-        assert_eq!(*order.lock().unwrap(), vec!["A1".to_string(), "B2".to_string()]);
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["A1".to_string(), "B2".to_string()]
+        );
     }
 
     /// Invariant: same-time causal chain completes before future time advances
@@ -706,8 +707,12 @@ mod tests {
         assert_eq!(
             *order.lock().unwrap(),
             vec![
-                "A1".to_string(), "B1".to_string(), "C1".to_string(),
-                "A9".to_string(), "B9".to_string(), "C9".to_string(),
+                "A1".to_string(),
+                "B1".to_string(),
+                "C1".to_string(),
+                "A9".to_string(),
+                "B9".to_string(),
+                "C9".to_string(),
             ]
         );
     }
@@ -777,7 +782,10 @@ mod tests {
         assert_eq!(
             *order.lock().unwrap(),
             vec![
-                "A0".to_string(), "B1".to_string(), "B2".to_string(), "B3".to_string()
+                "A0".to_string(),
+                "B1".to_string(),
+                "B2".to_string(),
+                "B3".to_string()
             ]
         );
     }
@@ -825,10 +833,30 @@ mod tests {
         engine.push_event(t0, MsgA(3)).unwrap();
 
         let err = engine.run().unwrap_err();
-        assert_eq!(
-            err,
-            EngineError::SameInstantLimitExceeded { max_events: 2 }
-        );
+        assert_eq!(err, EngineError::SameInstantLimitExceeded { max_events: 2 });
+    }
+
+    /// Invariant: same-instant bound also applies to handler-produced cascades
+    #[test]
+    fn test_same_instant_bound_on_handler_cascade() {
+        let t0 = Timestamp::new(0);
+        let config = EngineConfig::backtest(t0).with_max_events_per_instant(2);
+        let mut builder = Engine::builder(config);
+
+        // Each MsgA produces one MsgA at same time → unbounded cascade without the bound.
+        builder
+            .on(|ctx: &mut HandlerCtx<'_>, msg: &MsgA| {
+                if msg.0 < 10 {
+                    ctx.send(MsgA(msg.0 + 1)).unwrap();
+                }
+            })
+            .produces::<MsgA>();
+
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t0, MsgA(0)).unwrap();
+
+        let err = engine.run().unwrap_err();
+        assert_eq!(err, EngineError::SameInstantLimitExceeded { max_events: 2 });
     }
 
     /// Invariant: unconsumed input is rejected before run (never reaches loop)
@@ -904,6 +932,33 @@ mod tests {
         assert_eq!(times.len(), 2);
         assert_eq!(times[0], t);
         assert_eq!(times[1], t);
+    }
+
+    /// Invariant: callback wall-clock duration does not change logical dispatch time
+    #[test]
+    fn test_callback_wall_time_does_not_affect_dispatch_time() {
+        let t = Timestamp::new(1_000);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        let s1 = seen.clone();
+        builder.on(move |ctx: &mut HandlerCtx<'_>, _msg: &MsgA| {
+            s1.lock().unwrap().push(ctx.dispatch_time());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        });
+        let s2 = seen.clone();
+        builder.on(move |ctx: &mut HandlerCtx<'_>, _msg: &MsgA| {
+            s2.lock().unwrap().push(ctx.dispatch_time());
+        });
+
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t, MsgA(1)).unwrap();
+        engine.run().unwrap();
+
+        let times = seen.lock().unwrap();
+        assert_eq!(*times, vec![t, t]);
+        assert_eq!(engine.dispatch_time(), t);
+        assert_eq!(engine.clock_now(), t);
     }
 
     /// Invariant: a produced same-time message inherits dispatch time when processed
