@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod clock;
 pub mod config;
+pub mod context;
 pub mod decimal;
 pub mod error;
 pub mod message;

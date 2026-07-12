@@ -41,6 +41,7 @@ pub trait State: Send + 'static {
 /// the value. Hash collisions are resolved by the inner `HashMap` using
 /// `Eq`. This guarantees that unequal keys with identical hashes do not
 /// alias each other.
+#[derive(Debug)]
 pub struct Cache {
     stores: HashMap<TypeId, Box<dyn Any + Send>>,
     len: usize,
