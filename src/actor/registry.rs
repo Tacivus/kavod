@@ -5,29 +5,31 @@ use std::{
     num::NonZeroUsize,
 };
 
+#[cfg(test)]
+use crate::time::Timestamp;
 use crate::{
     actor::config::ActorConfig,
+    context::actor::ActorCtx,
     error::BuildError,
     message::Message,
     output::{MessageType, ProductionSet},
 };
 
-/// Erased actor callback. Phase 16 stores but never invokes.
-///
-/// Phase 17 will change the public signature to include `ActorCtx`.
-type ErasedActorCallback = Box<dyn Fn(&mut (dyn Any + Send), &dyn Message) + Send>;
+/// Erased actor callback. Stored for Phase 18+; not invoked by Engine::run yet.
+type ErasedActorCallback =
+    Box<dyn Fn(&mut (dyn Any + Send), &mut ActorCtx<'_>, &dyn Message) + Send>;
 
 fn erase_actor_callback<A: Send + 'static, M: Message>(
-    f: impl Fn(&mut A, &M) + Send + 'static,
+    f: impl Fn(&mut A, &mut ActorCtx<'_>, &M) + Send + 'static,
 ) -> ErasedActorCallback {
-    Box::new(move |state, msg| {
+    Box::new(move |state, ctx, msg| {
         let concrete_state = state
             .downcast_mut::<A>()
             .expect("ActorRegistry invariant: state type mismatch");
         let concrete_msg = (msg as &dyn Any)
             .downcast_ref::<M>()
             .expect("ActorRegistry invariant: message type mismatch");
-        f(concrete_state, concrete_msg);
+        f(concrete_state, ctx, concrete_msg);
     })
 }
 
@@ -49,7 +51,7 @@ struct ActorEntry {
     registration_order: usize,
     config: ActorConfig,
     /// Private actor state; not invoked in Phase 16.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     state: Box<dyn Any + Send>,
     callbacks: Vec<ActorCallbackEntry>,
 }
@@ -148,6 +150,19 @@ impl ActorRegistry {
     pub(crate) fn consumed_type_names(&self) -> Vec<&'static str> {
         self.graph_entries().map(|(mt, _)| mt.name).collect()
     }
+
+    /// Invoke first callback of actor 0 for tests (Phase 17 only).
+    pub(crate) fn invoke_first_for_test(
+        &mut self,
+        dispatch_time: Timestamp,
+        sink: &mut dyn crate::actor::output::ActorOutputSink,
+        msg: &dyn Message,
+    ) {
+        let actor = &mut self.actors[0];
+        let cb = &actor.callbacks[0];
+        let mut ctx = ActorCtx::new(dispatch_time, sink, &cb.productions);
+        (cb.invoke)(actor.state.as_mut(), &mut ctx, msg);
+    }
 }
 
 /// Scoped builder returned by [`EngineBuilder::actor`](crate::builder::EngineBuilder::actor).
@@ -161,11 +176,6 @@ pub struct ActorBuilder<'a, A> {
 }
 
 impl<'a, A: Send + 'static> ActorBuilder<'a, A> {
-    /// Set the actor inbox capacity (declarative; unused in backtest Phase 16).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` is zero.
     pub fn inbox_capacity(&mut self, capacity: usize) -> &mut Self {
         let n = NonZeroUsize::new(capacity).expect("inbox_capacity must be non-zero");
         self.registry.actors[self.actor_index]
@@ -176,13 +186,11 @@ impl<'a, A: Send + 'static> ActorBuilder<'a, A> {
 
     /// Subscribe this actor to messages of type `M`.
     ///
-    /// Counts as a graph consumer of `M`. The callback is stored but not
-    /// executed until inline actor dispatch is implemented.
-    ///
-    /// Phase 16 signature is `Fn(&mut A, &M)`. Phase 17 adds `ActorCtx`.
+    /// Counts as a graph consumer of `M`. Callbacks are not executed until
+    /// inline actor dispatch (Phase 18).
     pub fn on<M: Message>(
         &mut self,
-        f: impl Fn(&mut A, &M) + Send + 'static,
+        f: impl Fn(&mut A, &mut ActorCtx<'_>, &M) + Send + 'static,
     ) -> ActorRegistrar<'_> {
         let type_id = TypeId::of::<M>();
         let callback_index = self.registry.actors[self.actor_index].callbacks.len();
@@ -290,12 +298,12 @@ mod tests {
     fn test_subscription_order_preserved() {
         let mut reg = ActorRegistry::new();
         reg.register("first", Venue, |actor| {
-            actor.on(|_s, _m: &MsgB| {});
-            actor.on(|_s, _m: &MsgA| {});
+            actor.on(|_s, _ctx, _m: &MsgB| {});
+            actor.on(|_s, _ctx, _m: &MsgA| {});
         })
         .unwrap();
         reg.register("second", Venue, |actor| {
-            actor.on(|_s, _m: &MsgC| {});
+            actor.on(|_s, _ctx, _m: &MsgC| {});
         })
         .unwrap();
 
@@ -312,7 +320,7 @@ mod tests {
         let mut reg = ActorRegistry::new();
         reg.register("venue", Venue, |actor| {
             actor
-                .on(|_s, _m: &MsgA| {})
+                .on(|_s, _ctx, _m: &MsgA| {})
                 .produces::<MsgB>()
                 .produces::<MsgC>();
         })
@@ -364,7 +372,7 @@ mod tests {
         static HITS: AtomicU64 = AtomicU64::new(0);
         let mut reg = ActorRegistry::new();
         reg.register("venue", Venue, |actor| {
-            actor.on(|_s, _m: &MsgA| {
+            actor.on(|_s, _ctx, _m: &MsgA| {
                 HITS.fetch_add(1, Ordering::SeqCst);
             });
         })
@@ -372,5 +380,42 @@ mod tests {
         let _ = reg.graph_entries().count();
         assert_eq!(HITS.load(Ordering::SeqCst), 0);
         assert_eq!(reg.callback_count(), 1);
+    }
+
+    /// Invariant: erased callback runs with ActorCtx; declared send hits sink
+    #[test]
+    fn test_erased_callback_invokes_with_actor_ctx() {
+        use crate::actor::output::{ActorEmission, RecordingActorSink};
+        use crate::time::Timestamp;
+        use std::any::Any;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        #[derive(Debug, PartialEq)]
+        struct Out(u64);
+        impl Message for Out {}
+
+        static HITS: AtomicU64 = AtomicU64::new(0);
+        let mut reg = ActorRegistry::new();
+        reg.register("venue", Venue, |actor| {
+            actor
+                .on(|_s, ctx, _m: &MsgA| {
+                    HITS.fetch_add(1, Ordering::SeqCst);
+                    ctx.send(Out(9)).unwrap();
+                })
+                .produces::<Out>();
+        })
+        .unwrap();
+
+        let mut sink = RecordingActorSink::new();
+        reg.invoke_first_for_test(Timestamp::new(10), &mut sink, &MsgA);
+        assert_eq!(HITS.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.emissions.len(), 1);
+        match &sink.emissions[0] {
+            ActorEmission::Immediate { payload } => {
+                let p: &dyn Any = &**payload;
+                assert_eq!(p.downcast_ref::<Out>(), Some(&Out(9)));
+            }
+            ActorEmission::At { .. } => panic!("expected Immediate"),
+        }
     }
 }

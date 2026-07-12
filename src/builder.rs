@@ -452,7 +452,7 @@ mod tests {
             .produces::<MsgB>();
         builder
             .actor("venue", VenueState, |actor| {
-                actor.on(|_s, _msg: &MsgB| {});
+                actor.on(|_s, _ctx, _msg: &MsgB| {});
             })
             .unwrap();
         let engine = builder.build().unwrap();
@@ -465,7 +465,7 @@ mod tests {
         let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
         builder
             .actor("venue", VenueState, |actor| {
-                actor.on(|_s, _msg: &MsgA| {}).produces::<Orphan>();
+                actor.on(|_s, _ctx, _msg: &MsgA| {}).produces::<Orphan>();
             })
             .unwrap();
         let err = match builder.build() {
@@ -487,7 +487,7 @@ mod tests {
         builder
             .actor("venue", VenueState, |actor| {
                 actor.inbox_capacity(64);
-                actor.on(|_s, _msg: &MsgA| {});
+                actor.on(|_s, _ctx, _msg: &MsgA| {});
             })
             .unwrap();
         let engine = builder.build().unwrap();

@@ -1066,7 +1066,7 @@ mod tests {
         let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
         builder
             .actor("counter", Counter, |actor| {
-                actor.on(|_s, _m: &Tick| {
+                actor.on(|_s, _ctx, _m: &Tick| {
                     HITS.fetch_add(1, Ordering::SeqCst);
                 });
             })

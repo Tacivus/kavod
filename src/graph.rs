@@ -567,7 +567,7 @@ mod tests {
         let mut actors = ActorRegistry::new();
         actors
             .register("venue", S, |actor| {
-                actor.on(|_s, _m: &MsgB| {});
+                actor.on(|_s, _ctx, _m: &MsgB| {});
             })
             .unwrap();
 
@@ -584,7 +584,7 @@ mod tests {
         let mut actors = ActorRegistry::new();
         actors
             .register("venue", S, |actor| {
-                actor.on(|_s, _m: &MsgA| {}).produces::<Orphan>();
+                actor.on(|_s, _ctx, _m: &MsgA| {}).produces::<Orphan>();
             })
             .unwrap();
 

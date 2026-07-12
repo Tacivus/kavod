@@ -142,7 +142,7 @@ fn test_actor_satisfies_orphan_handler_production() {
         .produces::<Produced>();
     builder
         .actor("venue", VenueState, |actor| {
-            actor.on(|_s, _msg: &Produced| {});
+            actor.on(|_s, _ctx, _msg: &Produced| {});
         })
         .unwrap();
     builder.build().unwrap();
@@ -174,7 +174,7 @@ fn test_actor_orphan_production_prevents_build() {
     let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
     builder
         .actor("venue", VenueState, |actor| {
-            actor.on(|_s, _msg: &MsgA| {}).produces::<Orphan>();
+            actor.on(|_s, _ctx, _msg: &MsgA| {}).produces::<Orphan>();
         })
         .unwrap();
     let err = match builder.build() {

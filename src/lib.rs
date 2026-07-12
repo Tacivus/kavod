@@ -19,11 +19,12 @@ pub mod price;
 pub mod quantity;
 pub mod time;
 
-pub use actor::{ActorBuilder, ActorRegistrar};
+pub use actor::{ActorBuilder, ActorOutputError, ActorRegistrar};
 pub use builder::EngineBuilder;
 pub use cache::{Cache, DuplicateState, State};
 pub use clock::{Clock, LiveClock, SimClock};
 pub use config::{EngineConfig, Mode};
+pub use context::actor::ActorCtx;
 pub use context::handler::HandlerCtx;
 pub use context::reducer::ReducerCtx;
 pub use engine::Engine;
@@ -31,3 +32,4 @@ pub use error::{BuildError, EngineError};
 pub use handler::{HandlerGroup, HandlerRegistrar};
 pub use message::Message;
 pub use output::HandlerOutputError;
+
