@@ -252,12 +252,13 @@ mod tests {
 
         let mut cache = Cache::new();
         let ts = Timestamp::new(0);
-        let mut ctx = ReducerCtx::new(ts, &mut cache);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
 
-        reg.dispatch(&mut ctx, msg_ref);
-        drop(ctx);
+        {
+            let mut ctx = ReducerCtx::new(ts, &mut cache);
+            reg.dispatch(&mut ctx, msg_ref);
+        }
 
         assert_eq!(cache.get::<KeyedNum>(&1).unwrap().value, 99);
     }
@@ -278,12 +279,13 @@ mod tests {
 
         let mut cache = Cache::new();
         let ts = Timestamp::new(0);
-        let mut ctx = ReducerCtx::new(ts, &mut cache);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
 
-        reg.dispatch(&mut ctx, msg_ref);
-        drop(ctx);
+        {
+            let mut ctx = ReducerCtx::new(ts, &mut cache);
+            reg.dispatch(&mut ctx, msg_ref);
+        }
 
         let stored = cache.get::<KeyedNum>(&5);
         assert!(stored.is_some());
@@ -309,12 +311,13 @@ mod tests {
         cache.insert(SingletonNum { value: 0 });
 
         let ts = Timestamp::new(0);
-        let mut ctx = ReducerCtx::new(ts, &mut cache);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
 
-        reg.dispatch(&mut ctx, msg_ref);
-        drop(ctx);
+        {
+            let mut ctx = ReducerCtx::new(ts, &mut cache);
+            reg.dispatch(&mut ctx, msg_ref);
+        }
 
         assert_eq!(cache.get_singleton::<SingletonNum>().unwrap().value, 1);
     }
@@ -337,11 +340,13 @@ mod tests {
 
         let mut cache = Cache::new();
         let ts = Timestamp::new(9_600);
-        let mut ctx = ReducerCtx::new(ts, &mut cache);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
 
-        reg.dispatch(&mut ctx, msg_ref);
+        {
+            let mut ctx = ReducerCtx::new(ts, &mut cache);
+            reg.dispatch(&mut ctx, msg_ref);
+        }
 
         assert_eq!(*captured.lock().unwrap(), ts);
     }
@@ -379,12 +384,13 @@ mod tests {
         cache.insert(KeyedNum { key: 1, value: 99 });
 
         let ts = Timestamp::new(0);
-        let mut ctx = ReducerCtx::new(ts, &mut cache);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
 
-        reg.dispatch(&mut ctx, msg_ref);
-        drop(ctx);
+        {
+            let mut ctx = ReducerCtx::new(ts, &mut cache);
+            reg.dispatch(&mut ctx, msg_ref);
+        }
 
         assert_eq!(cache.get::<KeyedNum>(&1).unwrap().value, 99);
         assert_eq!(cache.len(), 1);
