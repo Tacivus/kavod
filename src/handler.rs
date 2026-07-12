@@ -750,12 +750,21 @@ mod tests {
     #[test]
     fn test_group_state_persists_across_messages() {
         let mut reg = HandlerRegistry::new();
-        let shared = GroupState::new(10);
+        let observed = Arc::new(AtomicU64::new(0));
+        let observed_read = observed.clone();
 
-        reg.handler_group(shared, |group| {
+        reg.handler_group(GroupState::new(10), |group| {
+            // Accumulates on TestMsg
             group.on(
                 |state: &mut GroupState, _ctx: &mut HandlerCtx<'_>, msg: &TestMsg| {
                     state.set(state.get() + msg.0);
+                },
+            );
+
+            // Reads accumulated state on OtherMsg (same group slot)
+            group.on(
+                move |state: &mut GroupState, _ctx: &mut HandlerCtx<'_>, _msg: &OtherMsg| {
+                    observed_read.store(state.get(), Ordering::SeqCst);
                 },
             );
         });
@@ -767,26 +776,11 @@ mod tests {
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(5));
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(3));
+        // 10 + 5 + 3 = 18 must still be in the same group state
+        reg.dispatch(ts, &cache, &mut sched, &mut seq, &OtherMsg(0));
 
-        // After dispatch, state should have accumulated: 10 + 5 + 3 = 18
-        // We verify by observing side-effects in the next dispatch
-        let observed = Arc::new(AtomicU64::new(0));
-        let observed2 = observed.clone();
-
-        let mut reg2 = HandlerRegistry::new();
-        let shared2 = GroupState::new(100);
-        reg2.handler_group(shared2, |group| {
-            group.on(
-                move |state: &mut GroupState, _ctx: &mut HandlerCtx<'_>, _msg: &TestMsg| {
-                    observed2.store(state.get(), Ordering::SeqCst);
-                },
-            );
-        });
-        // Just verify the mechanism works by checking initial value
-        reg2.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
-        assert_eq!(observed.load(Ordering::SeqCst), 100);
+        assert_eq!(observed.load(Ordering::SeqCst), 18);
     }
-
     // ========================================================================
     // Multiple handlers share group state
     // ========================================================================
