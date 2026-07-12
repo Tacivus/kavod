@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
 };
 
-use crate::{context::reducer::ReducerCtx, message::Message};
+use crate::{context::reducer::ReducerCtx, message::Message, output::MessageType};
 
 type ErasedReducer = Box<dyn Fn(&mut ReducerCtx<'_>, &dyn Message) + Send>;
 
@@ -55,6 +55,21 @@ impl ReducerRegistry {
                 (entry.invoke)(ctx, msg);
             }
         }
+    }
+
+    /// One [`MessageType`] per reducer registration (registration order within
+    /// each message type). Used by graph building without exposing entries.
+    pub(crate) fn consumer_message_types(&self) -> Vec<MessageType> {
+        let mut out = Vec::new();
+        for (type_id, entries) in &self.by_type {
+            for entry in entries {
+                out.push(MessageType {
+                    id: *type_id,
+                    name: entry.consumed_type_name,
+                });
+            }
+        }
+        out
     }
 
     pub(crate) fn consumed_types(&self) -> Vec<TypeId> {

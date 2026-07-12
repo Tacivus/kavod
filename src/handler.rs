@@ -8,7 +8,7 @@ use crate::{
     cache::Cache,
     context::handler::HandlerCtx,
     message::Message,
-    output::{HandlerOutput, ProductionSet},
+    output::{HandlerOutput, MessageType, ProductionSet},
     schedule::Scheduler,
     sequence::Sequencer,
     time::timestamp::Timestamp,
@@ -219,6 +219,22 @@ impl HandlerRegistry {
     /// Used by graph building in Phase 11.
     pub(crate) fn handler_productions(&self, id: HandlerId) -> &ProductionSet {
         &self.entries[id].productions
+    }
+
+    /// Flat (consumed, productions) pairs for graph building.
+    ///
+    /// Order matches global handler registration order. Does not expose
+    /// [`HandlerEntry`] or state slots.
+    pub(crate) fn graph_entries(&self) -> impl Iterator<Item = (MessageType, &ProductionSet)> + '_ {
+        self.entries.iter().map(|e| {
+            (
+                MessageType {
+                    id: e.consumed,
+                    name: e.consumed_type_name,
+                },
+                &e.productions,
+            )
+        })
     }
 
     /// Invoke a specific handler entry directly without going through
