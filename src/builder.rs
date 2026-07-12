@@ -86,8 +86,9 @@ impl EngineBuilder {
     /// `name` must be unique. Users configure capacity and subscriptions;
     /// they never construct mailboxes, channels, or handles.
     ///
-    /// Actor callbacks are stored for later execution phases but are not
-    /// invoked by the Phase 16 engine loop.
+    /// In backtest mode, matching callbacks run inline after handlers for each
+    /// dispatched message. Inbox capacity is recorded for live modes but has
+    /// no queueing effect for the inline backtest executor.
     pub fn actor<A: Send + 'static>(
         &mut self,
         name: &'static str,
