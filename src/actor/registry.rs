@@ -5,17 +5,18 @@ use std::{
     num::NonZeroUsize,
 };
 
-#[cfg(test)]
-use crate::time::Timestamp;
 use crate::{
-    actor::config::ActorConfig,
+    actor::{config::ActorConfig, output::InlineActorSink},
     context::actor::ActorCtx,
     error::BuildError,
     message::Message,
     output::{MessageType, ProductionSet},
+    schedule::Scheduler,
+    sequence::Sequencer,
+    time::Timestamp,
 };
 
-/// Erased actor callback. Stored for Phase 18+; not invoked by Engine::run yet.
+/// Erased actor callback for inline (and later live) dispatch.
 type ErasedActorCallback =
     Box<dyn Fn(&mut (dyn Any + Send), &mut ActorCtx<'_>, &dyn Message) + Send>;
 
@@ -37,8 +38,6 @@ struct ActorCallbackEntry {
     consumed_type_name: &'static str,
     consumed: TypeId,
     productions: ProductionSet,
-    /// Stored for Phase 18+; never called in Phase 16.
-    #[allow(dead_code)]
     invoke: ErasedActorCallback,
 }
 
@@ -46,26 +45,22 @@ struct ActorEntry {
     /// Stable name; diagnostics / live metrics later.
     #[allow(dead_code)]
     name: &'static str,
-    /// Deterministic delivery order (Phase 18+).
-    #[allow(dead_code)]
+    /// Deterministic delivery order (exposed for tests / live metrics later).
+    #[cfg_attr(not(test), allow(dead_code))]
     registration_order: usize,
     config: ActorConfig,
-    /// Private actor state; not invoked in Phase 16.
-    #[allow(dead_code)]
+    /// Private actor state owned by the registry / executor.
     state: Box<dyn Any + Send>,
     callbacks: Vec<ActorCallbackEntry>,
 }
 
 /// Build-time and runtime storage for actor declarations.
 ///
-/// Phase 16: metadata + graph participation only.
-/// Phase 18: inline dispatch will use registration order and `by_type`.
+/// Inline backtest dispatch uses registration order and `by_type`.
 pub(crate) struct ActorRegistry {
     actors: Vec<ActorEntry>,
     names: HashSet<&'static str>,
     /// (actor_index, callback_index) in actor-then-callback registration order.
-    /// Unused until Phase 18 dispatch.
-    #[allow(dead_code)]
     by_type: HashMap<TypeId, Vec<(usize, usize)>>,
 }
 
@@ -121,6 +116,33 @@ impl ActorRegistry {
                 )
             })
         })
+    }
+
+    /// Deliver `msg` to subscribed inline actors after handlers have finished.
+    ///
+    /// Order: actor registration order, then callback registration order within
+    /// each actor. Outputs schedule via [`InlineActorSink`] (no recursive dispatch).
+    pub(crate) fn dispatch(
+        &mut self,
+        dispatch_time: Timestamp,
+        scheduler: &mut Scheduler,
+        sequence: &mut Sequencer,
+        msg: &dyn Message,
+    ) {
+        let type_id = msg.type_id();
+        let Some(indexes) = self.by_type.get(&type_id).cloned() else {
+            return;
+        };
+
+        for (actor_idx, callback_idx) in indexes {
+            let ActorEntry {
+                state, callbacks, ..
+            } = &mut self.actors[actor_idx];
+            let cb = &callbacks[callback_idx];
+            let mut sink = InlineActorSink::new(scheduler, sequence, dispatch_time);
+            let mut ctx = ActorCtx::new(dispatch_time, &mut sink, &cb.productions);
+            (cb.invoke)(state.as_mut(), &mut ctx, msg);
+        }
     }
 }
 
@@ -186,8 +208,8 @@ impl<'a, A: Send + 'static> ActorBuilder<'a, A> {
 
     /// Subscribe this actor to messages of type `M`.
     ///
-    /// Counts as a graph consumer of `M`. Callbacks are not executed until
-    /// inline actor dispatch (Phase 18).
+    /// Counts as a graph consumer of `M`. In backtest mode, matching messages
+    /// are delivered inline after handlers complete.
     pub fn on<M: Message>(
         &mut self,
         f: impl Fn(&mut A, &mut ActorCtx<'_>, &M) + Send + 'static,

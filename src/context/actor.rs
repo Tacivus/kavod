@@ -26,7 +26,6 @@ pub struct ActorCtx<'a> {
 }
 
 impl<'a> ActorCtx<'a> {
-    #[allow(dead_code)]
     pub(crate) fn new(
         dispatch_time: Timestamp,
         output: &'a mut dyn ActorOutputSink,

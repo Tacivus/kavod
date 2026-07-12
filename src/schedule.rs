@@ -22,6 +22,11 @@ impl Scheduler {
         self.heap.push(ScheduledItem::new(ts, seq, msg))
     }
 
+    /// Push an already-shared payload (actor emissions, fan-out retention).
+    pub(crate) fn push_shared(&mut self, ts: Timestamp, seq: SeqNo, payload: SharedMessage) {
+        self.heap.push(ScheduledItem::from_shared(ts, seq, payload))
+    }
+
     pub(crate) fn pop(&mut self) -> Option<ScheduledItem> {
         self.heap.pop()
     }
@@ -47,6 +52,14 @@ impl ScheduledItem {
             dispatch_time: ts,
             sequence_num: seq,
             payload: Arc::new(payload),
+        }
+    }
+
+    fn from_shared(ts: Timestamp, seq: SeqNo, payload: SharedMessage) -> Self {
+        Self {
+            dispatch_time: ts,
+            sequence_num: seq,
+            payload,
         }
     }
 
@@ -104,6 +117,26 @@ mod tests {
     #[derive(Clone, Debug, PartialEq)]
     struct OtherMsg(u64);
     impl Message for OtherMsg {}
+
+    // ========================================================================
+    // Shared payload push
+    // ========================================================================
+
+    /// Invariant: push_shared preserves Arc identity and orders like push_msg
+    #[test]
+    fn test_push_shared_preserves_arc_and_order() {
+        let mut sched = Scheduler::new();
+        let shared: SharedMessage = Arc::new(TestMsg(7));
+        let clone = Arc::clone(&shared);
+        sched.push_shared(Timestamp::new(10), SeqNo::from_raw(2), shared);
+        sched.push_msg(Timestamp::new(10), SeqNo::from_raw(1), TestMsg(1));
+
+        let first = sched.pop().unwrap();
+        assert_eq!(first.sequence_num(), SeqNo::from_raw(1));
+        let second = sched.pop().unwrap();
+        assert_eq!(second.sequence_num(), SeqNo::from_raw(2));
+        assert!(Arc::ptr_eq(&second.payload(), &clone));
+    }
 
     // ========================================================================
     // Scheduler state

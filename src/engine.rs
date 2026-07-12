@@ -14,7 +14,7 @@ use crate::{
 /// Process queued work with [`Engine::run`].
 ///
 /// Field layout is flat for borrow splitting across reducers (mutable cache)
-/// and handlers (immutable cache + mutable scheduler/sequence). Actors are Phase 16+.
+/// and handlers (immutable cache + mutable scheduler/sequence), then actors.
 pub struct Engine {
     pub(crate) config: EngineConfig,
     pub(crate) scheduler: Scheduler,
@@ -22,7 +22,6 @@ pub struct Engine {
     pub(crate) cache: Cache,
     pub(crate) reducers: ReducerRegistry,
     pub(crate) handlers: HandlerRegistry,
-    #[expect(dead_code)]
     pub(crate) actors: ActorRegistry,
     pub(crate) graph: ValidatedGraph,
     pub(crate) dispatch_time: Timestamp,
@@ -74,9 +73,10 @@ impl Engine {
     /// 3. Set logical `dispatch_time` (and `SimClock`) from the item
     /// 4. Run matching reducers (mutable cache)
     /// 5. Run matching handlers (immutable cache; direct scheduling)
+    /// 6. Deliver to subscribed inline actors (private state; kernel-stamped output)
     ///
     /// Produced messages are not dispatched recursively; they re-enter only
-    /// via a later pop. Actor callbacks are registered but not delivered yet    u
+    /// via a later pop.
     pub fn run(&mut self) -> Result<(), EngineError> {
         let max_events = self.config.max_events_per_instant();
         let mut same_instant_count = 0usize;
@@ -121,6 +121,9 @@ impl Engine {
                 &mut self.sequence,
                 payload.as_ref(),
             );
+
+            self.actors
+                .dispatch(t, &mut self.scheduler, &mut self.sequence, payload.as_ref());
         }
 
         Ok(())
@@ -1051,17 +1054,20 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 
-    /// Invariant: push_event + run does not invoke actor callbacks (Phase 16)
-    #[test]
-    fn test_run_does_not_invoke_actor_callbacks() {
-        use std::sync::atomic::{AtomicU64, Ordering};
+    // ========================================================================
+    // Inline actors (Phase 18)
+    // ========================================================================
 
+    /// Invariant: push_event + run invokes subscribed actor callbacks
+    #[test]
+    fn test_run_invokes_actor_callbacks() {
         #[derive(Debug)]
         struct Tick;
         impl Message for Tick {}
 
         struct Counter;
-        static HITS: AtomicU64 = AtomicU64::new(0);
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        HITS.store(0, Ordering::SeqCst);
 
         let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
         builder
@@ -1074,6 +1080,484 @@ mod tests {
         let mut engine = builder.build().unwrap();
         engine.push_event(Timestamp::new(0), Tick).unwrap();
         engine.run().unwrap();
+        assert_eq!(HITS.load(Ordering::SeqCst), 1);
+    }
+
+    /// Invariant: actor ignores an unsubscribed message type
+    #[test]
+    fn test_actor_ignores_unsubscribed_type() {
+        #[derive(Debug)]
+        struct MsgA;
+        impl Message for MsgA {}
+        #[derive(Debug)]
+        struct MsgB;
+        impl Message for MsgB {}
+
+        struct S;
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        HITS.store(0, Ordering::SeqCst);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("a", S, |actor| {
+                actor.on(|_s, _ctx, _m: &MsgA| {
+                    HITS.fetch_add(1, Ordering::SeqCst);
+                });
+            })
+            .unwrap();
+        // MsgB needs a consumer so push_event accepts it.
+        builder.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgB| {});
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), MsgB).unwrap();
+        engine.run().unwrap();
         assert_eq!(HITS.load(Ordering::SeqCst), 0);
+    }
+
+    /// Invariant: actor private state persists across messages
+    #[test]
+    fn test_actor_state_persists() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct Counter {
+            n: u64,
+        }
+        static LAST: AtomicUsize = AtomicUsize::new(0);
+        LAST.store(0, Ordering::SeqCst);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("counter", Counter { n: 0 }, |actor| {
+                actor.on(|s, _ctx, _m: &Tick| {
+                    s.n += 1;
+                    LAST.store(s.n as usize, Ordering::SeqCst);
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        let t0 = Timestamp::new(0);
+        engine.push_event(t0, Tick).unwrap();
+        engine.push_event(t0, Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(LAST.load(Ordering::SeqCst), 2);
+    }
+
+    /// Invariant: separate actors have isolated state (same Rust type)
+    #[test]
+    fn test_actor_states_isolated() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct Counter {
+            n: u64,
+        }
+        static A: AtomicUsize = AtomicUsize::new(0);
+        static B: AtomicUsize = AtomicUsize::new(0);
+        A.store(0, Ordering::SeqCst);
+        B.store(0, Ordering::SeqCst);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("a", Counter { n: 0 }, |actor| {
+                actor.on(|s, _ctx, _m: &Tick| {
+                    s.n += 1;
+                    A.store(s.n as usize, Ordering::SeqCst);
+                });
+            })
+            .unwrap();
+        builder
+            .actor("b", Counter { n: 0 }, |actor| {
+                actor.on(|s, _ctx, _m: &Tick| {
+                    s.n += 10;
+                    B.store(s.n as usize, Ordering::SeqCst);
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(A.load(Ordering::SeqCst), 1);
+        assert_eq!(B.load(Ordering::SeqCst), 10);
+    }
+
+    /// Invariant: actors execute after all handlers for the same message
+    #[test]
+    fn test_actors_after_handlers() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct S;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let o1 = Arc::clone(&order);
+        let o2 = Arc::clone(&order);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder.on(move |_ctx: &mut HandlerCtx<'_>, _m: &Tick| {
+            o1.lock().unwrap().push("handler");
+        });
+        builder
+            .actor("a", S, move |actor| {
+                let o2 = Arc::clone(&o2);
+                actor.on(move |_s, _ctx, _m: &Tick| {
+                    o2.lock().unwrap().push("actor");
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["handler", "actor"]);
+    }
+
+    /// Invariant: actors execute in actor registration order
+    #[test]
+    fn test_actors_registration_order() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct S;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let o1 = Arc::clone(&order);
+        let o2 = Arc::clone(&order);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("first", S, move |actor| {
+                let o1 = Arc::clone(&o1);
+                actor.on(move |_s, _ctx, _m: &Tick| {
+                    o1.lock().unwrap().push(1);
+                });
+            })
+            .unwrap();
+        builder
+            .actor("second", S, move |actor| {
+                let o2 = Arc::clone(&o2);
+                actor.on(move |_s, _ctx, _m: &Tick| {
+                    o2.lock().unwrap().push(2);
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    /// Invariant: multiple callbacks on one actor run in registration order
+    #[test]
+    fn test_actor_callback_registration_order() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct S;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let o1 = Arc::clone(&order);
+        let o2 = Arc::clone(&order);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("venue", S, move |actor| {
+                let o1 = Arc::clone(&o1);
+                actor.on(move |_s, _ctx, _m: &Tick| {
+                    o1.lock().unwrap().push(0);
+                });
+                let o2 = Arc::clone(&o2);
+                actor.on(move |_s, _ctx, _m: &Tick| {
+                    o2.lock().unwrap().push(1);
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![0, 1]);
+    }
+
+    /// Invariant: immediate actor output is scheduled at current dispatch time
+    #[test]
+    fn test_actor_immediate_output_at_dispatch_time() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+        #[derive(Debug)]
+        struct Out;
+        impl Message for Out {}
+
+        struct S;
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        SEEN.store(0, Ordering::SeqCst);
+
+        let t = Timestamp::new(50);
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("a", S, |actor| {
+                actor
+                    .on(|_s, ctx, _m: &Tick| {
+                        ctx.send(Out).unwrap();
+                    })
+                    .produces::<Out>();
+            })
+            .unwrap();
+        builder.on(move |ctx: &mut HandlerCtx<'_>, _m: &Out| {
+            assert_eq!(ctx.dispatch_time(), t);
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t, Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+    }
+
+    /// Invariant: actor send_at uses requested future time
+    #[test]
+    fn test_actor_send_at_future_time() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+        #[derive(Debug)]
+        struct Out;
+        impl Message for Out {}
+
+        struct S;
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        SEEN.store(0, Ordering::SeqCst);
+
+        let t0 = Timestamp::new(100);
+        let t1 = Timestamp::new(250);
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("a", S, move |actor| {
+                actor
+                    .on(move |_s, ctx, _m: &Tick| {
+                        ctx.send_at(t1, Out).unwrap();
+                    })
+                    .produces::<Out>();
+            })
+            .unwrap();
+        builder.on(move |ctx: &mut HandlerCtx<'_>, _m: &Out| {
+            assert_eq!(ctx.dispatch_time(), t1);
+            SEEN.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t0, Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.dispatch_time(), t1);
+    }
+
+    /// Invariant: actor same-time output is processed after existing equal-time items
+    #[test]
+    fn test_actor_output_after_existing_same_time() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+        #[derive(Debug)]
+        struct Later;
+        impl Message for Later {}
+        #[derive(Debug)]
+        struct Out;
+        impl Message for Out {}
+
+        struct S;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let o_later = Arc::clone(&order);
+        let o_out = Arc::clone(&order);
+
+        let t = Timestamp::new(10);
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("a", S, |actor| {
+                actor
+                    .on(|_s, ctx, _m: &Tick| {
+                        ctx.send(Out).unwrap();
+                    })
+                    .produces::<Out>();
+            })
+            .unwrap();
+        builder.on(move |_ctx: &mut HandlerCtx<'_>, _m: &Later| {
+            o_later.lock().unwrap().push("later");
+        });
+        builder.on(move |_ctx: &mut HandlerCtx<'_>, _m: &Out| {
+            o_out.lock().unwrap().push("out");
+        });
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t, Tick).unwrap();
+        engine.push_event(t, Later).unwrap();
+        engine.run().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["later", "out"]);
+    }
+
+    /// Invariant: undeclared actor production fails at send
+    #[test]
+    #[should_panic]
+    fn test_actor_undeclared_production_fails() {
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+        #[derive(Debug)]
+        struct Out;
+        impl Message for Out {}
+
+        struct S;
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        // Out has no consumer and is not declared — but undeclared fails first on send.
+        // Need a consumer for Tick only; send(Out) without .produces panics on unwrap.
+        builder
+            .actor("a", S, |actor| {
+                actor.on(|_s, ctx, _m: &Tick| {
+                    ctx.send(Out).unwrap();
+                });
+            })
+            .unwrap();
+        // Build would fail if we declared Out without consumer. Undeclared path:
+        // no .produces, so graph is fine if actor only consumes Tick.
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+    }
+
+    /// Invariant: owned snapshot message feeds actor without cache access
+    #[test]
+    fn test_actor_snapshot_message() {
+        #[derive(Debug, Clone)]
+        struct Snapshot {
+            n: u64,
+        }
+        impl Message for Snapshot {}
+        #[derive(Debug)]
+        struct Seen(u64);
+        impl Message for Seen {}
+
+        struct Worker;
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        SEEN.store(0, Ordering::SeqCst);
+
+        // Snapshot is an owned message; actor never reads the global cache.
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("worker", Worker, |actor| {
+                actor
+                    .on(|_s, ctx, snap: &Snapshot| {
+                        ctx.send(Seen(snap.n)).unwrap();
+                    })
+                    .produces::<Seen>();
+            })
+            .unwrap();
+        builder.on(move |_ctx: &mut HandlerCtx<'_>, s: &Seen| {
+            SEEN.store(s.0 as usize, Ordering::SeqCst);
+        });
+        let mut engine = builder.build().unwrap();
+        engine
+            .push_event(Timestamp::new(0), Snapshot { n: 99 })
+            .unwrap();
+        engine.run().unwrap();
+        assert_eq!(SEEN.load(Ordering::SeqCst), 99);
+    }
+
+    /// Invariant: market data before order updates private actor book first
+    #[test]
+    fn test_sim_venue_market_before_order() {
+        #[derive(Debug)]
+        struct MarketData(u64);
+        impl Message for MarketData {}
+        #[derive(Debug)]
+        struct SubmitOrder;
+        impl Message for SubmitOrder {}
+        #[derive(Debug)]
+        struct Fill(u64);
+        impl Message for Fill {}
+
+        struct SimVenue {
+            last_px: u64,
+        }
+        static FILL_PX: AtomicUsize = AtomicUsize::new(0);
+        FILL_PX.store(0, Ordering::SeqCst);
+
+        let t = Timestamp::new(0);
+        let mut builder = Engine::builder(EngineConfig::backtest(t));
+        builder
+            .actor("sim-venue", SimVenue { last_px: 0 }, |actor| {
+                actor.on(|venue, _ctx, m: &MarketData| {
+                    venue.last_px = m.0;
+                });
+                actor
+                    .on(|venue, ctx, _o: &SubmitOrder| {
+                        ctx.send(Fill(venue.last_px)).unwrap();
+                    })
+                    .produces::<Fill>();
+            })
+            .unwrap();
+        builder.on(move |_ctx: &mut HandlerCtx<'_>, f: &Fill| {
+            FILL_PX.store(f.0 as usize, Ordering::SeqCst);
+        });
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t, MarketData(42)).unwrap();
+        engine.push_event(t, SubmitOrder).unwrap();
+        engine.run().unwrap();
+        assert_eq!(FILL_PX.load(Ordering::SeqCst), 42);
+    }
+
+    /// Invariant: live-style venue need not subscribe to market data
+    #[test]
+    fn test_live_venue_not_forced_to_subscribe_market_data() {
+        #[derive(Debug)]
+        struct SubmitOrder;
+        impl Message for SubmitOrder {}
+        #[derive(Debug)]
+        struct Fill;
+        impl Message for Fill {}
+
+        struct LiveVenue;
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        HITS.store(0, Ordering::SeqCst);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("live-venue", LiveVenue, |actor| {
+                // No MarketData subscription — only orders.
+                actor
+                    .on(|_s, ctx, _o: &SubmitOrder| {
+                        HITS.fetch_add(1, Ordering::SeqCst);
+                        ctx.send(Fill).unwrap();
+                    })
+                    .produces::<Fill>();
+            })
+            .unwrap();
+        builder.on(|_ctx: &mut HandlerCtx<'_>, _f: &Fill| {});
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), SubmitOrder).unwrap();
+        engine.run().unwrap();
+        assert_eq!(HITS.load(Ordering::SeqCst), 1);
+    }
+
+    /// Invariant: same-time actor feedback is bounded by same-instant guard
+    #[test]
+    fn test_actor_same_time_feedback_hits_bound() {
+        #[derive(Debug)]
+        struct Ping;
+        impl Message for Ping {}
+
+        struct Echo;
+        let t0 = Timestamp::new(0);
+        let config = EngineConfig::backtest(t0).with_max_events_per_instant(3);
+        let mut builder = Engine::builder(config);
+        builder
+            .actor("echo", Echo, |actor| {
+                actor
+                    .on(|_s, ctx, _m: &Ping| {
+                        ctx.send(Ping).unwrap();
+                    })
+                    .produces::<Ping>();
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(t0, Ping).unwrap();
+        let err = engine.run().unwrap_err();
+        assert_eq!(err, EngineError::SameInstantLimitExceeded { max_events: 3 });
     }
 }
