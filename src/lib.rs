@@ -10,6 +10,7 @@ pub mod message;
 pub mod output;
 pub mod price;
 pub mod quantity;
+pub mod reducer;
 pub mod schedule;
 pub mod sequence;
 pub mod time;
