@@ -13,6 +13,12 @@ impl LiveClock {
     }
 }
 
+impl Default for LiveClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Clock for LiveClock {
     fn now(&self) -> Timestamp {
         Timestamp::from(SystemTime::now())

@@ -71,7 +71,10 @@ impl ReducerRegistry {
         }
         out
     }
+}
 
+#[cfg(test)]
+impl ReducerRegistry {
     pub(crate) fn consumed_types(&self) -> Vec<TypeId> {
         self.by_type.keys().copied().collect()
     }

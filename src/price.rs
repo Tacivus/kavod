@@ -24,19 +24,19 @@ impl Price {
     }
 
     pub fn checked_add(self, rhs: Price) -> Result<Price, DecimalError> {
-        Ok(Price(self.0.add(rhs.0)?))
+        Ok(Price(self.0.checked_add(rhs.0)?))
     }
 
     pub fn checked_sub(self, rhs: Price) -> Result<Price, DecimalError> {
-        Ok(Price(self.0.sub(rhs.0)?))
+        Ok(Price(self.0.checked_sub(rhs.0)?))
     }
 
     pub fn checked_mul(self, rhs: Price) -> Result<Price, DecimalError> {
-        Ok(Price(self.0.mul(rhs.0)?))
+        Ok(Price(self.0.checked_mul(rhs.0)?))
     }
 
     pub fn checked_div(self, rhs: Price) -> Result<Price, DecimalError> {
-        Ok(Price(self.0.div(rhs.0)?))
+        Ok(Price(self.0.ckecked_div(rhs.0)?))
     }
 }
 
@@ -56,7 +56,7 @@ impl Hash for Price {
 
 impl PartialOrd for Price {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
+        Some(self.cmp(other))
     }
 }
 
@@ -377,7 +377,7 @@ mod tests {
     /// Invariant: sort produces correct ascending order
     #[test]
     fn ord_sort_integrity() {
-        let mut vals = vec![
+        let mut vals = [
             Price::from_str("-2.5").unwrap(),
             Price::from_str("0").unwrap(),
             Price::from_str("2.5").unwrap(),
@@ -437,4 +437,3 @@ mod tests {
         assert!(Price::from_str("").is_err());
     }
 }
-

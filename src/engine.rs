@@ -1,19 +1,10 @@
-use std::{any::TypeId, sync::Arc};
+use std::any::TypeId;
 
 use crate::{
-    builder::EngineBuilder,
-    cache::Cache,
-    clock::Clock,
-    config::EngineConfig,
-    context::reducer::ReducerCtx,
-    error::EngineError,
-    graph::ValidatedGraph,
-    handler::HandlerRegistry,
-    message::{Message, SharedMessage},
-    reducer::ReducerRegistry,
-    schedule::Scheduler,
-    sequence::Sequencer,
-    time::timestamp::Timestamp,
+    builder::EngineBuilder, cache::Cache, clock::Clock, config::EngineConfig,
+    context::reducer::ReducerCtx, error::EngineError, graph::ValidatedGraph,
+    handler::HandlerRegistry, message::Message, reducer::ReducerRegistry, schedule::Scheduler,
+    sequence::Sequencer, time::timestamp::Timestamp,
 };
 
 /// Runtime engine after topology freeze.
@@ -64,7 +55,7 @@ impl Engine {
                 current: self.dispatch_time,
             });
         }
-        self.enqueue_validated(dispatch_time, Arc::new(message))
+        self.enqueue_validated(dispatch_time, message)
     }
 
     /// Drain the scheduler until empty.
@@ -134,10 +125,10 @@ impl Engine {
     pub(crate) fn enqueue_validated(
         &mut self,
         dispatch_time: Timestamp,
-        payload: SharedMessage,
+        payload: impl Message,
     ) -> Result<(), EngineError> {
         let seq = self.sequence.next()?;
-        self.scheduler.push_shared_msg(dispatch_time, seq, payload);
+        self.scheduler.push_msg(dispatch_time, seq, payload);
         Ok(())
     }
 }

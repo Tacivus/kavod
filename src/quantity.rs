@@ -40,7 +40,7 @@ impl Quantity {
     }
 
     pub fn checked_add(self, rhs: Quantity) -> Result<Quantity, QuantityError> {
-        let result = self.0.add(rhs.0)?;
+        let result = self.0.checked_add(rhs.0)?;
         if result.is_negative() {
             return Err(QuantityError::Negative);
         }
@@ -48,7 +48,7 @@ impl Quantity {
     }
 
     pub fn checked_sub(self, rhs: Quantity) -> Result<Quantity, QuantityError> {
-        let result = self.0.sub(rhs.0)?;
+        let result = self.0.checked_sub(rhs.0)?;
         if result.is_negative() {
             return Err(QuantityError::Negative);
         }
@@ -56,7 +56,7 @@ impl Quantity {
     }
 
     pub fn checked_mul(self, rhs: Quantity) -> Result<Quantity, QuantityError> {
-        let result = self.0.mul(rhs.0)?;
+        let result = self.0.checked_mul(rhs.0)?;
         if result.is_negative() {
             return Err(QuantityError::Negative);
         }
@@ -64,7 +64,7 @@ impl Quantity {
     }
 
     pub fn checked_div(self, rhs: Quantity) -> Result<Quantity, QuantityError> {
-        let result = self.0.div(rhs.0)?;
+        let result = self.0.ckecked_div(rhs.0)?;
         if result.is_negative() {
             return Err(QuantityError::Negative);
         }
@@ -88,7 +88,7 @@ impl Hash for Quantity {
 
 impl PartialOrd for Quantity {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(&other.0)
+        Some(self.cmp(other))
     }
 }
 
@@ -468,7 +468,7 @@ mod tests {
     /// Invariant: sort produces correct ascending order
     #[test]
     fn ord_sort_integrity() {
-        let mut vals = vec![
+        let mut vals = [
             Quantity::from_str("2.5").unwrap(),
             Quantity::from_str("0").unwrap(),
             Quantity::from_str("1.0").unwrap(),

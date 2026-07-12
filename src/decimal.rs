@@ -76,7 +76,7 @@ impl Decimal {
         }
         let mut inner = self.inner;
         let mut scale = self.scale;
-        while scale > 0 && inner % 10 == 0 {
+        while scale > 0 && inner.is_multiple_of(10) {
             inner /= 10;
             scale -= 1;
         }
@@ -114,7 +114,7 @@ impl Decimal {
         Ok(Self { inner, scale, sign })
     }
 
-    pub fn add(self, other: Self) -> Result<Self, DecimalError> {
+    pub fn checked_add(self, other: Self) -> Result<Self, DecimalError> {
         // Handle zero case
         if self.is_zero() {
             return Ok(other);
@@ -151,7 +151,7 @@ impl Decimal {
         }
     }
 
-    pub fn sub(self, other: Self) -> Result<Self, DecimalError> {
+    pub fn checked_sub(self, other: Self) -> Result<Self, DecimalError> {
         // Sub is just negated add
         let negated = match other.sign {
             Sign::Positive => Decimal {
@@ -166,10 +166,10 @@ impl Decimal {
             },
             Sign::Zero => other,
         };
-        self.add(negated)
+        self.checked_add(negated)
     }
 
-    pub fn mul(self, other: Self) -> Result<Self, DecimalError> {
+    pub fn checked_mul(self, other: Self) -> Result<Self, DecimalError> {
         // Handle zero case
         if self.is_zero() || other.is_zero() {
             return Ok(Self::ZERO);
@@ -202,7 +202,7 @@ impl Decimal {
         }
     }
 
-    pub fn div(self, other: Self) -> Result<Self, DecimalError> {
+    pub fn ckecked_div(self, other: Self) -> Result<Self, DecimalError> {
         // Handle zero case
         if other.is_zero() {
             return Err(DecimalError::DivisionByZero);
@@ -300,7 +300,7 @@ fn cmp_magnitude(a_inner: u128, a_scale: u8, b_inner: u128, b_scale: u8) -> std:
 }
 
 fn strip_trailing_zeros(mut inner: u128, mut scale: u8) -> (u128, u8) {
-    while scale > 0 && inner % 10 == 0 {
+    while scale > 0 && inner.is_multiple_of(10) {
         inner /= 10;
         scale -= 1;
     }
@@ -1196,7 +1196,7 @@ mod tests {
     /// Invariant: sort works correctly on a list of mixed decimals.
     #[test]
     fn ord_sort_integrity() {
-        let mut vals = vec![
+        let mut vals = [
             Decimal::from_str("0").unwrap(),
             Decimal::from_str("2.5").unwrap(),
             Decimal::from_str("-1.0").unwrap(),
@@ -1316,7 +1316,7 @@ mod tests {
     /// produces the correct ascending order.
     #[test]
     fn ord_sort_integrity_extended() {
-        let mut vals = vec![
+        let mut vals = [
             Decimal::from_raw(u128::MAX, 0, Sign::Negative).unwrap(), // huge negative
             Decimal::from_raw(10u128.pow(31), 5, Sign::Negative).unwrap(), // -10^26
             Decimal::from_raw(1, 0, Sign::Negative).unwrap(),         // -1
@@ -1345,7 +1345,7 @@ mod tests {
     /// Invariant: adding zero to zero yields zero.
     #[test]
     fn add_zero_plus_zero() {
-        let r = Decimal::ZERO.add(Decimal::ZERO).unwrap();
+        let r = Decimal::ZERO.checked_add(Decimal::ZERO).unwrap();
         assert_zero(r);
     }
 
@@ -1353,28 +1353,28 @@ mod tests {
     #[test]
     fn add_zero_plus_positive() {
         let a = Decimal::from_str("5.5").unwrap();
-        assert_eq!(Decimal::ZERO.add(a).unwrap(), a);
+        assert_eq!(Decimal::ZERO.checked_add(a).unwrap(), a);
     }
 
     /// Invariant: adding zero to a negative value returns that value unchanged.
     #[test]
     fn add_zero_plus_negative() {
         let a = Decimal::from_str("-3").unwrap();
-        assert_eq!(Decimal::ZERO.add(a).unwrap(), a);
+        assert_eq!(Decimal::ZERO.checked_add(a).unwrap(), a);
     }
 
     /// Invariant: a positive value plus zero returns itself.
     #[test]
     fn add_positive_plus_zero() {
         let a = Decimal::from_str("7").unwrap();
-        assert_eq!(a.add(Decimal::ZERO).unwrap(), a);
+        assert_eq!(a.checked_add(Decimal::ZERO).unwrap(), a);
     }
 
     /// Invariant: a negative value plus zero returns itself.
     #[test]
     fn add_negative_plus_zero() {
         let a = Decimal::from_str("-9").unwrap();
-        assert_eq!(a.add(Decimal::ZERO).unwrap(), a);
+        assert_eq!(a.checked_add(Decimal::ZERO).unwrap(), a);
     }
 
     /// Invariant: two positive values at the same scale sum correctly.
@@ -1382,7 +1382,7 @@ mod tests {
     fn add_positive_same_scale() {
         let a = Decimal::from_str("1.5").unwrap();
         let b = Decimal::from_str("2.5").unwrap();
-        assert_eq!(a.add(b).unwrap(), Decimal::from_str("4.0").unwrap());
+        assert_eq!(a.checked_add(b).unwrap(), Decimal::from_str("4.0").unwrap());
     }
 
     /// Invariant: two negative values at the same scale sum correctly,
@@ -1391,7 +1391,10 @@ mod tests {
     fn add_negative_same_scale() {
         let a = Decimal::from_str("-1.5").unwrap();
         let b = Decimal::from_str("-2.5").unwrap();
-        assert_eq!(a.add(b).unwrap(), Decimal::from_str("-4.0").unwrap());
+        assert_eq!(
+            a.checked_add(b).unwrap(),
+            Decimal::from_str("-4.0").unwrap()
+        );
     }
 
     /// Invariant: positive values with different scales sum correctly
@@ -1401,21 +1404,21 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1.0")
                 .unwrap()
-                .add(Decimal::from_str("0.5").unwrap())
+                .checked_add(Decimal::from_str("0.5").unwrap())
                 .unwrap(),
             Decimal::from_str("1.5").unwrap()
         );
         assert_eq!(
             Decimal::from_str("1.1")
                 .unwrap()
-                .add(Decimal::from_str("1.09").unwrap())
+                .checked_add(Decimal::from_str("1.09").unwrap())
                 .unwrap(),
             Decimal::from_str("2.19").unwrap()
         );
         assert_eq!(
             Decimal::from_str("100")
                 .unwrap()
-                .add(Decimal::from_str("0.001").unwrap())
+                .checked_add(Decimal::from_str("0.001").unwrap())
                 .unwrap(),
             Decimal::from_str("100.001").unwrap()
         );
@@ -1427,14 +1430,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("-1.0")
                 .unwrap()
-                .add(Decimal::from_str("-0.5").unwrap())
+                .checked_add(Decimal::from_str("-0.5").unwrap())
                 .unwrap(),
             Decimal::from_str("-1.5").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-1.1")
                 .unwrap()
-                .add(Decimal::from_str("-1.09").unwrap())
+                .checked_add(Decimal::from_str("-1.09").unwrap())
                 .unwrap(),
             Decimal::from_str("-2.19").unwrap()
         );
@@ -1447,21 +1450,21 @@ mod tests {
         assert_eq!(
             Decimal::from_str("3.5")
                 .unwrap()
-                .add(Decimal::from_str("-2.5").unwrap())
+                .checked_add(Decimal::from_str("-2.5").unwrap())
                 .unwrap(),
             Decimal::from_str("1.0").unwrap()
         );
         assert_eq!(
             Decimal::from_str("2.5")
                 .unwrap()
-                .add(Decimal::from_str("-3.5").unwrap())
+                .checked_add(Decimal::from_str("-3.5").unwrap())
                 .unwrap(),
             Decimal::from_str("-1.0").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-3.5")
                 .unwrap()
-                .add(Decimal::from_str("2.5").unwrap())
+                .checked_add(Decimal::from_str("2.5").unwrap())
                 .unwrap(),
             Decimal::from_str("-1.0").unwrap()
         );
@@ -1473,14 +1476,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1.1")
                 .unwrap()
-                .add(Decimal::from_str("-1.09").unwrap())
+                .checked_add(Decimal::from_str("-1.09").unwrap())
                 .unwrap(),
             Decimal::from_str("0.01").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-1.1")
                 .unwrap()
-                .add(Decimal::from_str("1.09").unwrap())
+                .checked_add(Decimal::from_str("1.09").unwrap())
                 .unwrap(),
             Decimal::from_str("-0.01").unwrap()
         );
@@ -1492,14 +1495,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("5")
                 .unwrap()
-                .add(Decimal::from_str("-5").unwrap())
+                .checked_add(Decimal::from_str("-5").unwrap())
                 .unwrap(),
             Decimal::ZERO
         );
         assert_eq!(
             Decimal::from_str("1.00")
                 .unwrap()
-                .add(Decimal::from_str("-1.0").unwrap())
+                .checked_add(Decimal::from_str("-1.0").unwrap())
                 .unwrap(),
             Decimal::ZERO
         );
@@ -1507,7 +1510,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1000000.123456789")
                 .unwrap()
-                .add(Decimal::from_str("-1000000.123456789").unwrap())
+                .checked_add(Decimal::from_str("-1000000.123456789").unwrap())
                 .unwrap(),
             Decimal::ZERO
         );
@@ -1519,7 +1522,7 @@ mod tests {
     fn add_catastrophic_cancellation() {
         let a = Decimal::from_raw(1000000_123456789, 9, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1000000_123456788, 9, Sign::Negative).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_positive(r, 1, 9, "0.000000001");
     }
 
@@ -1529,7 +1532,7 @@ mod tests {
     fn add_rescale_up_overflow() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, 1, Sign::Positive).unwrap();
-        assert_eq!(a.add(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_add(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: rescale overflow also triggers when the tiny operand has
@@ -1538,7 +1541,7 @@ mod tests {
     fn add_rescale_up_overflow_max_scale() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        assert_eq!(a.add(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_add(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: rescaling the large operand to match the tiny one also
@@ -1547,7 +1550,7 @@ mod tests {
     fn add_rescale_up_overflow_reverse_args() {
         let a = Decimal::from_raw(1, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
-        assert_eq!(a.add(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_add(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: adding two values whose sum exceeds u128::MAX returns Overflow.
@@ -1555,7 +1558,7 @@ mod tests {
     fn add_sum_overflow() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, 0, Sign::Positive).unwrap();
-        assert_eq!(a.add(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_add(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: when two large same-scale values sum to exactly u128::MAX,
@@ -1564,7 +1567,7 @@ mod tests {
     fn add_sum_at_u128_max() {
         let a = Decimal::from_raw(u128::MAX - 1, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, 0, Sign::Positive).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_positive(r, u128::MAX, 0, &u128::MAX.to_string());
     }
 
@@ -1573,7 +1576,7 @@ mod tests {
     fn add_sum_at_u128_max_negative() {
         let a = Decimal::from_raw(u128::MAX - 1, 0, Sign::Negative).unwrap();
         let b = Decimal::from_raw(1, 0, Sign::Negative).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_negative(r, u128::MAX, 0, &format!("-{}", u128::MAX));
     }
 
@@ -1582,7 +1585,7 @@ mod tests {
     fn add_commutative() {
         let a = Decimal::from_str("123.45").unwrap();
         let b = Decimal::from_str("-67.89").unwrap();
-        assert_eq!(a.add(b).unwrap(), b.add(a).unwrap());
+        assert_eq!(a.checked_add(b).unwrap(), b.checked_add(a).unwrap());
     }
 
     /// Invariant: zero is the additive identity for non-zero values.
@@ -1590,8 +1593,8 @@ mod tests {
     fn add_zero_identity() {
         for s in ["0", "1", "-1", "999.999", "-0.001"] {
             let v = Decimal::from_str(s).unwrap();
-            assert_eq!(v.add(Decimal::ZERO).unwrap(), v);
-            assert_eq!(Decimal::ZERO.add(v).unwrap(), v);
+            assert_eq!(v.checked_add(Decimal::ZERO).unwrap(), v);
+            assert_eq!(Decimal::ZERO.checked_add(v).unwrap(), v);
         }
     }
 
@@ -1606,7 +1609,7 @@ mod tests {
                 Sign::Zero => Decimal::ZERO,
             };
             assert_eq!(
-                v.add(neg).unwrap(),
+                v.checked_add(neg).unwrap(),
                 Decimal::ZERO,
                 "inverse failed for {}",
                 v
@@ -1620,7 +1623,7 @@ mod tests {
     fn add_negative_sum_overflow() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Negative).unwrap();
         let b = Decimal::from_raw(1, 0, Sign::Negative).unwrap();
-        assert_eq!(a.add(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_add(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: two positive values at MAX_SCALE sum correctly without
@@ -1629,7 +1632,7 @@ mod tests {
     fn add_both_max_scale_positive() {
         let a = Decimal::from_raw(3, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_positive(
             r,
             5,
@@ -1643,7 +1646,7 @@ mod tests {
     fn add_both_max_scale_negative() {
         let a = Decimal::from_raw(3, Decimal::MAX_SCALE, Sign::Negative).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Negative).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_negative(
             r,
             5,
@@ -1658,7 +1661,7 @@ mod tests {
     fn add_opposite_signs_max_scale() {
         let a = Decimal::from_raw(5, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Negative).unwrap();
-        let r = a.add(b).unwrap();
+        let r = a.checked_add(b).unwrap();
         assert_positive(
             r,
             3,
@@ -1674,14 +1677,14 @@ mod tests {
     /// Invariant: zero minus zero is zero.
     #[test]
     fn sub_zero_minus_zero() {
-        assert_zero(Decimal::ZERO.sub(Decimal::ZERO).unwrap());
+        assert_zero(Decimal::ZERO.checked_sub(Decimal::ZERO).unwrap());
     }
 
     /// Invariant: zero minus a positive yields the negative of that value.
     #[test]
     fn sub_zero_minus_positive() {
         let b = Decimal::from_str("5.5").unwrap();
-        let r = Decimal::ZERO.sub(b).unwrap();
+        let r = Decimal::ZERO.checked_sub(b).unwrap();
         assert_negative(r, 55, 1, "-5.5");
     }
 
@@ -1689,7 +1692,7 @@ mod tests {
     #[test]
     fn sub_zero_minus_negative() {
         let b = Decimal::from_str("-3").unwrap();
-        let r = Decimal::ZERO.sub(b).unwrap();
+        let r = Decimal::ZERO.checked_sub(b).unwrap();
         assert_positive(r, 3, 0, "3");
     }
 
@@ -1697,11 +1700,17 @@ mod tests {
     #[test]
     fn sub_x_minus_zero() {
         assert_eq!(
-            Decimal::from_str("7").unwrap().sub(Decimal::ZERO).unwrap(),
+            Decimal::from_str("7")
+                .unwrap()
+                .checked_sub(Decimal::ZERO)
+                .unwrap(),
             Decimal::from_str("7").unwrap()
         );
         assert_eq!(
-            Decimal::from_str("-9").unwrap().sub(Decimal::ZERO).unwrap(),
+            Decimal::from_str("-9")
+                .unwrap()
+                .checked_sub(Decimal::ZERO)
+                .unwrap(),
             Decimal::from_str("-9").unwrap()
         );
     }
@@ -1712,16 +1721,16 @@ mod tests {
         assert_zero(
             Decimal::from_str("42.5")
                 .unwrap()
-                .sub(Decimal::from_str("42.5").unwrap())
+                .checked_sub(Decimal::from_str("42.5").unwrap())
                 .unwrap(),
         );
         assert_zero(
             Decimal::from_str("-42.5")
                 .unwrap()
-                .sub(Decimal::from_str("-42.5").unwrap())
+                .checked_sub(Decimal::from_str("-42.5").unwrap())
                 .unwrap(),
         );
-        assert_zero(Decimal::ZERO.sub(Decimal::ZERO).unwrap());
+        assert_zero(Decimal::ZERO.checked_sub(Decimal::ZERO).unwrap());
     }
 
     /// Invariant: subtracting a smaller positive from a larger yields a positive result.
@@ -1730,7 +1739,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("3")
                 .unwrap()
-                .sub(Decimal::from_str("1").unwrap())
+                .checked_sub(Decimal::from_str("1").unwrap())
                 .unwrap(),
             Decimal::from_str("2").unwrap()
         );
@@ -1742,7 +1751,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1")
                 .unwrap()
-                .sub(Decimal::from_str("3").unwrap())
+                .checked_sub(Decimal::from_str("3").unwrap())
                 .unwrap(),
             Decimal::from_str("-2").unwrap()
         );
@@ -1755,14 +1764,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("-3")
                 .unwrap()
-                .sub(Decimal::from_str("-1").unwrap())
+                .checked_sub(Decimal::from_str("-1").unwrap())
                 .unwrap(),
             Decimal::from_str("-2").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-1")
                 .unwrap()
-                .sub(Decimal::from_str("-3").unwrap())
+                .checked_sub(Decimal::from_str("-3").unwrap())
                 .unwrap(),
             Decimal::from_str("2").unwrap()
         );
@@ -1774,7 +1783,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("3")
                 .unwrap()
-                .sub(Decimal::from_str("-1").unwrap())
+                .checked_sub(Decimal::from_str("-1").unwrap())
                 .unwrap(),
             Decimal::from_str("4").unwrap()
         );
@@ -1786,7 +1795,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("-3")
                 .unwrap()
-                .sub(Decimal::from_str("1").unwrap())
+                .checked_sub(Decimal::from_str("1").unwrap())
                 .unwrap(),
             Decimal::from_str("-4").unwrap()
         );
@@ -1798,14 +1807,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1.1")
                 .unwrap()
-                .sub(Decimal::from_str("1.09").unwrap())
+                .checked_sub(Decimal::from_str("1.09").unwrap())
                 .unwrap(),
             Decimal::from_str("0.01").unwrap()
         );
         assert_eq!(
             Decimal::from_str("1.09")
                 .unwrap()
-                .sub(Decimal::from_str("1.1").unwrap())
+                .checked_sub(Decimal::from_str("1.1").unwrap())
                 .unwrap(),
             Decimal::from_str("-0.01").unwrap()
         );
@@ -1816,7 +1825,7 @@ mod tests {
     fn sub_rescale_overflow() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, Decimal::MAX_SCALE, Sign::Negative).unwrap();
-        assert_eq!(a.sub(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_sub(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: sub(a, b) = -(sub(b, a)) — magnitudes match, signs opposite.
@@ -1824,8 +1833,8 @@ mod tests {
     fn sub_antisymmetric() {
         let a = Decimal::from_str("7.3").unwrap();
         let b = Decimal::from_str("2.1").unwrap();
-        let r1 = a.sub(b).unwrap();
-        let r2 = b.sub(a).unwrap();
+        let r1 = a.checked_sub(b).unwrap();
+        let r2 = b.checked_sub(a).unwrap();
         assert_eq!(r1.normalized_parts(), r2.normalized_parts());
         assert_ne!(r1.sign(), r2.sign());
     }
@@ -1835,9 +1844,9 @@ mod tests {
     fn sub_add_roundtrip() {
         let a = Decimal::from_str("100.5").unwrap();
         let b = Decimal::from_str("23.25").unwrap();
-        let sum = a.add(b).unwrap();
-        assert_eq!(sum.sub(b).unwrap(), a);
-        assert_eq!(sum.sub(a).unwrap(), b);
+        let sum = a.checked_add(b).unwrap();
+        assert_eq!(sum.checked_sub(b).unwrap(), a);
+        assert_eq!(sum.checked_sub(a).unwrap(), b);
     }
 
     /// Invariant: subtracting values at MAX_SCALE works without rescaling
@@ -1846,7 +1855,7 @@ mod tests {
     fn sub_both_max_scale() {
         let a = Decimal::from_raw(5, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        let r = a.sub(b).unwrap();
+        let r = a.checked_sub(b).unwrap();
         assert_positive(
             r,
             3,
@@ -1861,7 +1870,7 @@ mod tests {
     fn sub_opposite_signs_max_scale() {
         let a = Decimal::from_raw(3, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Negative).unwrap();
-        let r = a.sub(b).unwrap();
+        let r = a.checked_sub(b).unwrap();
         assert_positive(
             r,
             5,
@@ -1878,11 +1887,11 @@ mod tests {
     #[test]
     fn mul_zero() {
         let x = Decimal::from_str("5").unwrap();
-        assert_zero(Decimal::ZERO.mul(x).unwrap());
-        assert_zero(x.mul(Decimal::ZERO).unwrap());
-        assert_zero(Decimal::ZERO.mul(Decimal::ZERO).unwrap());
+        assert_zero(Decimal::ZERO.checked_mul(x).unwrap());
+        assert_zero(x.checked_mul(Decimal::ZERO).unwrap());
+        assert_zero(Decimal::ZERO.checked_mul(Decimal::ZERO).unwrap());
         let neg = Decimal::from_str("-5").unwrap();
-        assert_zero(Decimal::ZERO.mul(neg).unwrap());
+        assert_zero(Decimal::ZERO.checked_mul(neg).unwrap());
     }
 
     /// Invariant: multiplying by one preserves the value.
@@ -1890,14 +1899,14 @@ mod tests {
     fn mul_identity() {
         let one = Decimal::from_str("1").unwrap();
         assert_eq!(
-            Decimal::from_str("42.5").unwrap().mul(one).unwrap(),
+            Decimal::from_str("42.5").unwrap().checked_mul(one).unwrap(),
             Decimal::from_str("42.5").unwrap()
         );
         assert_eq!(
-            one.mul(Decimal::from_str("42.5").unwrap()).unwrap(),
+            one.checked_mul(Decimal::from_str("42.5").unwrap()).unwrap(),
             Decimal::from_str("42.5").unwrap()
         );
-        assert_eq!(one.mul(one).unwrap(), one);
+        assert_eq!(one.checked_mul(one).unwrap(), one);
     }
 
     /// Invariant: multiplying by -1 negates the value.
@@ -1905,15 +1914,21 @@ mod tests {
     fn mul_by_neg_one() {
         let neg_one = Decimal::from_str("-1").unwrap();
         assert_eq!(
-            Decimal::from_str("42.5").unwrap().mul(neg_one).unwrap(),
+            Decimal::from_str("42.5")
+                .unwrap()
+                .checked_mul(neg_one)
+                .unwrap(),
             Decimal::from_str("-42.5").unwrap()
         );
         assert_eq!(
-            Decimal::from_str("-42.5").unwrap().mul(neg_one).unwrap(),
+            Decimal::from_str("-42.5")
+                .unwrap()
+                .checked_mul(neg_one)
+                .unwrap(),
             Decimal::from_str("42.5").unwrap()
         );
         assert_eq!(
-            neg_one.mul(neg_one).unwrap(),
+            neg_one.checked_mul(neg_one).unwrap(),
             Decimal::from_str("1").unwrap()
         );
     }
@@ -1924,7 +1939,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("2")
                 .unwrap()
-                .mul(Decimal::from_str("3").unwrap())
+                .checked_mul(Decimal::from_str("3").unwrap())
                 .unwrap(),
             Decimal::from_str("6").unwrap()
         );
@@ -1936,21 +1951,21 @@ mod tests {
         assert_eq!(
             Decimal::from_str("0.5")
                 .unwrap()
-                .mul(Decimal::from_str("0.5").unwrap())
+                .checked_mul(Decimal::from_str("0.5").unwrap())
                 .unwrap(),
             Decimal::from_str("0.25").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-0.5")
                 .unwrap()
-                .mul(Decimal::from_str("0.5").unwrap())
+                .checked_mul(Decimal::from_str("0.5").unwrap())
                 .unwrap(),
             Decimal::from_str("-0.25").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-0.5")
                 .unwrap()
-                .mul(Decimal::from_str("-0.5").unwrap())
+                .checked_mul(Decimal::from_str("-0.5").unwrap())
                 .unwrap(),
             Decimal::from_str("0.25").unwrap()
         );
@@ -1963,14 +1978,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("0.1")
                 .unwrap()
-                .mul(Decimal::from_str("0.1").unwrap())
+                .checked_mul(Decimal::from_str("0.1").unwrap())
                 .unwrap(),
             Decimal::from_str("0.01").unwrap()
         );
         // 0.0001 * 0.0001 = 0.00000001 (inner=1, scale=8)
         let r = Decimal::from_str("0.0001")
             .unwrap()
-            .mul(Decimal::from_str("0.0001").unwrap())
+            .checked_mul(Decimal::from_str("0.0001").unwrap())
             .unwrap();
         assert_positive(r, 1, 8, "0.00000001");
     }
@@ -1983,7 +1998,7 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1.00")
                 .unwrap()
-                .mul(Decimal::from_str("1.00").unwrap())
+                .checked_mul(Decimal::from_str("1.00").unwrap())
                 .unwrap(),
             Decimal::from_str("1").unwrap()
         );
@@ -1997,7 +2012,7 @@ mod tests {
         // drop 2 → 3/10^38
         let a = Decimal::from_raw(31, 10, Sign::Positive).unwrap();
         let b = Decimal::from_raw(11, 30, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_positive(
             r,
             3,
@@ -2013,7 +2028,7 @@ mod tests {
         // 13/10^20 * 7/10^20 = 91/10^40 → no trailing zeros → drop 2 → 0
         let a = Decimal::from_raw(13, 20, Sign::Positive).unwrap();
         let b = Decimal::from_raw(7, 20, Sign::Positive).unwrap();
-        assert_zero(a.mul(b).unwrap());
+        assert_zero(a.checked_mul(b).unwrap());
     }
 
     /// Invariant: inner product overflow returns Overflow.
@@ -2021,7 +2036,7 @@ mod tests {
     fn mul_inner_overflow() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, 0, Sign::Positive).unwrap();
-        assert_eq!(a.mul(b), Err(DecimalError::Overflow));
+        assert_eq!(a.checked_mul(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: when the product fits just under u128::MAX, it succeeds.
@@ -2029,7 +2044,7 @@ mod tests {
     fn mul_inner_borderline() {
         let a = Decimal::from_raw(u128::MAX / 2, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, 0, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_eq!(r.as_raw(), (u128::MAX / 2) * 2);
     }
 
@@ -2038,7 +2053,7 @@ mod tests {
     fn mul_scale_at_max() {
         let a = Decimal::from_raw(2, 19, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 19, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_positive(
             r,
             6,
@@ -2052,7 +2067,7 @@ mod tests {
     fn mul_commutative() {
         let a = Decimal::from_str("123.45").unwrap();
         let b = Decimal::from_str("-67.89").unwrap();
-        assert_eq!(a.mul(b).unwrap(), b.mul(a).unwrap());
+        assert_eq!(a.checked_mul(b).unwrap(), b.checked_mul(a).unwrap());
     }
 
     /// Invariant: when scale overflows and truncation occurs on a negative
@@ -2061,7 +2076,7 @@ mod tests {
     fn mul_negative_scale_overflow_truncation() {
         let a = Decimal::from_raw(31, 10, Sign::Negative).unwrap();
         let b = Decimal::from_raw(11, 30, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_negative(
             r,
             3,
@@ -2076,7 +2091,7 @@ mod tests {
     fn mul_negative_negative_scale_overflow_truncation_to_zero() {
         let a = Decimal::from_raw(13, 20, Sign::Negative).unwrap();
         let b = Decimal::from_raw(7, 20, Sign::Negative).unwrap();
-        assert_zero(a.mul(b).unwrap());
+        assert_zero(a.checked_mul(b).unwrap());
     }
 
     /// Invariant: multiplication accumulates scales correctly (not
@@ -2086,7 +2101,7 @@ mod tests {
         // 0.002 (inner=2, scale=3) * 0.03 (inner=3, scale=2) = 0.00006 (inner=6, scale=5)
         let a = Decimal::from_raw(2, 3, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 2, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_positive(r, 6, 5, "0.00006");
     }
 
@@ -2098,7 +2113,7 @@ mod tests {
         // 10^19/10^36 * 10^19/10^36 = 10^38/10^72 → strip 38 zeros → 1/10^34
         let a = Decimal::from_raw(10u128.pow(19), 36, Sign::Positive).unwrap();
         let b = Decimal::from_raw(10u128.pow(19), 36, Sign::Positive).unwrap();
-        let r = a.mul(b).unwrap();
+        let r = a.checked_mul(b).unwrap();
         assert_positive(r, 1, 34, "0.0000000000000000000000000000000001");
     }
 
@@ -2112,12 +2127,12 @@ mod tests {
         // 12 / 10^38 = 0, so result is ZERO.
         let a = Decimal::from_raw(3, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(4, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        assert_zero(a.mul(b).unwrap());
+        assert_zero(a.checked_mul(b).unwrap());
 
         // 5/10^38 * (u128::MAX/3) = huge/10^38 → inner product overflow → Overflow
         let c = Decimal::from_raw(5, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let d = Decimal::from_raw(u128::MAX / 3, 0, Sign::Positive).unwrap();
-        assert!(c.mul(d).is_err());
+        assert!(c.checked_mul(d).is_err());
     }
 
     // ------------------------------------------------------------------------
@@ -2128,15 +2143,15 @@ mod tests {
     #[test]
     fn div_by_zero() {
         assert_eq!(
-            Decimal::from_str("5").unwrap().div(Decimal::ZERO),
+            Decimal::from_str("5").unwrap().ckecked_div(Decimal::ZERO),
             Err(DecimalError::DivisionByZero)
         );
         assert_eq!(
-            Decimal::from_str("-5").unwrap().div(Decimal::ZERO),
+            Decimal::from_str("-5").unwrap().ckecked_div(Decimal::ZERO),
             Err(DecimalError::DivisionByZero)
         );
         assert_eq!(
-            Decimal::ZERO.div(Decimal::ZERO),
+            Decimal::ZERO.ckecked_div(Decimal::ZERO),
             Err(DecimalError::DivisionByZero)
         );
     }
@@ -2144,8 +2159,16 @@ mod tests {
     /// Invariant: zero divided by any non-zero value is zero.
     #[test]
     fn div_zero_dividend() {
-        assert_zero(Decimal::ZERO.div(Decimal::from_str("5").unwrap()).unwrap());
-        assert_zero(Decimal::ZERO.div(Decimal::from_str("-5").unwrap()).unwrap());
+        assert_zero(
+            Decimal::ZERO
+                .ckecked_div(Decimal::from_str("5").unwrap())
+                .unwrap(),
+        );
+        assert_zero(
+            Decimal::ZERO
+                .ckecked_div(Decimal::from_str("-5").unwrap())
+                .unwrap(),
+        );
     }
 
     /// Invariant: exact integer division yields the correct integer quotient.
@@ -2154,14 +2177,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("6")
                 .unwrap()
-                .div(Decimal::from_str("3").unwrap())
+                .ckecked_div(Decimal::from_str("3").unwrap())
                 .unwrap(),
             Decimal::from_str("2").unwrap()
         );
         assert_eq!(
             Decimal::from_str("10")
                 .unwrap()
-                .div(Decimal::from_str("4").unwrap())
+                .ckecked_div(Decimal::from_str("4").unwrap())
                 .unwrap(),
             Decimal::from_str("2.5").unwrap()
         );
@@ -2174,20 +2197,20 @@ mod tests {
         assert_eq!(
             Decimal::from_str("1")
                 .unwrap()
-                .div(Decimal::from_str("2").unwrap())
+                .ckecked_div(Decimal::from_str("2").unwrap())
                 .unwrap(),
             Decimal::from_str("0.5").unwrap()
         );
         assert_eq!(
             Decimal::from_str("1")
                 .unwrap()
-                .div(Decimal::from_str("4").unwrap())
+                .ckecked_div(Decimal::from_str("4").unwrap())
                 .unwrap(),
             Decimal::from_str("0.25").unwrap()
         );
         let r = Decimal::from_str("1")
             .unwrap()
-            .div(Decimal::from_str("8").unwrap())
+            .ckecked_div(Decimal::from_str("8").unwrap())
             .unwrap();
         assert_positive(r, 125, 3, "0.125");
     }
@@ -2198,7 +2221,7 @@ mod tests {
     fn div_non_terminating_one_third() {
         let r = Decimal::from_str("1")
             .unwrap()
-            .div(Decimal::from_str("3").unwrap())
+            .ckecked_div(Decimal::from_str("3").unwrap())
             .unwrap();
         assert_eq!(r.scale(), Decimal::MAX_SCALE);
         assert_eq!(r.sign(), Sign::Positive);
@@ -2211,7 +2234,7 @@ mod tests {
     fn div_non_terminating_one_seventh() {
         let r = Decimal::from_str("1")
             .unwrap()
-            .div(Decimal::from_str("7").unwrap())
+            .ckecked_div(Decimal::from_str("7").unwrap())
             .unwrap();
         assert_eq!(r.scale(), Decimal::MAX_SCALE);
         assert_eq!(r.sign(), Sign::Positive);
@@ -2223,7 +2246,7 @@ mod tests {
         for s in ["42.5", "-42.5", "1.00", "0.001"] {
             let v = Decimal::from_str(s).unwrap();
             assert_eq!(
-                v.div(v).unwrap(),
+                v.ckecked_div(v).unwrap(),
                 Decimal::from_str("1").unwrap(),
                 "failed for {s}"
             );
@@ -2235,11 +2258,14 @@ mod tests {
     fn div_by_one() {
         let one = Decimal::from_str("1").unwrap();
         assert_eq!(
-            Decimal::from_str("42.5").unwrap().div(one).unwrap(),
+            Decimal::from_str("42.5").unwrap().ckecked_div(one).unwrap(),
             Decimal::from_str("42.5").unwrap()
         );
         assert_eq!(
-            Decimal::from_str("-42.5").unwrap().div(one).unwrap(),
+            Decimal::from_str("-42.5")
+                .unwrap()
+                .ckecked_div(one)
+                .unwrap(),
             Decimal::from_str("-42.5").unwrap()
         );
     }
@@ -2249,11 +2275,17 @@ mod tests {
     fn div_by_neg_one() {
         let neg_one = Decimal::from_str("-1").unwrap();
         assert_eq!(
-            Decimal::from_str("42.5").unwrap().div(neg_one).unwrap(),
+            Decimal::from_str("42.5")
+                .unwrap()
+                .ckecked_div(neg_one)
+                .unwrap(),
             Decimal::from_str("-42.5").unwrap()
         );
         assert_eq!(
-            Decimal::from_str("-42.5").unwrap().div(neg_one).unwrap(),
+            Decimal::from_str("-42.5")
+                .unwrap()
+                .ckecked_div(neg_one)
+                .unwrap(),
             Decimal::from_str("42.5").unwrap()
         );
     }
@@ -2264,21 +2296,21 @@ mod tests {
         assert_eq!(
             Decimal::from_str("-6")
                 .unwrap()
-                .div(Decimal::from_str("3").unwrap())
+                .ckecked_div(Decimal::from_str("3").unwrap())
                 .unwrap(),
             Decimal::from_str("-2").unwrap()
         );
         assert_eq!(
             Decimal::from_str("6")
                 .unwrap()
-                .div(Decimal::from_str("-3").unwrap())
+                .ckecked_div(Decimal::from_str("-3").unwrap())
                 .unwrap(),
             Decimal::from_str("-2").unwrap()
         );
         assert_eq!(
             Decimal::from_str("-6")
                 .unwrap()
-                .div(Decimal::from_str("-3").unwrap())
+                .ckecked_div(Decimal::from_str("-3").unwrap())
                 .unwrap(),
             Decimal::from_str("2").unwrap()
         );
@@ -2291,14 +2323,14 @@ mod tests {
         assert_eq!(
             Decimal::from_str("0.2")
                 .unwrap()
-                .div(Decimal::from_str("0.01").unwrap())
+                .ckecked_div(Decimal::from_str("0.01").unwrap())
                 .unwrap(),
             Decimal::from_str("20").unwrap()
         );
         assert_eq!(
             Decimal::from_str("2")
                 .unwrap()
-                .div(Decimal::from_str("0.001").unwrap())
+                .ckecked_div(Decimal::from_str("0.001").unwrap())
                 .unwrap(),
             Decimal::from_str("2000").unwrap()
         );
@@ -2311,21 +2343,21 @@ mod tests {
         assert_eq!(
             Decimal::from_str("0.01")
                 .unwrap()
-                .div(Decimal::from_str("0.2").unwrap())
+                .ckecked_div(Decimal::from_str("0.2").unwrap())
                 .unwrap(),
             Decimal::from_str("0.05").unwrap()
         );
         assert_eq!(
             Decimal::from_str("0.001")
                 .unwrap()
-                .div(Decimal::from_str("1").unwrap())
+                .ckecked_div(Decimal::from_str("1").unwrap())
                 .unwrap(),
             Decimal::from_str("0.001").unwrap()
         );
         assert_eq!(
             Decimal::from_str("0.01")
                 .unwrap()
-                .div(Decimal::from_str("2").unwrap())
+                .ckecked_div(Decimal::from_str("2").unwrap())
                 .unwrap(),
             Decimal::from_str("0.005").unwrap()
         );
@@ -2337,14 +2369,14 @@ mod tests {
     fn div_tiny_result_is_zero() {
         let a = Decimal::from_raw(1, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
-        assert_zero(a.div(b).unwrap());
+        assert_zero(a.ckecked_div(b).unwrap());
     }
 
     /// Invariant: dividing u128::MAX by 1 returns u128::MAX unchanged.
     #[test]
     fn div_large_result() {
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
-        let r = a.div(Decimal::from_str("1").unwrap()).unwrap();
+        let r = a.ckecked_div(Decimal::from_str("1").unwrap()).unwrap();
         assert_positive(r, u128::MAX, 0, &u128::MAX.to_string());
     }
 
@@ -2355,7 +2387,7 @@ mod tests {
         // u128::MAX / (1/10^38) = u128::MAX * 10^38 → overflow
         let a = Decimal::from_raw(u128::MAX, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(1, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        assert_eq!(a.div(b), Err(DecimalError::Overflow));
+        assert_eq!(a.ckecked_div(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: when the accumulated fractional digits overflow u128
@@ -2365,7 +2397,7 @@ mod tests {
         // 10^35 / 3: int_quot is huge (~34 digits), fractional digits overflow fast
         let a = Decimal::from_raw(10u128.pow(35), 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 0, Sign::Positive).unwrap();
-        let r = a.div(b);
+        let r = a.ckecked_div(b);
         match r {
             Ok(val) => {
                 let expected_min = 10u128.pow(35) / 3;
@@ -2381,7 +2413,7 @@ mod tests {
     fn div_all_zero_fractional_digits() {
         let r = Decimal::from_str("1")
             .unwrap()
-            .div(Decimal::from_str("1000000").unwrap())
+            .ckecked_div(Decimal::from_str("1000000").unwrap())
             .unwrap();
         assert_positive(r, 1, 6, "0.000001");
     }
@@ -2392,8 +2424,12 @@ mod tests {
         let a = Decimal::from_str("3").unwrap();
         let b = Decimal::from_str("4").unwrap();
         let c = Decimal::from_str("5").unwrap();
-        let left = a.mul(b.add(c).unwrap()).unwrap();
-        let right = a.mul(b).unwrap().add(a.mul(c).unwrap()).unwrap();
+        let left = a.checked_mul(b.checked_add(c).unwrap()).unwrap();
+        let right = a
+            .checked_mul(b)
+            .unwrap()
+            .checked_add(a.checked_mul(c).unwrap())
+            .unwrap();
         assert_eq!(left, right);
     }
 
@@ -2403,8 +2439,8 @@ mod tests {
     fn property_div_mul_roundtrip() {
         let a = Decimal::from_str("100").unwrap();
         let b = Decimal::from_str("25").unwrap();
-        let r = a.div(b).unwrap();
-        assert_eq!(r.mul(b).unwrap(), a);
+        let r = a.ckecked_div(b).unwrap();
+        assert_eq!(r.checked_mul(b).unwrap(), a);
     }
 
     /// Invariant: toggling sign via multiplication by -1 produces a value
@@ -2414,7 +2450,7 @@ mod tests {
         let neg_one = Decimal::from_str("-1").unwrap();
         for s in ["42.5", "0.001", "1000000"] {
             let v = Decimal::from_str(s).unwrap();
-            let toggled = neg_one.mul(v).unwrap();
+            let toggled = neg_one.checked_mul(v).unwrap();
             assert_eq!(v.normalized_parts(), toggled.normalized_parts());
             match (v.sign(), toggled.sign()) {
                 (Sign::Positive, Sign::Negative)
@@ -2432,7 +2468,7 @@ mod tests {
         // 6/10^38 ÷ 2/10^38 = 3
         let a = Decimal::from_raw(6, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(2, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        let r = a.div(b).unwrap();
+        let r = a.ckecked_div(b).unwrap();
         assert_positive(r, 3, 0, "3");
     }
 
@@ -2442,7 +2478,7 @@ mod tests {
     fn div_both_max_scale_non_terminating() {
         let a = Decimal::from_raw(1, Decimal::MAX_SCALE, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, Decimal::MAX_SCALE, Sign::Positive).unwrap();
-        let r = a.div(b).unwrap();
+        let r = a.ckecked_div(b).unwrap();
         assert_eq!(r.scale(), Decimal::MAX_SCALE);
         assert_eq!(r.sign(), Sign::Positive);
         let expected: u128 = (0..Decimal::MAX_SCALE).fold(0u128, |acc, _| acc * 10 + 3);
@@ -2457,7 +2493,7 @@ mod tests {
         // diff=10, new_scale=48, drop=10 → only 28 digits survive.
         let a = Decimal::from_raw(1, 10, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 0, Sign::Positive).unwrap();
-        let r = a.div(b).unwrap();
+        let r = a.ckecked_div(b).unwrap();
         assert_eq!(r.scale(), Decimal::MAX_SCALE);
         assert_eq!(r.sign(), Sign::Positive);
         // 333...3 with 38 digits ÷ 10^10 = 333...3 with 28 digits
@@ -2473,14 +2509,14 @@ mod tests {
         // diff=38, new_scale=76, drop=38 → all 38 digits dropped → 0.
         let a = Decimal::from_raw(1, 38, Sign::Positive).unwrap();
         let b = Decimal::from_raw(7, 0, Sign::Positive).unwrap();
-        assert_zero(a.div(b).unwrap());
+        assert_zero(a.ckecked_div(b).unwrap());
     }
 
     /// Invariant: dividing by 1 preserves both inner and scale exactly.
     #[test]
     fn div_by_one_exact_representation() {
         let a = Decimal::from_raw(425, 1, Sign::Positive).unwrap(); // 42.5
-        let r = a.div(Decimal::from_str("1").unwrap()).unwrap();
+        let r = a.ckecked_div(Decimal::from_str("1").unwrap()).unwrap();
         assert_positive(r, 425, 1, "42.5");
     }
 
@@ -2488,7 +2524,7 @@ mod tests {
     #[test]
     fn div_by_neg_one_exact_representation() {
         let a = Decimal::from_raw(425, 1, Sign::Positive).unwrap();
-        let r = a.div(Decimal::from_str("-1").unwrap()).unwrap();
+        let r = a.ckecked_div(Decimal::from_str("-1").unwrap()).unwrap();
         assert_negative(r, 425, 1, "-42.5");
     }
 
@@ -2499,7 +2535,7 @@ mod tests {
         // 0.01 / 0.2 = 0.05 → inner=5, scale=2
         let r = Decimal::from_str("0.01")
             .unwrap()
-            .div(Decimal::from_str("0.2").unwrap())
+            .ckecked_div(Decimal::from_str("0.2").unwrap())
             .unwrap();
         assert_positive(r, 5, 2, "0.05");
     }
@@ -2510,7 +2546,7 @@ mod tests {
     fn div_exact_integer_exact_repr() {
         let r = Decimal::from_str("15")
             .unwrap()
-            .div(Decimal::from_str("5").unwrap())
+            .ckecked_div(Decimal::from_str("5").unwrap())
             .unwrap();
         assert_positive(r, 3, 0, "3");
     }
@@ -2523,7 +2559,7 @@ mod tests {
         // multiplies the growing result by 10; around scale=3 it overflows.
         let a = Decimal::from_raw(u128::MAX / 2, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(10u128.pow(35), 0, Sign::Positive).unwrap();
-        let r = a.div(b);
+        let r = a.ckecked_div(b);
         match r {
             Ok(val) => {
                 // Must be non-negative and ≤ u128::MAX
@@ -2539,7 +2575,7 @@ mod tests {
     fn div_periodic_multi_digit_divisor() {
         let r = Decimal::from_str("1")
             .unwrap()
-            .div(Decimal::from_str("700").unwrap())
+            .ckecked_div(Decimal::from_str("700").unwrap())
             .unwrap();
         assert_positive(
             r,
@@ -2558,7 +2594,7 @@ mod tests {
         // = 333...3 (39 threes) ≈ 3.33e38 < u128::MAX ≈ 3.40e38
         let a = Decimal::from_raw(10, 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 0, Sign::Positive).unwrap();
-        let r = a.div(b).unwrap();
+        let r = a.ckecked_div(b).unwrap();
         assert_eq!(r.scale(), Decimal::MAX_SCALE);
         assert!(r.is_positive());
         let expected: u128 = (0..Decimal::MAX_SCALE + 1).fold(0u128, |acc, _| acc * 10 + 3);
@@ -2572,7 +2608,7 @@ mod tests {
     fn div_overflow_large_dividend_fractional() {
         let a = Decimal::from_raw(10u128.pow(30), 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 0, Sign::Positive).unwrap();
-        assert_eq!(a.div(b), Err(DecimalError::Overflow));
+        assert_eq!(a.ckecked_div(b), Err(DecimalError::Overflow));
     }
 
     /// Invariant: dividing 10^35 by 3 overflows the accumulated result
@@ -2583,7 +2619,7 @@ mod tests {
         // Only 3 more fractional digits fit before overflowing u128.
         let a = Decimal::from_raw(10u128.pow(35), 0, Sign::Positive).unwrap();
         let b = Decimal::from_raw(3, 0, Sign::Positive).unwrap();
-        assert_eq!(a.div(b), Err(DecimalError::Overflow));
+        assert_eq!(a.ckecked_div(b), Err(DecimalError::Overflow));
     }
 
     // ------------------------------------------------------------------------
@@ -2603,8 +2639,8 @@ mod tests {
             let a = Decimal::from_str(x).unwrap();
             let b = Decimal::from_str(y).unwrap();
             assert_eq!(
-                a.add(b).unwrap(),
-                b.add(a).unwrap(),
+                a.checked_add(b).unwrap(),
+                b.checked_add(a).unwrap(),
                 "commutative fail: {x} + {y}"
             );
         }
@@ -2622,8 +2658,8 @@ mod tests {
             let a = Decimal::from_str(x).unwrap();
             let b = Decimal::from_str(y).unwrap();
             assert_eq!(
-                a.mul(b).unwrap(),
-                b.mul(a).unwrap(),
+                a.checked_mul(b).unwrap(),
+                b.checked_mul(a).unwrap(),
                 "commutative fail: {x} * {y}"
             );
         }
@@ -2641,8 +2677,8 @@ mod tests {
             let a = Decimal::from_str(x).unwrap();
             let b = Decimal::from_str(y).unwrap();
             let c = Decimal::from_str(z).unwrap();
-            let left = a.add(b).unwrap().add(c).unwrap();
-            let right = a.add(b.add(c).unwrap()).unwrap();
+            let left = a.checked_add(b).unwrap().checked_add(c).unwrap();
+            let right = a.checked_add(b.checked_add(c).unwrap()).unwrap();
             assert_eq!(left, right, "associative fail: ({x} + {y}) + {z}");
         }
     }
@@ -2659,8 +2695,12 @@ mod tests {
         ] {
             let a = Decimal::from_str(x).unwrap();
             let b = Decimal::from_str(y).unwrap();
-            let q = a.div(b).unwrap();
-            assert_eq!(q.mul(b).unwrap(), a, "div-mul roundtrip fail: {x} / {y}");
+            let q = a.ckecked_div(b).unwrap();
+            assert_eq!(
+                q.checked_mul(b).unwrap(),
+                a,
+                "div-mul roundtrip fail: {x} / {y}"
+            );
         }
     }
 }

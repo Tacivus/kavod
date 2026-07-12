@@ -429,8 +429,6 @@ mod tests {
     /// messages
     #[test]
     fn test_existing_same_time_items_stay_ahead_of_newly_produced() {
-        use std::sync::Arc;
-
         let ts = Timestamp::new(100);
         let mut sched = Scheduler::new();
 
@@ -439,8 +437,8 @@ mod tests {
         let mut shared_seq = Sequencer::initial();
         let seq_a = shared_seq.next().unwrap();
         let seq_b = shared_seq.next().unwrap();
-        sched.push_shared_msg(ts, seq_a, Arc::new(OtherMsg(0)));
-        sched.push_shared_msg(ts, seq_b, Arc::new(OtherMsg(1)));
+        sched.push_msg(ts, seq_a, OtherMsg(0));
+        sched.push_msg(ts, seq_b, OtherMsg(1));
 
         let cache = Cache::new();
         let mut productions = ProductionSet::new();

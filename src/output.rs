@@ -1,4 +1,4 @@
-use std::{any::TypeId, collections::HashMap, sync::Arc};
+use std::{any::TypeId, collections::HashMap};
 
 use thiserror::Error;
 
@@ -85,16 +85,6 @@ impl ProductionSet {
         self.types.contains_key(&TypeId::of::<M>())
     }
 
-    /// Returns `true` if no message types have been declared.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.types.is_empty()
-    }
-
-    /// Number of distinct declared production types.
-    pub(crate) fn len(&self) -> usize {
-        self.types.len()
-    }
-
     /// Iterate declared productions for graph validation.
     ///
     /// Order is not significant (HashMap). Callers that need stable order
@@ -110,6 +100,20 @@ impl ProductionSet {
         self.iter().collect()
     }
 }
+
+#[cfg(test)]
+impl ProductionSet {
+    /// Returns `true` if no message types have been declared.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+
+    /// Number of distinct declared production types.
+    pub(crate) fn len(&self) -> usize {
+        self.types.len()
+    }
+}
+
 /// Internal output capability that directly allocates sequence numbers and
 /// inserts into the scheduler.
 ///
@@ -156,8 +160,7 @@ impl<'a> HandlerOutput<'a> {
             });
         }
         let seq = self.next_seq_num()?;
-        self.scheduler
-            .push_shared_msg(self.dispatch_time, seq, Arc::new(msg));
+        self.scheduler.push_msg(self.dispatch_time, seq, msg);
         Ok(())
     }
 
@@ -185,7 +188,7 @@ impl<'a> HandlerOutput<'a> {
             });
         }
         let seq = self.next_seq_num()?;
-        self.scheduler.push_shared_msg(ts, seq, Arc::new(msg));
+        self.scheduler.push_msg(ts, seq, msg);
         Ok(())
     }
 
@@ -199,8 +202,6 @@ impl<'a> HandlerOutput<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::Arc;
 
     // ========================================================================
     // Test message types
@@ -496,8 +497,8 @@ mod tests {
         let mut shared_seq = Sequencer::initial();
         let seq_a = shared_seq.next().unwrap();
         let seq_b = shared_seq.next().unwrap();
-        sched.push_shared_msg(ts, seq_a, Arc::new(OtherMsg(0)));
-        sched.push_shared_msg(ts, seq_b, Arc::new(OtherMsg(1)));
+        sched.push_msg(ts, seq_a, OtherMsg(0));
+        sched.push_msg(ts, seq_b, OtherMsg(1));
 
         let mut productions = ProductionSet::new();
         productions.insert::<TestMsg>();

@@ -19,6 +19,7 @@ pub(crate) enum ConsumerKind {
 pub(crate) struct ConsumerId(pub(crate) usize);
 
 /// One registered consumer of a message type.
+#[expect(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ConsumerDescriptor {
     pub(crate) id: ConsumerId,
@@ -28,6 +29,7 @@ pub(crate) struct ConsumerDescriptor {
 }
 
 /// Production edge declared by a handler (or later actor) callback.
+#[expect(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProducerDescriptor {
     pub(crate) owner: ConsumerId,
@@ -98,10 +100,6 @@ impl GraphBuilder {
 
         Ok(ValidatedGraph {
             consumer_type_ids: consumer_types.keys().copied().collect(),
-            consumer_type_names: consumer_types
-                .into_iter()
-                .map(|(id, mt)| (id, mt.name))
-                .collect(),
         })
     }
 }
@@ -110,18 +108,12 @@ impl GraphBuilder {
 #[derive(Debug)]
 pub(crate) struct ValidatedGraph {
     consumer_type_ids: HashSet<TypeId>,
-    consumer_type_names: HashMap<TypeId, &'static str>,
 }
 
 impl ValidatedGraph {
     /// Returns true if at least one reducer or handler consumes `type_id`.
     pub(crate) fn has_consumer(&self, type_id: TypeId) -> bool {
         self.consumer_type_ids.contains(&type_id)
-    }
-
-    /// Printable type name if this type is a known consumer, for diagnostics.
-    pub(crate) fn type_name(&self, type_id: TypeId) -> Option<&'static str> {
-        self.consumer_type_names.get(&type_id).copied()
     }
 }
 
@@ -313,11 +305,6 @@ mod tests {
 
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
         assert!(!graph.has_consumer(TypeId::of::<MsgB>()));
-        assert_eq!(
-            graph.type_name(TypeId::of::<MsgA>()),
-            Some(std::any::type_name::<MsgA>())
-        );
-        assert_eq!(graph.type_name(TypeId::of::<MsgB>()), None);
     }
 
     /// Same-type cycle is allowed (static cycle rejection deferred).
@@ -439,10 +426,10 @@ mod tests {
 
     #[test]
     fn build_graph_stateful_handler_productions() {
-        struct S(u32);
+        struct S;
 
         let mut handlers = HandlerRegistry::new();
-        handlers.handler_group(S(0), |group| {
+        handlers.handler_group(S, |group| {
             group
                 .on(|_s: &mut S, _ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
                 .produces::<MsgB>();

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod builder;
 pub mod cache;
 pub mod clock;

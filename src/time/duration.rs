@@ -35,7 +35,7 @@ impl Duration {
     /// Returns `Err(TimeError::Overflow)` if the nanosecond equivalent
     /// would overflow `u128`.
     pub const fn from_seconds(val: u128) -> Result<Self, TimeError> {
-        match val.checked_mul(NANOS_PER_SEC as u128) {
+        match val.checked_mul(NANOS_PER_SEC) {
             Some(nanos) => Ok(Duration(nanos)),
             None => Err(TimeError::Overflow),
         }
@@ -48,7 +48,7 @@ impl Duration {
 
     /// Returns the number of whole seconds, truncating subsecond nanos.
     pub const fn as_secs(&self) -> u128 {
-        self.0 / NANOS_PER_SEC as u128
+        self.0 / NANOS_PER_SEC
     }
 
     /// Returns `true` if this duration is zero.

@@ -170,6 +170,12 @@ impl Cache {
     }
 }
 
+impl Default for Cache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +242,13 @@ mod tests {
     fn test_new_cache_len_zero() {
         let cache = Cache::new();
         assert_eq!(cache.len(), 0);
+    }
+
+    /// Invariant: default is empty
+    #[test]
+    fn test_default_cache_len_zero() {
+        let cache = Cache::default();
+        assert_eq!(cache.len(), 0)
     }
 
     // ========================================================================

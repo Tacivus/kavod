@@ -199,28 +199,6 @@ impl HandlerRegistry {
         }
     }
 
-    /// Returns `TypeId`s of every message type for which at least one
-    /// handler is registered.  Used during graph building.
-    pub(crate) fn consumed_types(&self) -> Vec<TypeId> {
-        self.by_type.keys().copied().collect()
-    }
-
-    /// Returns the total number of registered handler entries.
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Returns the message type consumed by a specific handler entry.
-    pub(crate) fn handler_consumed_type(&self, id: HandlerId) -> TypeId {
-        self.entries[id].consumed
-    }
-
-    /// Returns the production declarations for a specific handler entry.
-    /// Used by graph building in Phase 11.
-    pub(crate) fn handler_productions(&self, id: HandlerId) -> &ProductionSet {
-        &self.entries[id].productions
-    }
-
     /// Flat (consumed, productions) pairs for graph building.
     ///
     /// Order matches global handler registration order. Does not expose
@@ -236,18 +214,19 @@ impl HandlerRegistry {
             )
         })
     }
+}
 
-    /// Invoke a specific handler entry directly without going through
-    /// the `by_type` index.  Required by `HandlerRegistrar`-produced
-    /// tests and by the engine when handler metadata is inlined.
-    pub(crate) fn invoke_by_id(
-        &self,
-        id: HandlerId,
-        state: Option<&mut (dyn Any + Send)>,
-        ctx: &mut HandlerCtx<'_>,
-        msg: &dyn Message,
-    ) {
-        (self.entries[id].invoke)(state, ctx, msg);
+#[cfg(test)]
+impl HandlerRegistry {
+    /// Returns `TypeId`s of every message type for which at least one
+    /// handler is registered.  Used during graph building.
+    pub(crate) fn consumed_types(&self) -> Vec<TypeId> {
+        self.by_type.keys().copied().collect()
+    }
+
+    /// Returns the total number of registered handler entries.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -322,17 +301,6 @@ mod tests {
         fn key(&self) -> Self::Key {
             self.key
         }
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct SingletonNum {
-        value: u64,
-    }
-
-    impl State for SingletonNum {
-        type Key = ();
-
-        fn key(&self) -> Self::Key {}
     }
 
     // ========================================================================
@@ -915,7 +883,7 @@ mod tests {
             group.on(
                 move |state: &mut u64, _ctx: &mut HandlerCtx<'_>, _msg: &TestMsg| {
                     av.store(*state, Ordering::SeqCst);
-                    *state = *state * 10;
+                    *state *= 10
                 },
             );
         });
@@ -924,7 +892,7 @@ mod tests {
             group.on(
                 move |state: &mut u64, _ctx: &mut HandlerCtx<'_>, _msg: &OtherMsg| {
                     bv.store(*state, Ordering::SeqCst);
-                    *state = *state * 10;
+                    *state *= 10;
                 },
             );
         });

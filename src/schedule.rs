@@ -25,17 +25,12 @@ impl Scheduler {
     pub(crate) fn pop(&mut self) -> Option<ScheduledItem> {
         self.heap.pop()
     }
+}
 
+#[cfg(test)]
+impl Scheduler {
     pub(crate) fn len(&self) -> usize {
         self.heap.len()
-    }
-
-    pub(crate) fn push_shared_msg(&mut self, ts: Timestamp, seq: SeqNo, payload: SharedMessage) {
-        self.heap.push(ScheduledItem {
-            dispatch_time: ts,
-            sequence_num: seq,
-            payload,
-        });
     }
 }
 
@@ -62,7 +57,10 @@ impl ScheduledItem {
     pub(crate) fn payload(&self) -> SharedMessage {
         self.payload.clone()
     }
+}
 
+#[cfg(test)]
+impl ScheduledItem {
     pub(crate) fn sequence_num(&self) -> SeqNo {
         self.sequence_num
     }
@@ -98,7 +96,6 @@ mod tests {
     use crate::message::Message;
     use crate::sequence::SeqNo;
     use std::any::Any;
-    use std::sync::Arc;
 
     #[derive(Clone, Debug, PartialEq)]
     struct TestMsg(u64);
@@ -131,21 +128,6 @@ mod tests {
     fn test_push_msg_pop_roundtrip() {
         let mut sched = Scheduler::new();
         sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(42));
-
-        let item = sched.pop().unwrap();
-        assert_eq!(item.dispatch_time, Timestamp::new(100));
-        assert_eq!(item.sequence_num, SeqNo::from_raw(0));
-
-        let payload: &dyn Any = &*item.payload;
-        assert_eq!(payload.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
-    }
-
-    /// Invariant: push_shared_msg / pop roundtrip returns the shared payload
-    #[test]
-    fn test_push_shared_msg_pop_roundtrip() {
-        let mut sched = Scheduler::new();
-        let shared: SharedMessage = Arc::new(TestMsg(42));
-        sched.push_shared_msg(Timestamp::new(100), SeqNo::from_raw(0), shared);
 
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(100));
@@ -360,7 +342,7 @@ mod tests {
         let early = ScheduledItem::new(Timestamp::new(50), SeqNo::from_raw(0), TestMsg(1));
         let late = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(2));
         assert!(early > late);
-        assert!(!(late > early));
+        assert!(late <= early);
     }
 
     /// Invariant: equal dispatch_time, lower sequence is greater (pops first)
@@ -369,7 +351,7 @@ mod tests {
         let low_seq = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
         let high_seq = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(2));
         assert!(low_seq > high_seq);
-        assert!(!(high_seq > low_seq));
+        assert!(high_seq <= low_seq);
     }
 
     /// Invariant: dispatch_time dominates sequence in ordering
@@ -398,7 +380,7 @@ mod tests {
         let a = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(0), TestMsg(1));
         let b = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(1), TestMsg(2));
         assert!(a > b);
-        assert!(!(b > a));
+        assert!(b <= a);
     }
 
     /// Invariant: payload does not affect ordering
@@ -406,8 +388,8 @@ mod tests {
     fn test_item_ord_payload_irrelevant() {
         let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(999));
         let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), OtherMsg(1));
-        assert!(!(a < b));
-        assert!(!(b < a));
+        assert!(a >= b);
+        assert!(b >= a);
         assert_eq!(a, b);
     }
 
@@ -433,55 +415,6 @@ mod tests {
         assert_eq!(a.0, 42);
     }
 
-    /// Invariant: a payload can be sent to the scheduler via push_shared_msg
-    ///             and retained externally — both references remain valid
-    #[test]
-    fn test_payload_retained_while_in_scheduler() {
-        let mut sched = Scheduler::new();
-        let shared: SharedMessage = Arc::new(TestMsg(99));
-        let retained = shared.clone();
-
-        sched.push_shared_msg(Timestamp::new(100), SeqNo::from_raw(0), shared);
-
-        let item = sched.pop().unwrap();
-        let popped: &TestMsg = (&*item.payload as &dyn Any)
-            .downcast_ref::<TestMsg>()
-            .unwrap();
-        let kept: &TestMsg = (&*retained as &dyn Any).downcast_ref::<TestMsg>().unwrap();
-
-        assert_eq!(popped.0, 99);
-        assert_eq!(kept.0, 99);
-        assert_eq!(popped, kept);
-    }
-
-    /// Invariant: push_msg and push_shared_msg produce identical pop ordering
-    ///             for the same sequence of (dispatch_time, sequence) pairs
-    #[test]
-    fn test_push_msg_and_push_shared_msg_same_ordering() {
-        let events: [(i128, u64); 4] = [(100, 0), (100, 1), (200, 0), (50, 0)];
-
-        let mut sched_a = Scheduler::new();
-        for &(ts_val, seq_val) in &events {
-            sched_a.push_msg(
-                Timestamp::new(ts_val),
-                SeqNo::from_raw(seq_val),
-                TestMsg(seq_val),
-            );
-        }
-
-        let mut sched_b = Scheduler::new();
-        for &(ts_val, seq_val) in &events {
-            let shared: SharedMessage = Arc::new(TestMsg(seq_val));
-            sched_b.push_shared_msg(Timestamp::new(ts_val), SeqNo::from_raw(seq_val), shared);
-        }
-
-        while let (Some(a), Some(b)) = (sched_a.pop(), sched_b.pop()) {
-            assert_eq!(a.dispatch_time, b.dispatch_time);
-            assert_eq!(a.sequence_num, b.sequence_num);
-        }
-        assert!(sched_a.pop().is_none());
-        assert!(sched_b.pop().is_none());
-    }
     // ========================================================================
     // Bulk / stress
     // ========================================================================
@@ -531,7 +464,7 @@ mod tests {
 
         for i in 0..n {
             let ts = Timestamp::new(((i * 97 + 13) % n) as i128);
-            sched.push_msg(ts, SeqNo::from_raw(i), TestMsg(i as u64));
+            sched.push_msg(ts, SeqNo::from_raw(i), TestMsg(i));
         }
 
         let mut prev_ts = Timestamp::new(-1);

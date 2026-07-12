@@ -47,11 +47,6 @@ impl Sequencer {
 
         Ok(next)
     }
-
-    /// Gets the current `SeqNo`
-    pub(crate) fn get(&self) -> SeqNo {
-        self.current
-    }
 }
 
 #[cfg(test)]
@@ -59,6 +54,11 @@ impl Sequencer {
     /// Test-only: construct a sequencer at an arbitrary raw value.
     pub(crate) fn from_raw(n: u64) -> Self {
         Self { current: SeqNo(n) }
+    }
+
+    /// Gets the current `SeqNo`
+    pub(crate) fn get(&self) -> SeqNo {
+        self.current
     }
 }
 
