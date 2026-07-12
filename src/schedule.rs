@@ -1,8 +1,8 @@
 use std::{collections::BinaryHeap, sync::Arc};
 
 use crate::{
-    message::{Message, SharedMsg},
-    sequence::Sequence,
+    message::{Message, SharedMessage},
+    sequence::SeqNo,
     time::timestamp::Timestamp,
 };
 
@@ -18,7 +18,7 @@ impl Scheduler {
         }
     }
 
-    pub(crate) fn push_msg(&mut self, ts: Timestamp, seq: Sequence, msg: impl Message) {
+    pub(crate) fn push_msg(&mut self, ts: Timestamp, seq: SeqNo, msg: impl Message) {
         self.heap.push(ScheduledItem::new(ts, seq, msg))
     }
 
@@ -30,10 +30,10 @@ impl Scheduler {
         self.heap.len()
     }
 
-    pub(crate) fn push_shared_msg(&mut self, ts: Timestamp, seq: Sequence, payload: SharedMsg) {
+    pub(crate) fn push_shared_msg(&mut self, ts: Timestamp, seq: SeqNo, payload: SharedMessage) {
         self.heap.push(ScheduledItem {
             dispatch_time: ts,
-            sequence: seq,
+            sequence_num: seq,
             payload,
         });
     }
@@ -42,15 +42,15 @@ impl Scheduler {
 #[derive(Debug)]
 pub(crate) struct ScheduledItem {
     dispatch_time: Timestamp,
-    sequence: Sequence,
-    payload: SharedMsg,
+    sequence_num: SeqNo,
+    payload: SharedMessage,
 }
 
 impl ScheduledItem {
-    fn new(ts: Timestamp, seq: Sequence, payload: impl Message) -> Self {
+    fn new(ts: Timestamp, seq: SeqNo, payload: impl Message) -> Self {
         Self {
             dispatch_time: ts,
-            sequence: seq,
+            sequence_num: seq,
             payload: Arc::new(payload),
         }
     }
@@ -59,18 +59,18 @@ impl ScheduledItem {
         self.dispatch_time
     }
 
-    pub(crate) fn payload(&self) -> SharedMsg {
+    pub(crate) fn payload(&self) -> SharedMessage {
         self.payload.clone()
     }
 
-    pub(crate) fn sequence(&self) -> Sequence {
-        self.sequence
+    pub(crate) fn sequence_num(&self) -> SeqNo {
+        self.sequence_num
     }
 }
 
 impl PartialEq for ScheduledItem {
     fn eq(&self, other: &Self) -> bool {
-        self.dispatch_time == other.dispatch_time && self.sequence == other.sequence
+        self.dispatch_time == other.dispatch_time && self.sequence_num == other.sequence_num
     }
 }
 
@@ -88,7 +88,7 @@ impl Ord for ScheduledItem {
         other
             .dispatch_time
             .cmp(&self.dispatch_time)
-            .then_with(|| other.sequence.cmp(&self.sequence))
+            .then_with(|| other.sequence_num.cmp(&self.sequence_num))
     }
 }
 
@@ -96,15 +96,16 @@ impl Ord for ScheduledItem {
 mod tests {
     use super::*;
     use crate::message::Message;
+    use crate::sequence::Sequencer;
     use std::any::Any;
     use std::sync::Arc;
 
-    fn seq(n: u64) -> Sequence {
-        let mut s = Sequence::initial();
+    fn seq(n: u64) -> SeqNo {
+        let mut s = Sequencer::initial();
         for _ in 0..n {
             s.next().unwrap();
         }
-        s
+        s.get()
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -141,7 +142,7 @@ mod tests {
 
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(100));
-        assert_eq!(item.sequence, seq(0));
+        assert_eq!(item.sequence_num, seq(0));
 
         let payload: &dyn Any = &*item.payload;
         assert_eq!(payload.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
@@ -151,12 +152,12 @@ mod tests {
     #[test]
     fn test_push_shared_msg_pop_roundtrip() {
         let mut sched = Scheduler::new();
-        let shared: SharedMsg = Arc::new(TestMsg(42));
+        let shared: SharedMessage = Arc::new(TestMsg(42));
         sched.push_shared_msg(Timestamp::new(100), seq(0), shared);
 
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(100));
-        assert_eq!(item.sequence, seq(0));
+        assert_eq!(item.sequence_num, seq(0));
 
         let payload: &dyn Any = &*item.payload;
         assert_eq!(payload.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
@@ -222,9 +223,9 @@ mod tests {
         sched.push_msg(Timestamp::new(100), seq(0), TestMsg(1));
 
         let first = sched.pop().unwrap();
-        assert_eq!(first.sequence, seq(0));
+        assert_eq!(first.sequence_num, seq(0));
         let second = sched.pop().unwrap();
-        assert_eq!(second.sequence, seq(1));
+        assert_eq!(second.sequence_num, seq(1));
     }
 
     /// Invariant: same ts, inserted in seq order, pops in seq order regardless
@@ -235,9 +236,9 @@ mod tests {
         sched.push_msg(Timestamp::new(100), seq(1), TestMsg(1));
         sched.push_msg(Timestamp::new(100), seq(2), TestMsg(2));
 
-        assert_eq!(sched.pop().unwrap().sequence, seq(0));
-        assert_eq!(sched.pop().unwrap().sequence, seq(1));
-        assert_eq!(sched.pop().unwrap().sequence, seq(2));
+        assert_eq!(sched.pop().unwrap().sequence_num, seq(0));
+        assert_eq!(sched.pop().unwrap().sequence_num, seq(1));
+        assert_eq!(sched.pop().unwrap().sequence_num, seq(2));
     }
 
     /// Invariant: dispatch_time is always the primary sort key, seq only
@@ -251,15 +252,15 @@ mod tests {
 
         let e1 = sched.pop().unwrap();
         assert_eq!(e1.dispatch_time, Timestamp::new(5));
-        assert_eq!(e1.sequence, seq(1));
+        assert_eq!(e1.sequence_num, seq(1));
 
         let e2 = sched.pop().unwrap();
         assert_eq!(e2.dispatch_time, Timestamp::new(10));
-        assert_eq!(e2.sequence, seq(0));
+        assert_eq!(e2.sequence_num, seq(0));
 
         let e3 = sched.pop().unwrap();
         assert_eq!(e3.dispatch_time, Timestamp::new(15));
-        assert_eq!(e3.sequence, seq(2));
+        assert_eq!(e3.sequence_num, seq(2));
     }
 
     /// Invariant: within same dispatch_time, seq is the tiebreaker
@@ -276,7 +277,7 @@ mod tests {
 
         for expected in 0..=5 {
             let item = sched.pop().unwrap();
-            assert_eq!(item.sequence.get(), expected);
+            assert_eq!(item.sequence_num(), seq(expected));
             assert_eq!(item.dispatch_time, Timestamp::new(42));
         }
     }
@@ -296,19 +297,19 @@ mod tests {
 
         let a = sched.pop().unwrap();
         assert_eq!(a.dispatch_time, Timestamp::new(100));
-        assert_eq!(a.sequence.get(), 0);
+        assert_eq!(a.sequence_num(), seq(0));
 
         // Simulate handler producing B@T with a higher seq
         sched.push_msg(Timestamp::new(100), seq(1), TestMsg(1)); // B@T
 
         let b = sched.pop().unwrap();
         assert_eq!(b.dispatch_time, Timestamp::new(100));
-        assert_eq!(b.sequence.get(), 1);
+        assert_eq!(b.sequence_num(), seq(1));
 
         // Only now does time advance
         let c = sched.pop().unwrap();
         assert_eq!(c.dispatch_time, Timestamp::new(101));
-        assert_eq!(c.sequence.get(), 2);
+        assert_eq!(c.sequence_num(), seq(2));
     }
 
     // ========================================================================
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn test_payload_retained_while_in_scheduler() {
         let mut sched = Scheduler::new();
-        let shared: SharedMsg = Arc::new(TestMsg(99));
+        let shared: SharedMessage = Arc::new(TestMsg(99));
         let retained = shared.clone();
 
         sched.push_shared_msg(Timestamp::new(100), seq(0), shared);
@@ -473,13 +474,13 @@ mod tests {
 
         let mut sched_b = Scheduler::new();
         for &(ts_val, seq_val) in &events {
-            let shared: SharedMsg = Arc::new(TestMsg(seq_val));
+            let shared: SharedMessage = Arc::new(TestMsg(seq_val));
             sched_b.push_shared_msg(Timestamp::new(ts_val), seq(seq_val), shared);
         }
 
         while let (Some(a), Some(b)) = (sched_a.pop(), sched_b.pop()) {
             assert_eq!(a.dispatch_time, b.dispatch_time);
-            assert_eq!(a.sequence, b.sequence);
+            assert_eq!(a.sequence_num, b.sequence_num);
         }
         assert!(sched_a.pop().is_none());
         assert!(sched_b.pop().is_none());
@@ -511,17 +512,17 @@ mod tests {
             if !first {
                 assert!(
                     item.dispatch_time > prev_ts
-                        || (item.dispatch_time == prev_ts && item.sequence > prev_seq),
+                        || (item.dispatch_time == prev_ts && item.sequence_num > prev_seq),
                     "pop out of order: ({:?}, {:?}) after ({:?}, {:?})",
                     item.dispatch_time,
-                    item.sequence,
+                    item.sequence_num,
                     prev_ts,
                     prev_seq
                 );
             }
             first = false;
             prev_ts = item.dispatch_time;
-            prev_seq = item.sequence;
+            prev_seq = item.sequence_num;
         }
     }
 
@@ -544,18 +545,18 @@ mod tests {
             if !first {
                 assert!(
                     item.dispatch_time > prev_ts
-                        || (item.dispatch_time == prev_ts && item.sequence > prev_seq),
+                        || (item.dispatch_time == prev_ts && item.sequence_num > prev_seq),
                     "pop out of order at count={}: ({:?}, {:?}) after ({:?}, {:?})",
                     count,
                     item.dispatch_time,
-                    item.sequence,
+                    item.sequence_num,
                     prev_ts,
                     prev_seq
                 );
             }
             first = false;
             prev_ts = item.dispatch_time;
-            prev_seq = item.sequence;
+            prev_seq = item.sequence_num;
             count += 1;
         }
         assert_eq!(count, n);

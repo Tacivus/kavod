@@ -100,7 +100,7 @@ mod tests {
         message::Message,
         output::{HandlerOutput, ProductionSet},
         schedule::Scheduler,
-        sequence::Sequence,
+        sequence::Sequencer,
         time::timestamp::Timestamp,
     };
 
@@ -153,7 +153,7 @@ mod tests {
         let ts = Timestamp::new(100);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -170,7 +170,7 @@ mod tests {
 
         let ts = Timestamp::new(42);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -190,7 +190,7 @@ mod tests {
         let dispatch_ts = Timestamp::new(100);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
 
         let mut productions = ProductionSet::new();
@@ -209,7 +209,7 @@ mod tests {
         let ts = Timestamp::new(0);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let mut productions = ProductionSet::new();
@@ -234,7 +234,7 @@ mod tests {
         let future_ts = Timestamp::new(200);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
 
         let mut productions = ProductionSet::new();
@@ -254,7 +254,7 @@ mod tests {
         let past_ts = Timestamp::new(50);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
 
         let mut productions = ProductionSet::new();
@@ -279,7 +279,7 @@ mod tests {
         let ts = Timestamp::new(100);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let mut productions = ProductionSet::new();
@@ -302,7 +302,7 @@ mod tests {
         let ts = Timestamp::new(0);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let mut productions = ProductionSet::new();
@@ -319,7 +319,7 @@ mod tests {
         let ts = Timestamp::new(0);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let productions = ProductionSet::new();
@@ -340,7 +340,7 @@ mod tests {
         let ts = Timestamp::new(100);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let productions = ProductionSet::new();
@@ -365,7 +365,7 @@ mod tests {
         let ts = Timestamp::new(42);
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
 
         let mut productions = ProductionSet::new();
@@ -377,7 +377,7 @@ mod tests {
 
         let item_a = sched.pop().unwrap();
         let item_b = sched.pop().unwrap();
-        assert!(item_a.sequence() < item_b.sequence());
+        assert!(item_a.sequence_num() < item_b.sequence_num());
     }
 
     /// Invariant: existing same-time items remain ahead of newly produced
@@ -391,7 +391,7 @@ mod tests {
 
         // Pre-populate scheduler with two items at time T, sharing the
         // same sequence allocator so the produced message gets a later seq.
-        let mut shared_seq = Sequence::initial();
+        let mut shared_seq = Sequencer::initial();
         let seq_a = shared_seq.next().unwrap();
         let seq_b = shared_seq.next().unwrap();
         sched.push_shared_msg(ts, seq_a, Arc::new(OtherMsg(0)));
@@ -406,19 +406,19 @@ mod tests {
         ctx.send(MyMsg(42)).unwrap();
 
         let first = sched.pop().unwrap();
-        assert_eq!(first.sequence(), seq_a);
+        assert_eq!(first.sequence_num(), seq_a);
         let raw: &dyn std::any::Any = &*first.payload();
         assert!(raw.downcast_ref::<OtherMsg>().is_some());
 
         let second = sched.pop().unwrap();
-        assert_eq!(second.sequence(), seq_b);
+        assert_eq!(second.sequence_num(), seq_b);
         let raw: &dyn std::any::Any = &*second.payload();
         assert!(raw.downcast_ref::<OtherMsg>().is_some());
 
         let third = sched.pop().unwrap();
         let raw: &dyn std::any::Any = &*third.payload();
         assert!(raw.downcast_ref::<MyMsg>().is_some_and(|m| m.0 == 42));
-        assert!(third.sequence() > seq_b);
+        assert!(third.sequence_num() > seq_b);
 
         assert!(sched.pop().is_none());
     }
@@ -435,7 +435,7 @@ mod tests {
 
         let ts = Timestamp::new(0);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -453,7 +453,7 @@ mod tests {
 
         let ts = Timestamp::new(0);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -470,7 +470,7 @@ mod tests {
 
         let ts = Timestamp::new(0);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -485,7 +485,7 @@ mod tests {
 
         let ts = Timestamp::new(0);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 
@@ -510,7 +510,7 @@ mod tests {
 
         let ts = Timestamp::new(0);
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
 

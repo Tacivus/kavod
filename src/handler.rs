@@ -10,20 +10,12 @@ use crate::{
     message::Message,
     output::{HandlerOutput, ProductionSet},
     schedule::Scheduler,
-    sequence::Sequence,
+    sequence::Sequencer,
     time::timestamp::Timestamp,
 };
 
-// ---------------------------------------------------------------------------
-// Erased handler type – single shape for stateless and stateful
-// ---------------------------------------------------------------------------
-
 type ErasedHandler =
     Box<dyn Fn(Option<&mut (dyn Any + Send)>, &mut HandlerCtx<'_>, &dyn Message) + Send>;
-
-// ---------------------------------------------------------------------------
-// Erasure helpers
-// ---------------------------------------------------------------------------
 
 fn erase_stateless_handler<M: Message>(
     f: impl Fn(&mut HandlerCtx<'_>, &M) + Send + 'static,
@@ -54,10 +46,6 @@ fn erase_stateful_handler<S: Send + 'static, M: Message>(
         f(concrete_state, ctx, concrete_msg);
     })
 }
-
-// ---------------------------------------------------------------------------
-// HandlerGroup – scoped builder for stateful handler registration
-// ---------------------------------------------------------------------------
 
 /// Scoped builder returned by [`HandlerRegistry::handler_group`].
 ///
@@ -101,15 +89,7 @@ impl<'a, S: Send + 'static> HandlerGroup<'a, S> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// HandlerId – index into the flat entries vector
-// ---------------------------------------------------------------------------
-
 type HandlerId = usize;
-
-// ---------------------------------------------------------------------------
-// HandlerEntry (crate-private)
-// ---------------------------------------------------------------------------
 
 pub(crate) struct HandlerEntry {
     consumed_type_name: &'static str,
@@ -118,10 +98,6 @@ pub(crate) struct HandlerEntry {
     invoke: ErasedHandler,
     productions: ProductionSet,
 }
-
-// ---------------------------------------------------------------------------
-// HandlerRegistry (crate-private)
-// ---------------------------------------------------------------------------
 
 pub(crate) struct HandlerRegistry {
     states: Vec<Box<dyn Any + Send>>,
@@ -198,7 +174,7 @@ impl HandlerRegistry {
         dispatch_time: Timestamp,
         cache: &Cache,
         scheduler: &mut Scheduler,
-        sequence: &mut Sequence,
+        sequencer: &mut Sequencer,
         msg: &dyn Message,
     ) {
         let type_id = msg.type_id();
@@ -209,7 +185,7 @@ impl HandlerRegistry {
                 // so each HandlerCtx/handler pair gets a fresh HandlerOutput.
                 {
                     let scheduler = &mut *scheduler;
-                    let sequence = &mut *sequence;
+                    let sequence = &mut *sequencer;
                     let mut output = HandlerOutput::new(scheduler, sequence, dispatch_time);
                     let mut ctx =
                         HandlerCtx::new(dispatch_time, cache, &mut output, &entry.productions);
@@ -259,10 +235,6 @@ impl HandlerRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// HandlerRegistrar – opaque public handle for production declarations
-// ---------------------------------------------------------------------------
-
 /// Opaque handle returned by handler registration.
 ///
 /// The only supported operation is declaring the message types this handler
@@ -291,16 +263,12 @@ impl<'a> HandlerRegistrar<'a> {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         cache::State, message::Message, output::HandlerOutput, schedule::Scheduler,
-        sequence::Sequence, time::timestamp::Timestamp,
+        time::timestamp::Timestamp,
     };
     use std::sync::{
         Arc, Mutex,
@@ -369,7 +337,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(42);
         let msg_ref: &dyn Message = &msg;
@@ -397,7 +365,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = OtherMsg(99);
         let msg_ref: &dyn Message = &msg;
@@ -439,7 +407,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(7);
         let msg_ref: &dyn Message = &msg;
@@ -470,7 +438,7 @@ mod tests {
         cache.insert(KeyedNum { key: 1, value: 77 });
 
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(0);
         let msg_ref: &dyn Message = &msg;
@@ -497,7 +465,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
@@ -528,7 +496,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
@@ -568,7 +536,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(0);
         let msg_ref: &dyn Message = &msg;
@@ -610,7 +578,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(7);
         let msg_ref: &dyn Message = &msg;
@@ -640,7 +608,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(0);
         let msg_ref: &dyn Message = &msg;
@@ -673,7 +641,7 @@ mod tests {
         let mut reg = HandlerRegistry::new();
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let msg = TestMsg(1);
         let msg_ref: &dyn Message = &msg;
@@ -738,7 +706,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
@@ -794,7 +762,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(5));
@@ -848,7 +816,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         // Increment the counter three times via TestMsg
@@ -905,7 +873,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         // First dispatch – both groups' handlers fire
@@ -953,7 +921,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
@@ -996,7 +964,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
@@ -1039,7 +1007,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(5)); // state += 5   → 5
@@ -1080,7 +1048,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
@@ -1117,7 +1085,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
@@ -1141,7 +1109,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
@@ -1163,7 +1131,7 @@ mod tests {
 
         let cache = Cache::new();
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
         let productions = ProductionSet::new();
@@ -1214,7 +1182,7 @@ mod tests {
         cache.insert(KeyedNum { key: 1, value: 99 });
 
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));
@@ -1262,7 +1230,7 @@ mod tests {
         cache.insert(KeyedNum { key: 1, value: 99 });
 
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         reg.dispatch(ts, &cache, &mut sched, &mut seq, &TestMsg(0));

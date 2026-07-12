@@ -3,7 +3,10 @@ use std::{any::TypeId, collections::HashSet, sync::Arc};
 use thiserror::Error;
 
 use crate::{
-    message::Message, schedule::Scheduler, sequence::Sequence, time::timestamp::Timestamp,
+    message::Message,
+    schedule::Scheduler,
+    sequence::{SeqNo, Sequencer},
+    time::timestamp::Timestamp,
 };
 
 /// Errors that can occur when a handler produces output through [`HandlerOutput`].
@@ -74,19 +77,19 @@ impl ProductionSet {
 /// scheduler and sequence allocator.
 pub(crate) struct HandlerOutput<'a> {
     scheduler: &'a mut Scheduler,
-    sequence: &'a mut Sequence,
+    sequencer: &'a mut Sequencer,
     dispatch_time: Timestamp,
 }
 
 impl<'a> HandlerOutput<'a> {
     pub(crate) fn new(
         scheduler: &'a mut Scheduler,
-        sequence: &'a mut Sequence,
+        sequencer: &'a mut Sequencer,
         dispatch_time: Timestamp,
     ) -> Self {
         Self {
             scheduler,
-            sequence,
+            sequencer,
             dispatch_time,
         }
     }
@@ -108,7 +111,7 @@ impl<'a> HandlerOutput<'a> {
                 type_name: std::any::type_name::<M>(),
             });
         }
-        let seq = self.next_seq()?;
+        let seq = self.next_seq_num()?;
         self.scheduler
             .push_shared_msg(self.dispatch_time, seq, Arc::new(msg));
         Ok(())
@@ -137,13 +140,13 @@ impl<'a> HandlerOutput<'a> {
                 type_name: std::any::type_name::<M>(),
             });
         }
-        let seq = self.next_seq()?;
+        let seq = self.next_seq_num()?;
         self.scheduler.push_shared_msg(ts, seq, Arc::new(msg));
         Ok(())
     }
 
-    fn next_seq(&mut self) -> Result<Sequence, HandlerOutputError> {
-        self.sequence
+    fn next_seq_num(&mut self) -> Result<SeqNo, HandlerOutputError> {
+        self.sequencer
             .next()
             .map_err(|_| HandlerOutputError::SequenceExhaustion)
     }
@@ -213,12 +216,12 @@ mod tests {
     // HandlerOutput helpers
     // ========================================================================
 
-    fn seq_val(n: u64) -> Sequence {
-        let mut s = Sequence::initial();
+    fn seq_val(n: u64) -> SeqNo {
+        let mut s = Sequencer::initial();
         for _ in 0..n {
             s.next().unwrap();
         }
-        s
+        s.get()
     }
 
     // ========================================================================
@@ -229,7 +232,7 @@ mod tests {
     #[test]
     fn test_send_schedules_at_dispatch_time() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(100);
 
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
@@ -247,7 +250,7 @@ mod tests {
     #[test]
     fn test_send_payload_roundtrips() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
@@ -266,7 +269,7 @@ mod tests {
     #[test]
     fn test_undeclared_production_returns_error() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(0);
 
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
@@ -288,7 +291,7 @@ mod tests {
     #[test]
     fn test_send_at_schedules_at_future_time() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let dispatch_ts = Timestamp::new(100);
         let future_ts = Timestamp::new(200);
 
@@ -306,7 +309,7 @@ mod tests {
     #[test]
     fn test_send_at_same_dispatch_time_succeeds() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(100);
 
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
@@ -324,7 +327,7 @@ mod tests {
     #[test]
     fn test_send_at_rejects_past_timestamp() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let dispatch_ts = Timestamp::new(100);
         let past_ts = Timestamp::new(50);
 
@@ -348,7 +351,7 @@ mod tests {
     #[test]
     fn test_send_at_undeclared_production_returns_error() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(100);
 
         let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
@@ -367,7 +370,7 @@ mod tests {
     #[test]
     fn test_send_at_rejects_past_before_checking_productions() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let dispatch_ts = Timestamp::new(100);
         let past_ts = Timestamp::new(50);
 
@@ -386,7 +389,7 @@ mod tests {
     #[test]
     fn test_two_sends_receive_increasing_sequences() {
         let mut sched = Scheduler::new();
-        let mut seq = Sequence::initial();
+        let mut seq = Sequencer::initial();
         let ts = Timestamp::new(42);
 
         let mut productions = ProductionSet::new();
@@ -398,7 +401,7 @@ mod tests {
 
         let item_a = sched.pop().unwrap();
         let item_b = sched.pop().unwrap();
-        assert!(item_a.sequence() < item_b.sequence());
+        assert!(item_a.sequence_num() < item_b.sequence_num());
     }
 
     /// Invariant: existing same-time items with lower sequence remain ahead
@@ -411,7 +414,7 @@ mod tests {
         // Pre-populate scheduler with two items at time T, sharing the same
         // sequence allocator with HandlerOutput later so the newly produced
         // message receives a later sequence.
-        let mut shared_seq = Sequence::initial();
+        let mut shared_seq = Sequencer::initial();
         let seq_a = shared_seq.next().unwrap();
         let seq_b = shared_seq.next().unwrap();
         sched.push_shared_msg(ts, seq_a, Arc::new(OtherMsg(0)));
@@ -426,7 +429,7 @@ mod tests {
         // Pop order: pre-pushed with seq_a, pre-pushed with seq_b,
         // then newly produced (highest seq)
         let first = sched.pop().unwrap();
-        assert_eq!(first.sequence(), seq_a);
+        assert_eq!(first.sequence_num(), seq_a);
         assert!(
             (&*first.payload() as &dyn std::any::Any)
                 .downcast_ref::<OtherMsg>()
@@ -434,7 +437,7 @@ mod tests {
         );
 
         let second = sched.pop().unwrap();
-        assert_eq!(second.sequence(), seq_b);
+        assert_eq!(second.sequence_num(), seq_b);
         assert!(
             (&*second.payload() as &dyn std::any::Any)
                 .downcast_ref::<OtherMsg>()
@@ -447,7 +450,7 @@ mod tests {
                 .downcast_ref::<TestMsg>()
                 .is_some_and(|m| m.0 == 42)
         );
-        assert!(third.sequence() > seq_b);
+        assert!(third.sequence_num() > seq_b);
 
         assert!(sched.pop().is_none());
     }
