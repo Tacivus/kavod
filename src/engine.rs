@@ -27,6 +27,12 @@ pub struct Engine {
     pub(crate) clock: Box<dyn Clock>,
 }
 
+/// Ensures that `Engine` is send
+const _: () = {
+    fn assert_send<T: Send>() {}
+    let _ = assert_send::<Engine>;
+};
+
 impl Engine {
     /// Start configuration with the given engine config.
     pub fn builder(config: EngineConfig) -> EngineBuilder {
