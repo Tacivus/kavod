@@ -1,4 +1,4 @@
-use std::{any::TypeId, collections::HashSet, sync::Arc};
+use std::{any::TypeId, collections::HashMap, sync::Arc};
 
 use thiserror::Error;
 
@@ -32,40 +32,84 @@ pub enum HandlerOutputError {
     SequenceExhaustion,
 }
 
+/// Identity of a message type for graph metadata and diagnostics.
+///
+/// `id` is used for equality and runtime checks.
+/// `name` is captured at registration via `type_name::<M>()` for build errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MessageType {
+    pub(crate) id: TypeId,
+    pub(crate) name: &'static str,
+}
+
+impl MessageType {
+    pub(crate) fn of<M: Message>() -> Self {
+        Self {
+            id: TypeId::of::<M>(),
+            name: std::any::type_name::<M>(),
+        }
+    }
+}
+
 /// Set of message types that a handler callback has declared it may produce.
 ///
-/// Populated during handler registration and frozen at build time.  At
-/// runtime every [`HandlerOutput::send`] and [`HandlerOutput::send_at`]
-/// call checks that the outgoing message type is contained in this set.
+/// Populated during handler registration and frozen at build time. At
+/// runtime every [`HandlerOutput::send`] / [`send_at`] checks membership by
+/// `TypeId`. At build time the graph walks [`iter`] for orphan validation
+/// and readable `MissingConsumer` diagnostics.
 #[derive(Debug, Default)]
 pub(crate) struct ProductionSet {
-    types: HashSet<TypeId>,
+    /// Keyed by TypeId so runtime checks stay O(1).
+    /// Value is the printable type name captured at insert.
+    types: HashMap<TypeId, &'static str>,
 }
 
 impl ProductionSet {
-    /// Returns an empty production set.
     pub(crate) fn new() -> Self {
         Self {
-            types: HashSet::new(),
+            types: HashMap::new(),
         }
     }
 
     /// Register that a handler may produce messages of type `M`.
+    ///
+    /// Stores both `TypeId` (runtime checks) and `type_name::<M>()` (graph
+    /// diagnostics). Re-inserting the same type is a no-op.
     pub(crate) fn insert<M: Message>(&mut self) {
-        self.types.insert(TypeId::of::<M>());
+        let mt = MessageType::of::<M>();
+        self.types.entry(mt.id).or_insert(mt.name);
     }
 
     /// Returns `true` if type `M` is in the declared production set.
     pub(crate) fn contains<M: Message>(&self) -> bool {
-        self.types.contains(&TypeId::of::<M>())
+        self.types.contains_key(&TypeId::of::<M>())
     }
 
     /// Returns `true` if no message types have been declared.
     pub(crate) fn is_empty(&self) -> bool {
         self.types.is_empty()
     }
-}
 
+    /// Number of distinct declared production types.
+    pub(crate) fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Iterate declared productions for graph validation.
+    ///
+    /// Order is not significant (HashMap). Callers that need stable order
+    /// should sort by `name` or registration order at a higher layer.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = MessageType> + '_ {
+        self.types
+            .iter()
+            .map(|(&id, &name)| MessageType { id, name })
+    }
+
+    /// Collect declared productions into a Vec (convenience for graph builder).
+    pub(crate) fn to_vec(&self) -> Vec<MessageType> {
+        self.iter().collect()
+    }
+}
 /// Internal output capability that directly allocates sequence numbers and
 /// inserts into the scheduler.
 ///
@@ -210,6 +254,53 @@ mod tests {
         assert!(set.contains::<TestMsg>());
         assert!(set.contains::<OtherMsg>());
         assert!(!set.is_empty());
+    }
+
+    /// Invariant: insert stores a non-empty type name for diagnostics
+    #[test]
+    fn test_production_set_stores_type_name() {
+        let mut set = ProductionSet::new();
+        set.insert::<TestMsg>();
+
+        let produced: Vec<_> = set.iter().collect();
+        assert_eq!(produced.len(), 1);
+        assert_eq!(produced[0].id, TypeId::of::<TestMsg>());
+        assert!(
+            produced[0].name.contains("TestMsg"),
+            "expected type name to mention TestMsg, got {}",
+            produced[0].name
+        );
+    }
+
+    /// Invariant: iter returns every inserted type with its TypeId
+    #[test]
+    fn test_production_set_iter_all_inserted_types() {
+        let mut set = ProductionSet::new();
+        set.insert::<TestMsg>();
+        set.insert::<OtherMsg>();
+
+        let ids: Vec<TypeId> = set.iter().map(|mt| mt.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&TypeId::of::<TestMsg>()));
+        assert!(ids.contains(&TypeId::of::<OtherMsg>()));
+    }
+
+    /// Invariant: duplicate insert does not grow the set
+    #[test]
+    fn test_production_set_duplicate_insert_is_idempotent() {
+        let mut set = ProductionSet::new();
+        set.insert::<TestMsg>();
+        set.insert::<TestMsg>();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains::<TestMsg>());
+    }
+
+    /// Invariant: MessageType::of captures id and name together
+    #[test]
+    fn test_message_type_of() {
+        let mt = MessageType::of::<TestMsg>();
+        assert_eq!(mt.id, TypeId::of::<TestMsg>());
+        assert!(mt.name.contains("TestMsg"));
     }
 
     // ========================================================================
