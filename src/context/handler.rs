@@ -2,7 +2,7 @@ use crate::{
     cache::{Cache, State},
     message::Message,
     output::{HandlerOutput, HandlerOutputError, ProductionSet},
-    time::timestamp::Timestamp,
+    time::Timestamp,
 };
 
 /// Context passed to handler callbacks.
@@ -101,7 +101,7 @@ mod tests {
         output::{HandlerOutput, ProductionSet},
         schedule::Scheduler,
         sequence::Sequencer,
-        time::timestamp::Timestamp,
+        time::Timestamp,
     };
 
     // ========================================================================

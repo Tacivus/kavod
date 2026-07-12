@@ -1,6 +1,6 @@
 use crate::{
     cache::{Cache, State},
-    clock::sim::SimClock,
+    clock::SimClock,
     config::{EngineConfig, Mode},
     context::{handler::HandlerCtx, reducer::ReducerCtx},
     engine::Engine,
@@ -106,7 +106,7 @@ impl EngineBuilder {
             handlers: self.handlers,
             graph,
             dispatch_time,
-            clock: Box::new(SimClock::new(dispatch_time)),
+            clock: Box::new(SimClock::from_ts(dispatch_time)),
         })
     }
 }
@@ -114,7 +114,7 @@ impl EngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{cache::State, message::Message, time::timestamp::Timestamp};
+    use crate::{cache::State, message::Message, time::Timestamp};
     use std::any::TypeId;
 
     // ========================================================================

@@ -1,2 +1,2 @@
-pub mod handler;
-pub mod reducer;
+pub(crate) mod handler;
+pub(crate) mod reducer;

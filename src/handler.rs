@@ -11,7 +11,7 @@ use crate::{
     output::{HandlerOutput, MessageType, ProductionSet},
     schedule::Scheduler,
     sequence::Sequencer,
-    time::timestamp::Timestamp,
+    time::Timestamp,
 };
 
 type ErasedHandler =
@@ -261,10 +261,7 @@ impl<'a> HandlerRegistrar<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        cache::State, message::Message, output::HandlerOutput, schedule::Scheduler,
-        time::timestamp::Timestamp,
-    };
+    use crate::{cache::State, message::Message, output::HandlerOutput, schedule::Scheduler};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},

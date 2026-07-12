@@ -6,7 +6,7 @@ use crate::{
     message::Message,
     schedule::Scheduler,
     sequence::{SeqNo, Sequencer},
-    time::timestamp::Timestamp,
+    time::Timestamp,
 };
 
 /// Errors that can occur when a handler produces output through [`HandlerOutput`].

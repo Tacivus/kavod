@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use crate::{
         cache::{Cache, State},
-        time::timestamp::Timestamp,
+        time::Timestamp,
     };
     use std::sync::{
         Arc, Mutex,

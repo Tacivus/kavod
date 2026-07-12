@@ -1,6 +1,6 @@
 use crate::{
     cache::{Cache, DuplicateState, State},
-    time::timestamp::Timestamp,
+    time::Timestamp,
 };
 
 #[derive(Debug)]
@@ -10,7 +10,7 @@ pub struct ReducerCtx<'a> {
 }
 
 impl<'a> ReducerCtx<'a> {
-    pub fn new(dispatch_time: Timestamp, cache: &'a mut Cache) -> Self {
+    pub(crate) fn new(dispatch_time: Timestamp, cache: &'a mut Cache) -> Self {
         Self {
             dispatch_time,
             cache,

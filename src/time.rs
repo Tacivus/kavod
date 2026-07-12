@@ -1,5 +1,7 @@
-pub mod duration;
-pub mod timestamp;
+mod duration;
+mod timestamp;
+pub use duration::Duration;
+pub use timestamp::Timestamp;
 
 use thiserror::Error;
 

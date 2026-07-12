@@ -4,7 +4,7 @@ use crate::{
     builder::EngineBuilder, cache::Cache, clock::Clock, config::EngineConfig,
     context::reducer::ReducerCtx, error::EngineError, graph::ValidatedGraph,
     handler::HandlerRegistry, message::Message, reducer::ReducerRegistry, schedule::Scheduler,
-    sequence::Sequencer, time::timestamp::Timestamp,
+    sequence::Sequencer, time::Timestamp,
 };
 
 /// Runtime engine after topology freeze.
@@ -173,7 +173,7 @@ mod tests {
     use super::*;
     use crate::{
         cache::State, context::handler::HandlerCtx, context::reducer::ReducerCtx, message::Message,
-        sequence::Sequencer, time::timestamp::Timestamp,
+        sequence::Sequencer,
     };
     use std::{
         any::Any,

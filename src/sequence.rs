@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum SequenceError {
+pub(crate) enum SequenceError {
     #[error("sequence overflowed")]
     Overflow,
 }

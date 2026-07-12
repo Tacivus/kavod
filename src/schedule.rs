@@ -3,7 +3,7 @@ use std::{collections::BinaryHeap, sync::Arc};
 use crate::{
     message::{Message, SharedMessage},
     sequence::SeqNo,
-    time::timestamp::Timestamp,
+    time::Timestamp,
 };
 
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::time::timestamp::Timestamp;
+use crate::time::Timestamp;
 
 /// Errors returned during engine construction via [`EngineBuilder::build`].
 ///

@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::{clock::Clock, time::timestamp::Timestamp};
+use crate::{clock::Clock, time::Timestamp};
 
 /// The clock that will be used in live contexts. It gets its time from the
 /// system clock.
