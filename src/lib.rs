@@ -2,7 +2,9 @@
 
 pub mod cache;
 pub mod clock;
+pub mod config;
 pub mod decimal;
+pub mod error;
 pub mod message;
 pub mod price;
 pub mod quantity;
