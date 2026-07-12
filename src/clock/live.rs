@@ -50,7 +50,7 @@ mod tests {
     /// Invariant: LiveClock::default() yields a valid clock equivalent to new()
     #[test]
     fn test_default() {
-        let clock = LiveClock::default();
+        let clock = LiveClock;
         assert_ne!(clock.now().raw(), 0);
     }
 

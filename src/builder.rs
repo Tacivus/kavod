@@ -1,4 +1,6 @@
 use crate::{
+    ActorBuilder,
+    actor::ActorRegistry,
     cache::{Cache, State},
     clock::SimClock,
     config::{EngineConfig, Mode},
@@ -23,6 +25,7 @@ pub struct EngineBuilder {
     seed_cache: Cache,
     reducers: ReducerRegistry,
     handlers: HandlerRegistry,
+    actors: ActorRegistry,
 }
 
 impl EngineBuilder {
@@ -32,6 +35,7 @@ impl EngineBuilder {
             seed_cache: Cache::new(),
             reducers: ReducerRegistry::new(),
             handlers: HandlerRegistry::new(),
+            actors: ActorRegistry::new(),
         }
     }
 
@@ -77,6 +81,23 @@ impl EngineBuilder {
         self.handlers.handler_group(state, configure);
     }
 
+    /// Register an actor with private state and declarative configuration.
+    ///
+    /// `name` must be unique. Users configure capacity and subscriptions;
+    /// they never construct mailboxes, channels, or handles.
+    ///
+    /// Actor callbacks are stored for later execution phases but are not
+    /// invoked by the Phase 16 engine loop.
+    pub fn actor<A: Send + 'static>(
+        &mut self,
+        name: &'static str,
+        state: A,
+        configure: impl FnOnce(&mut ActorBuilder<'_, A>),
+    ) -> Result<&mut Self, BuildError> {
+        self.actors.register(name, state, configure)?;
+        Ok(self)
+    }
+
     /// Validate topology, freeze registrations, and construct an [`Engine`].
     ///
     /// - Rejects non-backtest modes until those runtimes exist.
@@ -94,7 +115,7 @@ impl EngineBuilder {
             }
         }
 
-        let graph = build_graph(&self.reducers, &self.handlers)?;
+        let graph = build_graph(&self.reducers, &self.handlers, &self.actors)?;
         let dispatch_time = self.config.initial_dispatch_time();
 
         Ok(Engine {
@@ -104,6 +125,7 @@ impl EngineBuilder {
             cache: self.seed_cache,
             reducers: self.reducers,
             handlers: self.handlers,
+            actors: self.actors,
             graph,
             dispatch_time,
             clock: Box::new(SimClock::from_ts(dispatch_time)),
@@ -398,5 +420,77 @@ mod tests {
         let config = EngineConfig::backtest(Timestamp::new(0)).with_max_events_per_instant(500);
         let engine = Engine::builder(config).build().unwrap();
         assert_eq!(engine.config().max_events_per_instant(), 500);
+    }
+
+    // ========================================================================
+    // Actors (metadata only)
+    // ========================================================================
+
+    struct VenueState;
+
+    // Invariant: duplicate actor names fail registration
+    #[test]
+    fn test_duplicate_actor_names_fail() {
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder.actor("venue", VenueState, |_a| {}).unwrap();
+        let err = match builder.actor("venue", VenueState, |_a| {}) {
+            Err(e) => e,
+            Ok(_) => panic!("expected DuplicateRegistrationIdentity"),
+        };
+        assert!(matches!(
+            err,
+            BuildError::DuplicateRegistrationIdentity { name: "venue" }
+        ));
+    }
+
+    /// Invariant: actor .on satisfies orphan handler production
+    #[test]
+    fn test_actor_satisfies_handler_orphan_production() {
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .on(|_ctx: &mut HandlerCtx<'_>, _msg: &MsgA| {})
+            .produces::<MsgB>();
+        builder
+            .actor("venue", VenueState, |actor| {
+                actor.on(|_s, _msg: &MsgB| {});
+            })
+            .unwrap();
+        let engine = builder.build().unwrap();
+        assert!(engine.has_consumer(TypeId::of::<MsgB>()));
+    }
+
+    /// Invariant: actor production with no consumer fails build
+    #[test]
+    fn test_actor_orphan_production_prevents_build() {
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("venue", VenueState, |actor| {
+                actor.on(|_s, _msg: &MsgA| {}).produces::<Orphan>();
+            })
+            .unwrap();
+        let err = match builder.build() {
+            Err(e) => e,
+            Ok(_) => panic!("expected MissingConsumer"),
+        };
+        match err {
+            BuildError::MissingConsumer { message_type } => {
+                assert!(message_type.contains("Orphan"));
+            }
+            other => panic!("expected MissingConsumer, got {other:?}"),
+        }
+    }
+
+    /// Invariant: actor-only terminal consumer builds and is in the consumer set
+    #[test]
+    fn test_actor_terminal_consumer_builds() {
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("venue", VenueState, |actor| {
+                actor.inbox_capacity(64);
+                actor.on(|_s, _msg: &MsgA| {});
+            })
+            .unwrap();
+        let engine = builder.build().unwrap();
+        assert!(engine.has_consumer(TypeId::of::<MsgA>()));
     }
 }

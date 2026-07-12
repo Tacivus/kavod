@@ -1,3 +1,4 @@
+mod actor;
 mod builder;
 mod cache;
 mod clock;
@@ -18,6 +19,7 @@ pub mod price;
 pub mod quantity;
 pub mod time;
 
+pub use actor::{ActorBuilder, ActorRegistrar};
 pub use builder::EngineBuilder;
 pub use cache::{Cache, DuplicateState, State};
 pub use clock::{Clock, LiveClock, SimClock};

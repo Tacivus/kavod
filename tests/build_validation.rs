@@ -122,3 +122,68 @@ fn test_unconsumed_ingress_rejected() {
             if message_type.contains("MsgA")
     ));
 }
+
+// ========================================================================
+// Actors (metadata / graph only)
+// ========================================================================
+
+struct VenueState;
+
+/// Invariant: actor subscription satisfies handler orphan production at build.
+#[test]
+fn test_actor_satisfies_orphan_handler_production() {
+    #[derive(Debug)]
+    struct Produced;
+    impl Message for Produced {}
+
+    let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+    builder
+        .on(|_ctx: &mut HandlerCtx<'_>, _msg: &MsgA| {})
+        .produces::<Produced>();
+    builder
+        .actor("venue", VenueState, |actor| {
+            actor.on(|_s, _msg: &Produced| {});
+        })
+        .unwrap();
+    builder.build().unwrap();
+}
+
+/// Invariant: duplicate actor names fail with DuplicateRegistrationIdentity.
+#[test]
+fn test_duplicate_actor_name_fails() {
+    let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+    builder.actor("venue", VenueState, |_| {}).unwrap();
+    let err = match builder.actor("venue", VenueState, |_| {}) {
+        Err(e) => e,
+        Ok(_) => panic!("expected duplicate actor name error"),
+    };
+    assert!(matches!(
+        err,
+        BuildError::DuplicateRegistrationIdentity { name: "venue" }
+    ));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("venue") || msg.contains("duplicate"),
+        "expected readable diagnostic, got: {msg}"
+    );
+}
+
+/// Invariant: actor orphan production fails build with readable type name.
+#[test]
+fn test_actor_orphan_production_prevents_build() {
+    let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+    builder
+        .actor("venue", VenueState, |actor| {
+            actor.on(|_s, _msg: &MsgA| {}).produces::<Orphan>();
+        })
+        .unwrap();
+    let err = match builder.build() {
+        Err(e) => e,
+        Ok(_) => panic!("expected orphan production build error"),
+    };
+    assert!(matches!(
+        err,
+        BuildError::MissingConsumer { message_type }
+            if message_type.contains("Orphan")
+    ));
+}

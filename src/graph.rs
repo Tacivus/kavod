@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    error::BuildError, handler::HandlerRegistry, output::MessageType, reducer::ReducerRegistry,
+    actor::ActorRegistry, error::BuildError, handler::HandlerRegistry, output::MessageType,
+    reducer::ReducerRegistry,
 };
 
 /// Kind of registered consumer callback.
@@ -12,6 +13,7 @@ use crate::{
 pub(crate) enum ConsumerKind {
     Reducer,
     Handler,
+    Actor,
 }
 
 /// Stable identity for one registered consumer (reducer or handler callback).
@@ -111,7 +113,7 @@ pub(crate) struct ValidatedGraph {
 }
 
 impl ValidatedGraph {
-    /// Returns true if at least one reducer or handler consumes `type_id`.
+    /// Returns true if at least one reducer, handler, or actor consumes `type_id`.
     pub(crate) fn has_consumer(&self, type_id: TypeId) -> bool {
         self.consumer_type_ids.contains(&type_id)
     }
@@ -121,6 +123,7 @@ impl ValidatedGraph {
 pub(crate) fn build_graph(
     reducers: &ReducerRegistry,
     handlers: &HandlerRegistry,
+    actors: &ActorRegistry,
 ) -> Result<ValidatedGraph, BuildError> {
     let mut g = GraphBuilder::new();
 
@@ -130,6 +133,11 @@ pub(crate) fn build_graph(
 
     for (consumed, productions) in handlers.graph_entries() {
         let owner = g.add_consumer(ConsumerKind::Handler, consumed);
+        g.add_producer(owner, consumed, productions.to_vec());
+    }
+
+    for (consumed, productions) in actors.graph_entries() {
+        let owner = g.add_consumer(ConsumerKind::Actor, consumed);
         g.add_producer(owner, consumed, productions.to_vec());
     }
 
@@ -354,7 +362,12 @@ mod tests {
 
     #[test]
     fn build_graph_empty_registries() {
-        let graph = build_graph(&ReducerRegistry::new(), &HandlerRegistry::new()).unwrap();
+        let graph = build_graph(
+            &ReducerRegistry::new(),
+            &HandlerRegistry::new(),
+            &ActorRegistry::new(),
+        )
+        .unwrap();
         assert!(!graph.has_consumer(TypeId::of::<MsgA>()));
     }
 
@@ -363,7 +376,7 @@ mod tests {
         let mut reducers = ReducerRegistry::new();
         reducers.register(|_ctx: &mut ReducerCtx<'_>, _m: &MsgA| {});
 
-        let graph = build_graph(&reducers, &HandlerRegistry::new()).unwrap();
+        let graph = build_graph(&reducers, &HandlerRegistry::new(), &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
     }
 
@@ -372,7 +385,7 @@ mod tests {
         let mut handlers = HandlerRegistry::new();
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {});
 
-        let graph = build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        let graph = build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
     }
 
@@ -387,7 +400,7 @@ mod tests {
             .produces::<MsgC>();
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgC| {});
 
-        build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
     }
 
     #[test]
@@ -397,7 +410,8 @@ mod tests {
             .on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
             .produces::<Orphan>();
 
-        let err = build_graph(&ReducerRegistry::new(), &handlers).unwrap_err();
+        let err =
+            build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap_err();
         match err {
             BuildError::MissingConsumer { message_type } => {
                 assert!(
@@ -419,7 +433,7 @@ mod tests {
             .on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
             .produces::<MsgB>();
 
-        let graph = build_graph(&reducers, &handlers).unwrap();
+        let graph = build_graph(&reducers, &handlers, &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
         assert!(graph.has_consumer(TypeId::of::<MsgB>()));
     }
@@ -436,7 +450,7 @@ mod tests {
             group.on(|_s: &mut S, _ctx: &mut HandlerCtx<'_>, _m: &MsgB| {});
         });
 
-        build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
     }
 
     #[test]
@@ -449,7 +463,7 @@ mod tests {
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgB| {});
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgC| {});
 
-        build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
     }
 
     /// Reducer and handler both consuming the same type still validates.
@@ -461,7 +475,7 @@ mod tests {
         let mut handlers = HandlerRegistry::new();
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {});
 
-        let graph = build_graph(&reducers, &handlers).unwrap();
+        let graph = build_graph(&reducers, &handlers, &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
     }
 
@@ -474,7 +488,7 @@ mod tests {
             .on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
             .produces::<MsgA>();
 
-        build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
     }
 
     /// Multiple reducers on the same message type all count as consumers.
@@ -489,7 +503,7 @@ mod tests {
             .on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
             .produces::<MsgB>();
 
-        let graph = build_graph(&reducers, &handlers).unwrap();
+        let graph = build_graph(&reducers, &handlers, &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgA>()));
         assert!(graph.has_consumer(TypeId::of::<MsgB>()));
     }
@@ -503,7 +517,84 @@ mod tests {
             .produces::<MsgB>();
         handlers.on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgB| {});
 
-        let graph = build_graph(&ReducerRegistry::new(), &handlers).unwrap();
+        let graph = build_graph(&ReducerRegistry::new(), &handlers, &ActorRegistry::new()).unwrap();
         assert!(graph.has_consumer(TypeId::of::<MsgB>()));
+    }
+
+    /// Invariant: actor counts as consumer of a produced type
+    #[test]
+    fn actor_counts_as_consumer() {
+        let mut g = GraphBuilder::new();
+        let h = g.add_consumer(ConsumerKind::Handler, MessageType::of::<MsgA>());
+        g.add_consumer(ConsumerKind::Actor, MessageType::of::<MsgB>());
+        g.add_producer(
+            h,
+            MessageType::of::<MsgA>(),
+            vec![MessageType::of::<MsgB>()],
+        );
+        g.build().unwrap();
+    }
+
+    /// Invariant: orphan actor production returns MissingConsumer with type name
+    #[test]
+    fn actor_orphan_production_returns_build_error() {
+        let mut g = GraphBuilder::new();
+        let a = g.add_consumer(ConsumerKind::Actor, MessageType::of::<MsgA>());
+        g.add_producer(
+            a,
+            MessageType::of::<MsgA>(),
+            vec![MessageType::of::<Orphan>()],
+        );
+        let err = g.build().unwrap_err();
+        match err {
+            BuildError::MissingConsumer { message_type } => {
+                assert!(message_type.contains("Orphan"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Invariant: actor registry subscriptions participate in build_graph
+    #[test]
+    fn build_graph_actor_satisfies_handler_production() {
+        struct S;
+
+        let mut handlers = HandlerRegistry::new();
+        handlers
+            .on(|_ctx: &mut HandlerCtx<'_>, _m: &MsgA| {})
+            .produces::<MsgB>();
+
+        let mut actors = ActorRegistry::new();
+        actors
+            .register("venue", S, |actor| {
+                actor.on(|_s, _m: &MsgB| {});
+            })
+            .unwrap();
+
+        let graph = build_graph(&ReducerRegistry::new(), &handlers, &actors).unwrap();
+        assert!(graph.has_consumer(TypeId::of::<MsgA>()));
+        assert!(graph.has_consumer(TypeId::of::<MsgB>()));
+    }
+
+    /// Invariant: actor orphan production fails via build_graph
+    #[test]
+    fn build_graph_actor_orphan_production() {
+        struct S;
+
+        let mut actors = ActorRegistry::new();
+        actors
+            .register("venue", S, |actor| {
+                actor.on(|_s, _m: &MsgA| {}).produces::<Orphan>();
+            })
+            .unwrap();
+
+        let err =
+            build_graph(&ReducerRegistry::new(), &HandlerRegistry::new(), &actors).unwrap_err();
+        match err {
+            BuildError::MissingConsumer { message_type } => {
+                assert!(message_type.contains("Orphan"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

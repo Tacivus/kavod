@@ -1,7 +1,7 @@
 use std::any::TypeId;
 
 use crate::{
-    builder::EngineBuilder, cache::Cache, clock::Clock, config::EngineConfig,
+    actor::ActorRegistry, builder::EngineBuilder, cache::Cache, clock::Clock, config::EngineConfig,
     context::reducer::ReducerCtx, error::EngineError, graph::ValidatedGraph,
     handler::HandlerRegistry, message::Message, reducer::ReducerRegistry, schedule::Scheduler,
     sequence::Sequencer, time::Timestamp,
@@ -22,6 +22,8 @@ pub struct Engine {
     pub(crate) cache: Cache,
     pub(crate) reducers: ReducerRegistry,
     pub(crate) handlers: HandlerRegistry,
+    #[expect(dead_code)]
+    pub(crate) actors: ActorRegistry,
     pub(crate) graph: ValidatedGraph,
     pub(crate) dispatch_time: Timestamp,
     pub(crate) clock: Box<dyn Clock>,
@@ -74,7 +76,7 @@ impl Engine {
     /// 5. Run matching handlers (immutable cache; direct scheduling)
     ///
     /// Produced messages are not dispatched recursively; they re-enter only
-    /// via a later pop. Actors are not delivered in this phase.
+    /// via a later pop. Actor callbacks are registered but not delivered yet    u
     pub fn run(&mut self) -> Result<(), EngineError> {
         let max_events = self.config.max_events_per_instant();
         let mut same_instant_count = 0usize;
@@ -1047,5 +1049,31 @@ mod tests {
         engine.push_event(t0, MsgA(2)).unwrap();
         engine.run().unwrap();
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    /// Invariant: push_event + run does not invoke actor callbacks (Phase 16)
+    #[test]
+    fn test_run_does_not_invoke_actor_callbacks() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        #[derive(Debug)]
+        struct Tick;
+        impl Message for Tick {}
+
+        struct Counter;
+        static HITS: AtomicU64 = AtomicU64::new(0);
+
+        let mut builder = Engine::builder(EngineConfig::backtest(Timestamp::new(0)));
+        builder
+            .actor("counter", Counter, |actor| {
+                actor.on(|_s, _m: &Tick| {
+                    HITS.fetch_add(1, Ordering::SeqCst);
+                });
+            })
+            .unwrap();
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(0), Tick).unwrap();
+        engine.run().unwrap();
+        assert_eq!(HITS.load(Ordering::SeqCst), 0);
     }
 }
