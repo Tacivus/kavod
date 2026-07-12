@@ -13,6 +13,14 @@ pub enum SequenceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SeqNo(u64);
 
+#[cfg(test)]
+impl SeqNo {
+    /// Test-only: construct a `SeqNo` at an arbitrary value.
+    pub(crate) fn from_raw(n: u64) -> Self {
+        Self(n)
+    }
+}
+
 /// A monotonically increasing kernel-owned sequencer that allocates `SeqNo`
 #[derive(Debug)]
 pub(crate) struct Sequencer {
@@ -43,6 +51,14 @@ impl Sequencer {
     /// Gets the current `SeqNo`
     pub(crate) fn get(&self) -> SeqNo {
         self.current
+    }
+}
+
+#[cfg(test)]
+impl Sequencer {
+    /// Test-only: construct a sequencer at an arbitrary raw value.
+    pub(crate) fn from_raw(n: u64) -> Self {
+        Self { current: SeqNo(n) }
     }
 }
 

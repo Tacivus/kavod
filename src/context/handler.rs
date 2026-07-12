@@ -380,6 +380,51 @@ mod tests {
         assert!(item_a.sequence_num() < item_b.sequence_num());
     }
 
+    /// Invariant: undeclared ctx.send does not advance the sequencer
+    #[test]
+    fn test_undeclared_send_does_not_advance_sequencer() {
+        let ts = Timestamp::new(0);
+        let cache = Cache::new();
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let before = seq.get();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
+        let productions = ProductionSet::new();
+
+        let mut ctx = HandlerCtx::new(ts, &cache, &mut output, &productions);
+        let result = ctx.send(MyMsg(1));
+
+        assert!(matches!(
+            result,
+            Err(HandlerOutputError::UndeclaredProduction { .. })
+        ));
+        assert_eq!(seq.get(), before);
+        assert!(sched.pop().is_none());
+    }
+
+    /// Invariant: past ctx.send_at does not advance the sequencer
+    #[test]
+    fn test_past_send_at_does_not_advance_sequencer() {
+        let dispatch_ts = Timestamp::new(100);
+        let past_ts = Timestamp::new(50);
+        let cache = Cache::new();
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let before = seq.get();
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<MyMsg>();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
+        let mut ctx = HandlerCtx::new(dispatch_ts, &cache, &mut output, &productions);
+        let result = ctx.send_at(past_ts, MyMsg(1));
+
+        assert!(matches!(result, Err(HandlerOutputError::PastEvent { .. })));
+        assert_eq!(seq.get(), before);
+        assert!(sched.pop().is_none());
+    }
+
     /// Invariant: existing same-time items remain ahead of newly produced
     /// messages
     #[test]

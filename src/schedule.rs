@@ -96,17 +96,9 @@ impl Ord for ScheduledItem {
 mod tests {
     use super::*;
     use crate::message::Message;
-    use crate::sequence::Sequencer;
+    use crate::sequence::SeqNo;
     use std::any::Any;
     use std::sync::Arc;
-
-    fn seq(n: u64) -> SeqNo {
-        let mut s = Sequencer::initial();
-        for _ in 0..n {
-            s.next().unwrap();
-        }
-        s.get()
-    }
 
     #[derive(Clone, Debug, PartialEq)]
     struct TestMsg(u64);
@@ -138,11 +130,11 @@ mod tests {
     #[test]
     fn test_push_msg_pop_roundtrip() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(42));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(42));
 
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(100));
-        assert_eq!(item.sequence_num, seq(0));
+        assert_eq!(item.sequence_num, SeqNo::from_raw(0));
 
         let payload: &dyn Any = &*item.payload;
         assert_eq!(payload.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
@@ -153,11 +145,11 @@ mod tests {
     fn test_push_shared_msg_pop_roundtrip() {
         let mut sched = Scheduler::new();
         let shared: SharedMessage = Arc::new(TestMsg(42));
-        sched.push_shared_msg(Timestamp::new(100), seq(0), shared);
+        sched.push_shared_msg(Timestamp::new(100), SeqNo::from_raw(0), shared);
 
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(100));
-        assert_eq!(item.sequence_num, seq(0));
+        assert_eq!(item.sequence_num, SeqNo::from_raw(0));
 
         let payload: &dyn Any = &*item.payload;
         assert_eq!(payload.downcast_ref::<TestMsg>(), Some(&TestMsg(42)));
@@ -169,7 +161,7 @@ mod tests {
         let mut sched = Scheduler::new();
         let n = 5;
         for i in 0..n {
-            sched.push_msg(Timestamp::new(100), seq(i), TestMsg(i));
+            sched.push_msg(Timestamp::new(100), SeqNo::from_raw(i), TestMsg(i));
         }
         for _ in 0..n {
             assert!(sched.pop().is_some());
@@ -190,11 +182,11 @@ mod tests {
     #[test]
     fn test_push_after_empty_works() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(1));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
         assert!(sched.pop().is_some());
         assert!(sched.pop().is_none());
 
-        sched.push_msg(Timestamp::new(200), seq(1), TestMsg(2));
+        sched.push_msg(Timestamp::new(200), SeqNo::from_raw(1), TestMsg(2));
         let item = sched.pop().unwrap();
         assert_eq!(item.dispatch_time, Timestamp::new(200));
         assert_eq!(sched.len(), 0);
@@ -208,8 +200,8 @@ mod tests {
     #[test]
     fn test_earliest_ts_pops_first() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(200), seq(0), TestMsg(2));
-        sched.push_msg(Timestamp::new(100), seq(1), TestMsg(1));
+        sched.push_msg(Timestamp::new(200), SeqNo::from_raw(0), TestMsg(2));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(1));
 
         assert_eq!(sched.pop().unwrap().dispatch_time, Timestamp::new(100));
         assert_eq!(sched.pop().unwrap().dispatch_time, Timestamp::new(200));
@@ -219,26 +211,26 @@ mod tests {
     #[test]
     fn test_same_ts_lower_seq_pops_first() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(1), TestMsg(2));
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(1));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(2));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
 
         let first = sched.pop().unwrap();
-        assert_eq!(first.sequence_num, seq(0));
+        assert_eq!(first.sequence_num, SeqNo::from_raw(0));
         let second = sched.pop().unwrap();
-        assert_eq!(second.sequence_num, seq(1));
+        assert_eq!(second.sequence_num, SeqNo::from_raw(1));
     }
 
     /// Invariant: same ts, inserted in seq order, pops in seq order regardless
     #[test]
     fn test_same_ts_inserted_in_seq_order_pops_in_seq_order() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(0));
-        sched.push_msg(Timestamp::new(100), seq(1), TestMsg(1));
-        sched.push_msg(Timestamp::new(100), seq(2), TestMsg(2));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(0));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(1));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(2), TestMsg(2));
 
-        assert_eq!(sched.pop().unwrap().sequence_num, seq(0));
-        assert_eq!(sched.pop().unwrap().sequence_num, seq(1));
-        assert_eq!(sched.pop().unwrap().sequence_num, seq(2));
+        assert_eq!(sched.pop().unwrap().sequence_num, SeqNo::from_raw(0));
+        assert_eq!(sched.pop().unwrap().sequence_num, SeqNo::from_raw(1));
+        assert_eq!(sched.pop().unwrap().sequence_num, SeqNo::from_raw(2));
     }
 
     /// Invariant: dispatch_time is always the primary sort key, seq only
@@ -246,21 +238,21 @@ mod tests {
     #[test]
     fn test_interleaved_timestamps_pop_in_correct_order() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(10), seq(0), TestMsg(3));
-        sched.push_msg(Timestamp::new(5), seq(1), TestMsg(2));
-        sched.push_msg(Timestamp::new(15), seq(2), TestMsg(1));
+        sched.push_msg(Timestamp::new(10), SeqNo::from_raw(0), TestMsg(3));
+        sched.push_msg(Timestamp::new(5), SeqNo::from_raw(1), TestMsg(2));
+        sched.push_msg(Timestamp::new(15), SeqNo::from_raw(2), TestMsg(1));
 
         let e1 = sched.pop().unwrap();
         assert_eq!(e1.dispatch_time, Timestamp::new(5));
-        assert_eq!(e1.sequence_num, seq(1));
+        assert_eq!(e1.sequence_num, SeqNo::from_raw(1));
 
         let e2 = sched.pop().unwrap();
         assert_eq!(e2.dispatch_time, Timestamp::new(10));
-        assert_eq!(e2.sequence_num, seq(0));
+        assert_eq!(e2.sequence_num, SeqNo::from_raw(0));
 
         let e3 = sched.pop().unwrap();
         assert_eq!(e3.dispatch_time, Timestamp::new(15));
-        assert_eq!(e3.sequence_num, seq(2));
+        assert_eq!(e3.sequence_num, SeqNo::from_raw(2));
     }
 
     /// Invariant: within same dispatch_time, seq is the tiebreaker
@@ -268,16 +260,16 @@ mod tests {
     #[test]
     fn test_same_ts_seq_tiebreaker_regardless_of_push_order() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(42), seq(5), TestMsg(5));
-        sched.push_msg(Timestamp::new(42), seq(0), TestMsg(0));
-        sched.push_msg(Timestamp::new(42), seq(3), TestMsg(3));
-        sched.push_msg(Timestamp::new(42), seq(1), TestMsg(1));
-        sched.push_msg(Timestamp::new(42), seq(4), TestMsg(4));
-        sched.push_msg(Timestamp::new(42), seq(2), TestMsg(2));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(5), TestMsg(5));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(0), TestMsg(0));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(3), TestMsg(3));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(1), TestMsg(1));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(4), TestMsg(4));
+        sched.push_msg(Timestamp::new(42), SeqNo::from_raw(2), TestMsg(2));
 
         for expected in 0..=5 {
             let item = sched.pop().unwrap();
-            assert_eq!(item.sequence_num(), seq(expected));
+            assert_eq!(item.sequence_num(), SeqNo::from_raw(expected));
             assert_eq!(item.dispatch_time, Timestamp::new(42));
         }
     }
@@ -292,24 +284,24 @@ mod tests {
     #[test]
     fn test_same_instant_cascade_resolves_before_time_advances() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(0)); // A@T
-        sched.push_msg(Timestamp::new(101), seq(2), TestMsg(2)); // C@T+1
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(0)); // A@T
+        sched.push_msg(Timestamp::new(101), SeqNo::from_raw(2), TestMsg(2)); // C@T+1
 
         let a = sched.pop().unwrap();
         assert_eq!(a.dispatch_time, Timestamp::new(100));
-        assert_eq!(a.sequence_num(), seq(0));
+        assert_eq!(a.sequence_num(), SeqNo::from_raw(0));
 
         // Simulate handler producing B@T with a higher seq
-        sched.push_msg(Timestamp::new(100), seq(1), TestMsg(1)); // B@T
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(1)); // B@T
 
         let b = sched.pop().unwrap();
         assert_eq!(b.dispatch_time, Timestamp::new(100));
-        assert_eq!(b.sequence_num(), seq(1));
+        assert_eq!(b.sequence_num(), SeqNo::from_raw(1));
 
         // Only now does time advance
         let c = sched.pop().unwrap();
         assert_eq!(c.dispatch_time, Timestamp::new(101));
-        assert_eq!(c.sequence_num(), seq(2));
+        assert_eq!(c.sequence_num(), SeqNo::from_raw(2));
     }
 
     // ========================================================================
@@ -320,40 +312,40 @@ mod tests {
     ///             of payload value
     #[test]
     fn test_item_eq_same_ts_same_seq_different_payload() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(2));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(2));
         assert_eq!(a, b);
     }
 
     /// Invariant: same dispatch_time + same sequence + same payload = equal
     #[test]
     fn test_item_eq_same_ts_same_seq_same_payload() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(42));
-        let b = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(42));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(42));
+        let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(42));
         assert_eq!(a, b);
     }
 
     /// Invariant: payload message type does not participate in equality
     #[test]
     fn test_item_eq_independent_of_message_type() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(100), seq(0), OtherMsg(1));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), OtherMsg(1));
         assert_eq!(a, b);
     }
 
     /// Invariant: different dispatch_time => not equal
     #[test]
     fn test_item_ne_different_ts() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(200), seq(0), TestMsg(1));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(200), SeqNo::from_raw(0), TestMsg(1));
         assert_ne!(a, b);
     }
 
     /// Invariant: different sequence => not equal
     #[test]
     fn test_item_ne_different_seq() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(100), seq(1), TestMsg(1));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(1));
         assert_ne!(a, b);
     }
 
@@ -365,8 +357,8 @@ mod tests {
     ///             Ord for min-heap)
     #[test]
     fn test_item_ord_earlier_ts_greater() {
-        let early = ScheduledItem::new(Timestamp::new(50), seq(0), TestMsg(1));
-        let late = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(2));
+        let early = ScheduledItem::new(Timestamp::new(50), SeqNo::from_raw(0), TestMsg(1));
+        let late = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(2));
         assert!(early > late);
         assert!(!(late > early));
     }
@@ -374,8 +366,8 @@ mod tests {
     /// Invariant: equal dispatch_time, lower sequence is greater (pops first)
     #[test]
     fn test_item_ord_same_ts_lower_seq_greater() {
-        let low_seq = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(1));
-        let high_seq = ScheduledItem::new(Timestamp::new(100), seq(1), TestMsg(2));
+        let low_seq = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(1));
+        let high_seq = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(1), TestMsg(2));
         assert!(low_seq > high_seq);
         assert!(!(high_seq > low_seq));
     }
@@ -383,17 +375,18 @@ mod tests {
     /// Invariant: dispatch_time dominates sequence in ordering
     #[test]
     fn test_item_ord_ts_dominates_seq() {
-        let early_high_seq = ScheduledItem::new(Timestamp::new(50), seq(100), TestMsg(1));
-        let late_low_seq = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(2));
+        let early_high_seq =
+            ScheduledItem::new(Timestamp::new(50), SeqNo::from_raw(100), TestMsg(1));
+        let late_low_seq = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(2));
         assert!(early_high_seq > late_low_seq);
     }
 
     /// Invariant: transitivity of the reversed Ord
     #[test]
     fn test_item_ord_transitive() {
-        let a = ScheduledItem::new(Timestamp::new(10), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(10), seq(1), TestMsg(2));
-        let c = ScheduledItem::new(Timestamp::new(20), seq(0), TestMsg(3));
+        let a = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(1), TestMsg(2));
+        let c = ScheduledItem::new(Timestamp::new(20), SeqNo::from_raw(0), TestMsg(3));
         assert!(a > b); // lower seq > higher seq
         assert!(b > c); // earlier ts > later ts
         assert!(a > c); // transitivity: T=10 > T=20
@@ -402,8 +395,8 @@ mod tests {
     /// Invariant: antisymmetry — if a > b then not (b > a)
     #[test]
     fn test_item_ord_antisymmetric() {
-        let a = ScheduledItem::new(Timestamp::new(10), seq(0), TestMsg(1));
-        let b = ScheduledItem::new(Timestamp::new(10), seq(1), TestMsg(2));
+        let a = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(0), TestMsg(1));
+        let b = ScheduledItem::new(Timestamp::new(10), SeqNo::from_raw(1), TestMsg(2));
         assert!(a > b);
         assert!(!(b > a));
     }
@@ -411,8 +404,8 @@ mod tests {
     /// Invariant: payload does not affect ordering
     #[test]
     fn test_item_ord_payload_irrelevant() {
-        let a = ScheduledItem::new(Timestamp::new(100), seq(0), TestMsg(999));
-        let b = ScheduledItem::new(Timestamp::new(100), seq(0), OtherMsg(1));
+        let a = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(999));
+        let b = ScheduledItem::new(Timestamp::new(100), SeqNo::from_raw(0), OtherMsg(1));
         assert!(!(a < b));
         assert!(!(b < a));
         assert_eq!(a, b);
@@ -427,7 +420,7 @@ mod tests {
     #[test]
     fn test_popped_payload_is_shared_arc() {
         let mut sched = Scheduler::new();
-        sched.push_msg(Timestamp::new(100), seq(0), TestMsg(42));
+        sched.push_msg(Timestamp::new(100), SeqNo::from_raw(0), TestMsg(42));
 
         let item = sched.pop().unwrap();
         let payload_a = &*item.payload;
@@ -448,7 +441,7 @@ mod tests {
         let shared: SharedMessage = Arc::new(TestMsg(99));
         let retained = shared.clone();
 
-        sched.push_shared_msg(Timestamp::new(100), seq(0), shared);
+        sched.push_shared_msg(Timestamp::new(100), SeqNo::from_raw(0), shared);
 
         let item = sched.pop().unwrap();
         let popped: &TestMsg = (&*item.payload as &dyn Any)
@@ -469,13 +462,17 @@ mod tests {
 
         let mut sched_a = Scheduler::new();
         for &(ts_val, seq_val) in &events {
-            sched_a.push_msg(Timestamp::new(ts_val), seq(seq_val), TestMsg(seq_val));
+            sched_a.push_msg(
+                Timestamp::new(ts_val),
+                SeqNo::from_raw(seq_val),
+                TestMsg(seq_val),
+            );
         }
 
         let mut sched_b = Scheduler::new();
         for &(ts_val, seq_val) in &events {
             let shared: SharedMessage = Arc::new(TestMsg(seq_val));
-            sched_b.push_shared_msg(Timestamp::new(ts_val), seq(seq_val), shared);
+            sched_b.push_shared_msg(Timestamp::new(ts_val), SeqNo::from_raw(seq_val), shared);
         }
 
         while let (Some(a), Some(b)) = (sched_a.pop(), sched_b.pop()) {
@@ -494,19 +491,19 @@ mod tests {
     fn test_out_of_order_insertion_yields_monotonic_pops() {
         let mut sched = Scheduler::new();
         let events = [
-            (Timestamp::new(300), seq(0)),
-            (Timestamp::new(100), seq(2)),
-            (Timestamp::new(200), seq(1)),
-            (Timestamp::new(100), seq(0)),
-            (Timestamp::new(100), seq(1)),
-            (Timestamp::new(200), seq(0)),
+            (Timestamp::new(300), SeqNo::from_raw(0)),
+            (Timestamp::new(100), SeqNo::from_raw(2)),
+            (Timestamp::new(200), SeqNo::from_raw(1)),
+            (Timestamp::new(100), SeqNo::from_raw(0)),
+            (Timestamp::new(100), SeqNo::from_raw(1)),
+            (Timestamp::new(200), SeqNo::from_raw(0)),
         ];
         for (i, (ts, s)) in events.iter().enumerate() {
             sched.push_msg(*ts, *s, TestMsg(i as u64));
         }
 
         let mut prev_ts = Timestamp::new(-1);
-        let mut prev_seq = seq(0);
+        let mut prev_seq = SeqNo::from_raw(0);
         let mut first = true;
         while let Some(item) = sched.pop() {
             if !first {
@@ -534,11 +531,11 @@ mod tests {
 
         for i in 0..n {
             let ts = Timestamp::new(((i * 97 + 13) % n) as i128);
-            sched.push_msg(ts, seq(i), TestMsg(i as u64));
+            sched.push_msg(ts, SeqNo::from_raw(i), TestMsg(i as u64));
         }
 
         let mut prev_ts = Timestamp::new(-1);
-        let mut prev_seq = seq(0);
+        let mut prev_seq = SeqNo::from_raw(0);
         let mut first = true;
         let mut count = 0;
         while let Some(item) = sched.pop() {

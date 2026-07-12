@@ -304,18 +304,6 @@ mod tests {
     }
 
     // ========================================================================
-    // HandlerOutput helpers
-    // ========================================================================
-
-    fn seq_val(n: u64) -> SeqNo {
-        let mut s = Sequencer::initial();
-        for _ in 0..n {
-            s.next().unwrap();
-        }
-        s.get()
-    }
-
-    // ========================================================================
     // HandlerOutput::send
     // ========================================================================
 
@@ -578,6 +566,175 @@ mod tests {
         assert!(
             msg.contains("100ns"),
             "error message should contain the current timestamp, got: {msg}"
+        );
+    }
+
+    // ========================================================================
+    // Sequence allocation edges
+    // ========================================================================
+
+    /// Invariant: the first successful send allocates SeqNo(1) (initial is 0)
+    #[test]
+    fn test_first_send_allocates_seq_one() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let ts = Timestamp::new(0);
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<TestMsg>();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
+        output.send(TestMsg(0), &productions).unwrap();
+
+        assert_eq!(sched.pop().unwrap().sequence_num(), SeqNo::from_raw(1));
+        assert_eq!(seq.get(), SeqNo::from_raw(1));
+    }
+
+    /// Invariant: failed undeclared send does not advance the sequencer
+    /// and does not enqueue anything
+    #[test]
+    fn test_undeclared_send_does_not_advance_sequencer() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let before = seq.get();
+        let ts = Timestamp::new(0);
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
+        let productions = ProductionSet::new(); // empty — nothing declared
+
+        let result = output.send(TestMsg(1), &productions);
+        assert!(matches!(
+            result,
+            Err(HandlerOutputError::UndeclaredProduction { .. })
+        ));
+        assert_eq!(seq.get(), before);
+        assert!(sched.pop().is_none());
+    }
+
+    /// Invariant: failed past send_at does not advance the sequencer
+    /// and does not enqueue anything
+    #[test]
+    fn test_past_send_at_does_not_advance_sequencer() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let before = seq.get();
+        let dispatch_ts = Timestamp::new(100);
+        let past_ts = Timestamp::new(50);
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<TestMsg>();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
+        let result = output.send_at(past_ts, TestMsg(1), &productions);
+
+        assert!(matches!(result, Err(HandlerOutputError::PastEvent { .. })));
+        assert_eq!(seq.get(), before);
+        assert!(sched.pop().is_none());
+    }
+
+    /// Invariant: two send_at calls allocate strictly increasing sequences
+    #[test]
+    fn test_two_send_ats_receive_increasing_sequences() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let dispatch_ts = Timestamp::new(100);
+        let t1 = Timestamp::new(200);
+        let t2 = Timestamp::new(300);
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<TestMsg>();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, dispatch_ts);
+        output.send_at(t1, TestMsg(0), &productions).unwrap();
+        output.send_at(t2, TestMsg(1), &productions).unwrap();
+
+        // Earlier time pops first regardless of seq; check seqs on the items
+        let earlier = sched.pop().unwrap();
+        let later = sched.pop().unwrap();
+        assert_eq!(earlier.dispatch_time(), t1);
+        assert_eq!(later.dispatch_time(), t2);
+        assert!(earlier.sequence_num() < later.sequence_num());
+    }
+
+    /// Invariant: interleaved send / send_at each advance the sequencer;
+    /// pop order is time-primary so seqs are not monotonic across times.
+    #[test]
+    fn test_send_and_send_at_interleaved_increasing_sequences() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::initial();
+        let ts = Timestamp::new(100);
+        let future = Timestamp::new(200);
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<TestMsg>();
+
+        {
+            let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
+            output.send(TestMsg(0), &productions).unwrap();
+            output.send_at(future, TestMsg(1), &productions).unwrap();
+            output.send(TestMsg(2), &productions).unwrap();
+        }
+        // `output` dropped — sequencer borrow ends
+
+        // Three successful allocations from initial 0 → current is 3
+        assert_eq!(seq.get(), SeqNo::from_raw(3));
+
+        // Pop order: both at `ts` (by seq), then future
+        let a = sched.pop().unwrap();
+        let b = sched.pop().unwrap();
+        let c = sched.pop().unwrap();
+
+        assert_eq!(a.dispatch_time(), ts);
+        assert_eq!(b.dispatch_time(), ts);
+        assert_eq!(c.dispatch_time(), future);
+
+        // Same-time: first send (seq smaller) before third send
+        assert!(a.sequence_num() < b.sequence_num());
+        // Future message was ticketed between them
+        assert!(a.sequence_num() < c.sequence_num());
+        assert!(c.sequence_num() < b.sequence_num());
+
+        // Payload identity (match style used elsewhere in this module)
+        assert_eq!(
+            (&*a.payload() as &dyn std::any::Any).downcast_ref::<TestMsg>(),
+            Some(&TestMsg(0))
+        );
+        assert_eq!(
+            (&*b.payload() as &dyn std::any::Any).downcast_ref::<TestMsg>(),
+            Some(&TestMsg(2))
+        );
+        assert_eq!(
+            (&*c.payload() as &dyn std::any::Any).downcast_ref::<TestMsg>(),
+            Some(&TestMsg(1))
+        );
+    }
+    /// Invariant: sequencer overflow maps to SequenceExhaustion and does not
+    /// enqueue; current value stays at MAX
+    #[test]
+    fn test_send_sequence_exhaustion() {
+        let mut sched = Scheduler::new();
+        let mut seq = Sequencer::from_raw(u64::MAX);
+        let ts = Timestamp::new(0);
+
+        let mut productions = ProductionSet::new();
+        productions.insert::<TestMsg>();
+
+        let mut output = HandlerOutput::new(&mut sched, &mut seq, ts);
+        let result = output.send(TestMsg(0), &productions);
+
+        assert_eq!(result, Err(HandlerOutputError::SequenceExhaustion));
+        assert_eq!(seq.get(), SeqNo::from_raw(u64::MAX));
+        assert!(sched.pop().is_none());
+    }
+
+    /// Invariant: SequenceExhaustion error Display is non-empty / readable
+    #[test]
+    fn test_sequence_exhaustion_error_is_readable() {
+        let err = HandlerOutputError::SequenceExhaustion;
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("sequence"),
+            "expected readable exhaustion message, got: {msg}"
         );
     }
 }
