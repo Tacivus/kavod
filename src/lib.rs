@@ -7,6 +7,7 @@ pub mod context;
 pub mod decimal;
 pub mod error;
 pub mod message;
+pub mod output;
 pub mod price;
 pub mod quantity;
 pub mod schedule;

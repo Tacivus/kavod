@@ -54,6 +54,18 @@ impl ScheduledItem {
             payload: Arc::new(payload),
         }
     }
+
+    pub(crate) fn dispatch_time(&self) -> Timestamp {
+        self.dispatch_time
+    }
+
+    pub(crate) fn payload(&self) -> SharedMsg {
+        self.payload.clone()
+    }
+
+    pub(crate) fn sequence(&self) -> Sequence {
+        self.sequence
+    }
 }
 
 impl PartialEq for ScheduledItem {
