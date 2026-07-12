@@ -1601,7 +1601,7 @@ mod tests {
     /// Invariant: every value has an additive inverse that sums to zero.
     #[test]
     fn add_inverse() {
-        for s in ["42", "0.001", "9999999", "-17.5"] {
+        for s in ["0", "42", "0.001", "9999999", "-17.5"] {
             let v = Decimal::from_str(s).unwrap();
             let neg = match v.sign() {
                 Sign::Positive => Decimal::from_raw(v.as_raw(), v.scale(), Sign::Negative).unwrap(),

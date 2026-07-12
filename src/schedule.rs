@@ -463,7 +463,7 @@ mod tests {
         let n = 1000;
 
         for i in 0..n {
-            let ts = Timestamp::new(((i * 97 + 13) % n) as i128);
+            let ts = Timestamp::new(((i * 97 + 13) % (n / 3)) as i128);
             sched.push_msg(ts, SeqNo::from_raw(i), TestMsg(i));
         }
 

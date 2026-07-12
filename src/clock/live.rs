@@ -31,11 +31,35 @@ impl Clock for LiveClock {
 mod tests {
     use super::*;
 
+    // ==================================================================
+    // Now()
+    // ==================================================================
+
     /// Invariant: now() gives a non-zero timestamp
     #[test]
     fn test_non_zero_timestamp() {
         let clock = LiveClock::new();
         let ts = clock.now();
         assert_ne!(ts.raw(), 0)
+    }
+
+    // ==================================================================
+    // Construction / Default
+    // ==================================================================
+
+    /// Invariant: LiveClock::default() yields a valid clock equivalent to new()
+    #[test]
+    fn test_default() {
+        let clock = LiveClock::default();
+        assert_ne!(clock.now().raw(), 0);
+    }
+
+    /// Invariant: set() on LiveClock is a no-op that does not panic
+    #[test]
+    fn test_set_noop() {
+        let mut clock = LiveClock::new();
+        let _before = clock.now();
+        clock.set(Timestamp::new(999));
+        assert!(clock.now().raw() > 0); // set is ignored; still from system time
     }
 }

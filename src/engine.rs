@@ -867,6 +867,33 @@ mod tests {
         assert_eq!(engine.scheduler_len(), 0);
     }
 
+    /// Invariant: run() returns PastEvent when scheduler contains an item
+    /// earlier than engine dispatch_time (internal invariant guard)
+    #[test]
+    fn test_run_past_event_in_scheduler_returns_err() {
+        let t0 = Timestamp::new(100);
+        let mut builder = Engine::builder(EngineConfig::backtest(t0));
+        builder.on(|_ctx: &mut HandlerCtx<'_>, _msg: &MsgA| {});
+        let mut engine = builder.build().unwrap();
+        engine.push_event(Timestamp::new(200), MsgA(1)).unwrap();
+        engine.run().unwrap(); // dispatch_time now 200
+
+        // Inject stale item directly — bypass push_event validation
+        engine.scheduler.push_msg(
+            Timestamp::new(50),
+            crate::sequence::SeqNo::from_raw(99),
+            MsgA(9),
+        );
+        let err = engine.run().unwrap_err();
+        assert_eq!(
+            err,
+            EngineError::PastEvent {
+                requested: Timestamp::new(50),
+                current: Timestamp::new(200),
+            }
+        );
+    }
+
     /// Invariant: final dispatch time equals the last processed scheduler timestamp
     #[test]
     fn test_final_dispatch_time_equals_last_processed() {

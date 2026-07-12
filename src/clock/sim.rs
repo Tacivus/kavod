@@ -83,6 +83,21 @@ mod tests {
         assert_eq!(clock.now().raw(), 0);
     }
 
+    /// Invariant: SimClock::new() initializes to epoch 0
+    #[test]
+    fn test_new_epoch() {
+        let clock = SimClock::new();
+        assert_eq!(clock.now().raw(), 0);
+    }
+
+    /// Invariant: SimClock::default() is equivalent to new()
+    #[test]
+    fn test_default_is_new() {
+        let clock: SimClock = Default::default();
+        assert_eq!(clock.now().raw(), 0);
+        assert_eq!(clock.now(), SimClock::new().now());
+    }
+
     // ==================================================================
     // set
     // ==================================================================
