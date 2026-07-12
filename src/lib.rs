@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod cache;
 pub mod clock;
 pub mod decimal;
 pub mod message;
