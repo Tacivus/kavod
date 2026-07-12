@@ -41,7 +41,7 @@ pub enum BuildError {
 ///
 /// [`Engine::run`]: crate::engine::Engine::run
 /// [`Engine::push_event`]: crate::engine::Engine::push_event
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     /// An incoming message has no registered consumer.
     #[error("unconsumed ingress: no consumer registered for message type `{message_type}`")]
