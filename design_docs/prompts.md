@@ -32,6 +32,8 @@ design-4.1.md supersedes design-v4.md where they conflict.
 
 I want a design workshop, not implementation code. Be brutally honest. Challenge the premise if it is weak, identify hidden assumptions, and help converge on precise semantics before suggesting public APIs.
 
+Briefly examine how comparable deterministic state machines, realtime trading systems, event-sourced systems, and simulation frameworks define this boundary. Use established designs as evidence, not as cargo-cult templates: identify proven patterns, explain their original constraints, and say where Kavod should deliberately differ.
+
 Kavod's intended deterministic boundary is the application kernel, not live Port implementations. Live Ports, networks, brokers, OS scheduling, and wall-clock delivery timing are nondeterministic. Kavod freezes observed external behavior when an Event is accepted.
 
 My intended guarantee is approximately:
@@ -65,6 +67,8 @@ End with:
 - Explicit non-guarantees.
 - Decisions that depend on later discussions.
 - Open questions that block progress.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -84,6 +88,8 @@ Read:
 design-4.1.md currently proposes a canonical cache based on BTreeMap<TypeId, Box<dyn Any>>. I dislike this design. It feels like a weak service locator: its identity is not durable, dependencies are hidden, ownership is unclear, and it does not give a convincing path to snapshots, state hashing, or migration.
 
 I want a design workshop, not code. Be brutally honest. Compare alternatives by their semantics, ergonomics, auditability, evolution path, and failure modes. Do not assume that the current cache deserves preservation.
+
+Briefly compare how robust realtime state machines, event-sourced systems, trading engines, and simulation frameworks model canonical state, projections, ownership, and checkpoints. Use those systems to find mature patterns and traps, but do not import an abstraction without explaining why it fits Kavod's constraints.
 
 Current requirements:
 
@@ -132,6 +138,8 @@ End with:
 - State ownership and dependency rules.
 - What must be decided before public state APIs are stabilized.
 - Open questions and dependencies on persistence or scheduling decisions.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -162,6 +170,8 @@ Example: one market tick can close a 1-minute, 5-minute, 15-minute, and daily ba
 
 I want a design workshop, not code. Be brutally honest. Do not accept BFS, DFS, reducers, phases, or barriers merely because they sound elegant. Show concrete execution orders and identify what each model actually guarantees.
 
+Briefly research how comparable realtime engines, stream processors, simulation frameworks, and trading systems express derived-state barriers, multi-stage propagation, atomic market updates, and same-timestamp ordering. Extract useful principles, but distinguish their workload and consistency assumptions from Kavod's.
+
 Explore:
 
 1. Is this fundamentally a BFS versus DFS issue, or an issue of modeling one logical market transition as several independently actionable facts?
@@ -190,6 +200,8 @@ End with:
 - A possible later phase model, only if justified.
 - Tests and invariants that would prove the decision.
 - Open questions that affect the state model or graph model.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -212,6 +224,8 @@ An unresolved issue is shared simulated-world state.
 Example: a historical market occurrence must update a simulated exchange book before the corresponding public market Event reaches the strategy. A later execution Command must arrive at that same book. Independent MarketData and Execution simulated Ports cannot safely coordinate this if each owns unrelated private model state.
 
 I want a design workshop, not code. Be brutally honest. Preserve the useful separation between the application graph and environment mechanics, but do not create fake isolation that requires hidden side channels or look-ahead.
+
+Briefly compare the Port and simulation boundaries used by mature trading simulators, exchange simulators, event-driven runtimes, and deterministic distributed-state-machine systems. Identify patterns that prevent look-ahead, hidden shared state, and reentrancy, while explaining where Kavod's domain-agnostic core should remain smaller.
 
 Explore:
 
@@ -244,6 +258,8 @@ End with:
 - Same-time ordering rules that must be settled.
 - MVP scope and deferred DST work.
 - Open questions that affect tracing or live Port semantics.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -264,6 +280,8 @@ The MVP live runtime currently proposes one kernel thread, one dedicated OS thre
 I considered adding priority() -> u64 to Events or Messages so fills and control traffic could outrank market data. I suspect that is the wrong abstraction because processing order, ingress admission, fairness, and Command backpressure are distinct problems.
 
 I want a design workshop, not code. Be brutally honest. Treat overloaded live trading as a safety problem, not merely a queue implementation detail.
+
+Briefly compare relevant patterns from LMAX/Disruptor-style systems, Aeron-like sequenced runtimes, trading gateways, and robust actor or queue systems. Focus on proven approaches to admission control, sequencing, backpressure, fairness, overload signaling, and shutdown. Do not recommend a technology merely because it is well known.
 
 Explore:
 
@@ -301,6 +319,8 @@ End with:
 - Startup, shutdown, and fatal-failure principles.
 - Metrics and observability requirements.
 - Decisions that must precede consequential live trading.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -327,6 +347,8 @@ Recorded Events, Messages, Commands, and traces may support debugging, audit, an
 The system may need different recording modes, such as in-memory capture for tests, local disk persistence for live debugging, and possibly external export. Human logs may include wall time, thread information, transport errors, and formatting. OpenTelemetry tracing is sampled and exporter-dependent. Components must not change business behavior based on telemetry configuration, logger availability, sampling, or exporter backpressure.
 
 I want a design workshop, not code. Be brutally honest. Seek the simplest storage and observability model that preserves strict distinctions of authority and does not allow telemetry to affect deterministic behavior.
+
+Briefly compare how comparable realtime and trading systems separate deterministic records, causal diagnostics, audit trails, structured logs, metrics, and distributed tracing. Use patterns from systems such as LMAX, Aeron, event-sourced applications, trading frameworks, and OpenTelemetry where relevant, but do not import their recovery or persistence semantics by default.
 
 Explore:
 
@@ -365,6 +387,8 @@ End with:
 - Safe context-level diagnostic capabilities, if any.
 - Replay divergence-reporting principles.
 - Explicit confirmation that recording is not a recovery, state-restoration, or Command-delivery mechanism.
+
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
