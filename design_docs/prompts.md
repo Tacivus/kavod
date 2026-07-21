@@ -248,6 +248,7 @@ Explore:
 16. How should historical source exhaustion and normal simulation completion work?
 17. Which lifecycle and fault concepts belong to core technical supervision versus application-defined protocol facts?
 18. What deterministic simulation capability is essential for MVP, and what belongs to later full DST?
+19. What about scrapping all this complexity and using the same interface between live and backtesting? The problem of difference can be just in the actual implementaiton in the kernel. Take Zigs IO interface as an example. Yes, you can call io.async(). That does nto mean that the underlying io impl uses async. the .async() is just a sematic understanding (this functio can return at any point sorta thing). io.thread() communiates that this can run in the backgroun i nparallel, the actual impl doesnt *need* to do that. 
 
 Use a market-data-plus-execution example and a timer example. Identify any v4.1 choices that make coherent simulation impossible.
 

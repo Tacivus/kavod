@@ -203,7 +203,7 @@ Kavod does not guarantee:
 
 - The canonical-state discussion defines deterministic application state as one application-owned `AppState` plus Component-private state, all physically owned by the Engine.
 - The turn-scheduling discussion preserves per-payload Reducer-before-Component ordering and breadth-first FIFO propagation. It adds no generic phases; related derived updates that require coherent visibility use one explicit aggregate domain fact.
-- The Port and simulation discussion must define how simulated Environments generate accepted Event order and timestamps.
+- The Port and simulation design defines how deterministic simulated models, post-turn Command delivery, virtual scheduling, and same-time tie-breaking generate accepted Event order and timestamps without expanding the narrower kernel determinism guarantee.
 - The live-runtime discussion defines ingress admission, capacity, and overload policy. Live clock source and acceptance-timestamp monotonicity remain deferred.
 - The observability design defines automatic audit detail, user logging, buffering, outputs, and configurable best-effort or required recording without granting recovery authority. Externally caused recording failure may terminate the Engine but cannot alter a successful callback's outputs.
 

@@ -285,7 +285,7 @@ Equal domain timestamps do not create an atomic group:
 
 - Separate accepted Events remain separate turns ordered by Event index.
 - Messages are ordered by FIFO production order, not by their domain timestamps.
-- Same-timestamp simulation actions require the Environment's explicit deterministic tie-breaker.
+- Same-timestamp simulation actions use the Simulation Environment's global schedule ordinal and post-turn Command-delivery rules; timestamp equality still provides neither atomicity nor priority.
 - If several external observations must be one atomic application input, the Port protocol must batch them into one Event.
 
 No application-visible transition identifier is introduced for bar aggregation, joins, or scheduling. Existing kernel Event indices, causal ordinals, turn action sequences, and diagnostic identities remain unchanged and retain their settled non-business meaning.
@@ -402,6 +402,8 @@ This report preserves the determinism report's fixed callback and FIFO ordering.
 It preserves the canonical-state report's single concrete `AppState`, output-free Reducers, Component-private state, and Reducer-before-Component visibility. The report's illustrative singular `BarCompleted` composition remains valid where no consumer requires sibling-bar coherence. `BarsClosed` is the required aggregate when multi-timeframe coherence matters.
 
 It agrees with the live-runtime report that external observations requiring one atomic input must be represented by an application-defined batch Event. The kernel does not infer batches from timestamps or queue timing.
+
+It agrees with the Port and simulation report that simulated Commands reach model endpoints only after turn quiescence. Zero-latency model Events are queued at the current virtual time and never re-enter the kernel recursively.
 
 It preserves existing causal diagnostics. `BarsClosed` retains the root Event index; its immediate parent action is retained when detailed causal recording is enabled. No new application business identifier is required.
 

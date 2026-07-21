@@ -61,7 +61,7 @@ Callbacks registered on the same Component instance may share that Component's p
 |---|---|---|---|
 | Canonical `AppState` | Application | Engine | Reducer callbacks |
 | Component-private state | Component instance | Engine | That Component's callbacks |
-| Port implementation state | Port implementation | Environment or Port | Port implementation |
+| Environment implementation state | Live Port implementation or simulated model | Environment-owned worker or model storage | Owning live implementation or simulated-model callbacks |
 | Kernel ordering state | Kernel | Engine | Kernel |
 
 A Reducer does not own the state it changes. It is one registered transition callback with temporary mutable access to application-owned canonical state.
@@ -262,7 +262,7 @@ ECS and simulation frameworks often use typed resource registries to support ind
 10. State fields and dynamic entities are not application graph nodes.
 11. Field-level reads and writes are not declared or validated.
 12. Canonical state must not use interior mutability to bypass Reducer-only mutation.
-13. Ports cannot borrow or mutate application state.
+13. Live Port implementations and simulated models cannot borrow or mutate application state.
 
 ## Explicit Non-Goals
 
