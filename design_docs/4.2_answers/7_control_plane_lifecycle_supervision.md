@@ -54,14 +54,14 @@ Kavod has four communication planes with different authority.
 | Application data plane | Port Events, Messages, Port Commands, `AppState`, Component-private state | Deterministic application and logical Port protocols |
 | Engine control plane | ControlEvents, ControlCommands, Engine and Port lifecycle state | Engine-owned ControlPlane |
 | Supervision plane | Backend start/stop results, worker/model exit, panic, cancellation, join, implementation-unit health | Environment reporting to the ControlPlane |
-| Observability plane | Automatic audit, user logs, metrics, status projections | Observation only |
+| Observability plane | Automatic audit, user logs, metrics, status projections | No application authority; configured required-record failure may poison the Engine |
 
 The supervision plane is not directly application-visible. The ControlPlane classifies supervisor reports and either:
 
 - Converts a contained, actionable Port-local transition into one or more accepted ControlEvents.
 - Establishes the Engine-global fatal latch without starting another application turn.
 
-Diagnostics observe these decisions but never cause them.
+Diagnostics never make application or lifecycle decisions. A configured required-record failure may nevertheless poison the Engine as an operational run policy.
 
 ## Authority
 
@@ -74,7 +74,7 @@ Diagnostics observe these decisions but never cause them.
 | Port implementation/model | Port Events and private supervisor reports | Port Commands and backend lifecycle operations | External-system or simulated-model state |
 | Reducer | No outputs | Events, ControlEvents, Messages, mutable `AppState` | Canonical application-state projection |
 | Component | Messages, Port Commands, ControlCommands | Events, ControlEvents, Messages, immutable `AppState` | Deterministic application decisions |
-| Diagnostics | Best-effort or required-record failure report | Audit and user-log records | Recording policy only |
+| Diagnostics | Best-effort or required-record failure report | Automatic audit and user-log records | Recording policy, including configured terminal failure behavior |
 
 The host may stop an Engine regardless of application approval. A cooperative host request may instead become a ControlEvent so deterministic application logic can disarm, reconcile, stop Ports, and request normal Engine completion.
 
@@ -173,7 +173,7 @@ The design distinguishes four identities.
 | Implementation-unit identity | Environment-owned worker, process proxy, task host, or simulated model |
 | Port incarnation identity | One lifecycle episode of one logical Port |
 
-A logical Port retains its identity across explicit restart. Every accepted start or restart operation allocates an operation identity and a new incarnation identity before backend invocation. Success, failure, cancellation, and every backend report carry both identities. A late, duplicate, or stale report is audited but cannot mutate a newer operation or incarnation. Old-incarnation Event authority is revoked before a replacement becomes active.
+A logical Port retains its identity across explicit restart. Every accepted start or restart operation allocates an operation identity and a new incarnation identity before backend invocation. Success, failure, cancellation, and every backend report carry both identities. A late, duplicate, or stale report is audited but cannot mutate a newer operation or incarnation. New old-incarnation Event admission closes before replacement, and every Event admitted before closure drains before a replacement becomes active.
 
 One implementation unit may own several logical Port endpoints. This remains private Environment topology. Application-visible lifecycle reports always identify logical Ports, never a grouped implementation as though it were an application Port.
 
@@ -194,14 +194,16 @@ Stopped -> Starting -> Running -> Stopping -> Stopped
 
 The exact internal state representation is private, but these meanings are normative:
 
+For lifecycle preconditions, an incarnation's admitted Event work means Events in its live Environment FIFO and committed Event-delivery actions in the simulation scheduler. Both are irrevocable MVP input commitments and must drain under ordinary ordering.
+
 | State | Meaning |
 |---|---|
-| `Stopped` | Bound but inactive; no Event ingress or Command handoff |
+| `Stopped` | Bound but inactive; no new Event admission or Command handoff, and no admitted Event remains |
 | `Starting` | A start operation is in progress; no ordinary Port traffic is yet enabled |
 | `Running` | Technical implementation controls are installed; this does not imply external readiness |
-| `Stopping` | Technical stop is in progress; new ordinary Port Commands are rejected |
-| `Quarantined` | Routing authority is revoked, but old implementation or child work may not yet be terminated or isolated |
-| `Failed` | The failed incarnation is quiesced or fenced from further effects and is safe to replace or leave inactive |
+| `Stopping` | Technical stop is in progress; new Event admission and ordinary Port Commands are closed while already admitted Events continue normally |
+| `Quarantined` | New routing and scheduling authority is revoked, but admitted Events may remain and the old implementation or child work may not yet be terminated or isolated |
+| `Failed` | The failed incarnation is terminated or fenced, affected non-Event work is cancelled, and its admitted Event work is empty; replacement is safe |
 
 Applications may project ControlEvents into `AppState`, for example:
 
@@ -210,6 +212,8 @@ AppState.runtime.ports: LogicalPortId -> ApplicationPortStatus
 ```
 
 That projection is deterministic application state, not runtime authority. It may lag the ControlPlane until the corresponding ControlEvent is accepted. Collections whose iteration affects behavior must have deterministic iteration semantics.
+
+Kavod defines no universal reconciled, armed, or safe-to-trade state and does not prevent an application from producing consequential Commands immediately after technical start. External readiness, reconciliation, business identity, arming, and replacement-Engine policy are application protocol and `AppState` responsibilities.
 
 The application must keep these states distinct:
 
@@ -287,11 +291,11 @@ Startup proceeds in this order:
 
 `Ready` means only that the Engine can process deterministic application and control turns. It does not claim that any Port is running or any external system is available.
 
-No Port Event may be accepted and no ordinary Port Command may be handed off before that logical Port reaches `Running`. Events offered by a starting implementation remain backend-private until the ControlPlane opens ingress after the corresponding `PortStarted` ControlEvent turn completes.
+No Port Event may be admitted or accepted and no ordinary Port Command may be handed off before that logical Port reaches `Running`. Before reading, decoding, or constructing an ordinary application Event, a starting live implementation waits on its cancellable ingress gate; Kavod provides no hidden pre-Running Event buffer. External transport buffering before that gate remains Port/external-system state. Simulated endpoint activation stages only its technical lifecycle result and begins ordinary model activity after the corresponding `PortStarted` ControlEvent turn completes.
 
 A Component may produce Port Commands during `Ready`, but Commands targeting stopped or starting Ports are rejected under the ordinary unavailable-destination rule. Applications start Ports, wait for `PortStarted`, then issue ordinary Port Commands.
 
-There is no hidden autostart. Convenience configuration may generate deterministic bootstrap lifecycle logic, but it must compile to the same Ready-turn ControlCommands and remain visible in the graph and audit stream.
+There is no hidden autostart. Convenience configuration may generate deterministic bootstrap lifecycle logic, but it must compile to the same Ready-turn ControlCommands and remain visible in the graph and automatic audit view.
 
 ## Port Lifecycle Operations
 
@@ -299,12 +303,12 @@ The core control protocol supports logical lifecycle intent. Exact enum spelling
 
 - Start one declared logical Port with a requested placement.
 - Stop one logical Port.
-- Explicitly restart one failed logical Port after its previous incarnation is quiesced or isolated.
+- Explicitly restart one `Failed` logical Port after its previous incarnation is terminated or isolated, affected pending non-Event work is cancelled, and admitted Event work has drained.
 - Request normal Engine stop after application-managed Port shutdown.
 
 Lifecycle operations are requests, not proof of completion. A successful or failed backend result returns later as a ControlEvent.
 
-Lifecycle ControlEvents distinguish routing and termination facts. `PortFailed` reports immediate quarantine and loss of routing authority. `PortQuiesced` reports that the failed incarnation and all owned child work have terminated or are fenced from further effects, allowing transition to `Failed`. `PortStarted` and `PortStopped` report successful operation completion.
+Lifecycle ControlEvents distinguish routing and termination facts. `PortFailed` reports immediate quarantine and loss of new routing authority. `PortQuiesced` reports that the failed incarnation and all owned child work have terminated or are fenced, affected pending non-Event work is cancelled, and every Event already admitted by that incarnation has drained. `PortStarted` and `PortStopped` report successful operation completion; `PortStopped` likewise requires empty admitted Event work.
 
 Repeated or illegal operations are never silently ignored. Every duplicate lifecycle ControlCommand is deterministically rejected against the authoritative state reached by earlier production-order operations. Cooperative host shutdown requests are the only control input that may use separately specified idempotent coalescing. The ControlPlane never starts two incarnations because equivalent requests raced.
 
@@ -316,49 +320,52 @@ The minimum operation matrix is:
 | `Starting` | Reject duplicate | Cancel startup and begin `Stopping` | Reject |
 | `Running` | Reject duplicate | Begin `Stopping` | Reject |
 | `Stopping` | Reject | Reject duplicate | Reject |
-| `Quarantined` | Reject | Continue required cleanup but do not claim Stopped | Reject until quiesced or isolated |
+| `Quarantined` | Reject | Continue required cleanup but do not claim Stopped | Reject until all `Failed` preconditions hold and `PortQuiesced` is accepted |
 | `Failed` | Reject; use Restart | Transition to `Stopped` without reviving the old incarnation | Begin `Starting` with a new incarnation |
 
 Every rejection becomes a later ControlEvent unless Engine-global fatal closure intervenes, in which case terminal audit records retain the disposition.
 
-## Lifecycle Barriers
+## Lifecycle Authority And Notification Order
 
-ControlPlane transitions that affect Port availability are barriers rather than ordinary payload priorities.
+ControlPlane authority transitions do not create Event priority. `Ready` is structurally first. Every later live lifecycle ControlEvent follows the ordinary ControlPlane FIFO and Acceptor fairness; every later simulation lifecycle ControlEvent follows global schedule-ordinal order.
 
-### Start Barrier
+### Start Authority
 
 When an implementation reports successful technical start:
 
 1. The ControlPlane validates the report against the pending operation and incarnation.
-2. It places the result in the lifecycle-barrier FIFO without yet opening Port traffic.
+2. Live places the result in the ordinary ControlPlane FIFO; simulation commits a scheduled ControlEvent action with a global schedule ordinal. Neither opens Port traffic yet.
 3. If failure or cancellation revokes the incarnation before acceptance, the stale start result is discarded and audited.
 4. Acceptance of the `PortStarted` ControlEvent atomically transitions the logical Port to `Running` for outputs of that turn.
 5. Reducers project the running state before Components react.
 6. Commands produced by the `PortStarted` turn may be handed to the now-running incarnation after quiescence.
-7. Ordinary Port Event acceptance opens only after that turn completes and only if the same incarnation remains `Running`.
+7. Ordinary Port Event admission and acceptance open only after that turn completes and only if the same incarnation remains `Running`.
 
 This guarantees that no application callback observes ordinary traffic from a Port whose technical-start fact has not yet been reduced.
 
-### Failure Barrier
+### Failure Authority
 
 When the Environment reports a Port-local failure:
 
 1. The ControlPlane immediately marks the affected logical Port quarantined.
-2. It revokes old-incarnation Event ingress and new Command handoff.
+2. It closes new old-incarnation Event admission, model scheduling, and Command handoff.
 3. An active synchronous callback is not preempted.
 4. The already accepted turn continues to quiescence; a contained Port-local failure does not interrupt its remaining deterministic callbacks or Messages.
-5. At the next kernel safe boundary, the affected `PortFailed` ControlEvent is accepted before ordinary Event selection resumes.
-6. Reducers project quarantine before Components react and before another ordinary Event turn begins.
+5. Events already admitted to the failed incarnation's Environment FIFO remain immutable eligible inputs and continue under ordinary FIFO and Acceptor ordering.
+6. Live enqueues the affected `PortFailed` ControlEvent in the ordinary ControlPlane FIFO; simulation commits it as a scheduled ControlEvent action. Live acceptance follows frozen source-order rounds and per-source FIFO, while simulation follows global schedule ordinal. Neither path has a privileged lifecycle bypass.
+7. When `PortFailed` is eventually accepted, Reducers project quarantine before its matching Components react.
 
-Multiple live supervisor reports retain the nondeterministic order in which the ControlPlane observes them. Simulation orders them deterministically. Accepted ControlEvents freeze that order for replay.
+Multiple live supervisor reports retain the nondeterministic order in which the ControlPlane observes and enqueues them. Simulation commits lifecycle consequences directly into its deterministic global action queue. Accepted ControlEvents freeze either resulting order for replay. Ordinary Events may therefore run after authoritative quarantine but before the application projection receives `PortFailed`; post-turn Command classification still uses authoritative ControlPlane state.
 
-This is not a generic Event-priority mechanism. Only lifecycle transitions that change routing authority create a control barrier.
+Acceptance of an already admitted Port Event validates the immutable admission authority captured when it entered the Environment FIFO; it does not require that the source incarnation is still currently `Running`. An offer attempted after closure has no such authority and never enters the FIFO.
 
-Lifecycle consequences enter one Engine-owned barrier FIFO ordered by monotonic control sequence. The FIFO drains before ordinary ControlEvents and Port Events. A multi-endpoint implementation failure enqueues all affected endpoint consequences contiguously in stable logical Port order before ordinary acceptance resumes. Components may run between those endpoint Events, but each event identifies its common failure sequence and the number of endpoint consequences still pending, allowing application lifecycle policy to remain conservatively degraded until the sequence completes.
+There is no lifecycle Event-priority mechanism. Immediate quarantine changes runtime authority, not accepted-input order.
+
+A multi-endpoint live implementation failure enqueues all affected endpoint consequences contiguously in the ordinary ControlPlane FIFO in stable logical Port order under one failure-sequence identity. Live Acceptor fairness may interleave another source's Event between ControlPlane visits. Simulation commits the consequences with contiguous global schedule ordinals in the same stable order: earlier same-time actions execute before the block and cannot interleave within it. Each consequence identifies the common failure sequence and the number still pending so application lifecycle policy can remain conservatively degraded until the sequence completes.
 
 ControlPlane ingress is bounded independently of every Port queue. Supervisor transitions and lifecycle outcomes cannot be dropped or coalesced. A cooperative host request may use an explicitly defined idempotent coalescing rule. If the ControlPlane cannot preserve an authoritative transition and its application-visible consequence, the Engine can no longer account for lifecycle state and must establish the Engine-global fatal latch.
 
-`Ready` is structurally first. Cooperative host requests arriving during initialization remain in the bounded ControlPlane ingress and become eligible only after the Ready turn unless an authoritative host stop cancels initialization. After bootstrap, ordinary non-barrier ControlEvents receive one bounded FIFO visit in each Acceptor round under the global quantum. Lifecycle-barrier consequences drain first because routing authority has already changed; they are not mixed into ordinary fairness arbitration.
+`Ready` is structurally first. In live mode, cooperative host requests arriving during initialization remain in bounded ControlPlane ingress and become eligible only after the Ready turn unless an authoritative host stop cancels initialization; afterward all live ControlEvents receive one bounded FIFO visit in each Acceptor round under the global quantum. Simulation instead represents every post-Ready ControlEvent as a global scheduled action. No lifecycle payload bypasses its environment's ordinary ordering mechanism.
 
 ## Command And Control Output Semantics
 
@@ -366,8 +373,8 @@ One turn may produce Messages, Port Commands, and ControlCommands. All retain on
 
 1. Finalize deterministic application state and causal output metadata.
 2. Classify Port Commands against authoritative ControlPlane Port state.
-3. Reserve and publish Commands for running destinations under existing capacity policy.
-4. Record unavailable-destination Commands and schedule rejection ControlEvents.
+3. Reserve and publish each running destination's Command batch under per-destination all-or-none capacity semantics.
+4. Record and schedule a rejection ControlEvent for every Command not delivered because its destination was unavailable, its destination mailbox was full, or another nonfatal publication rule rejected it.
 5. Apply ControlCommands in deterministic production order.
 
 A start or restart request does not make a Port available for sibling Port Commands in the same turn. The application must wait for the later `PortStarted` ControlEvent.
@@ -383,7 +390,7 @@ Port Commands are classified independently by logical destination:
 - Rejected Commands are never retained for implicit delivery after restart.
 - Commands already handed to an earlier incarnation are never retracted or silently resent and may remain externally ambiguous.
 
-This per-Port unavailability rule is distinct from ordinary mailbox-capacity reservation. Existing whole-turn capacity reservation continues to prevent avoidable partial publication among Commands that are otherwise eligible. A concurrent Port failure may still divide Commands into handed-off, not-delivered, and externally ambiguous sets; diagnostics must report the exact known disposition.
+This per-Port unavailability rule is distinct from ordinary mailbox-capacity reservation. For an eligible destination whose mailbox lacks capacity, none of that destination's Commands cross the boundary and each receives a later `CommandNotDelivered` ControlEvent with reason `MailboxFull`. Other destinations remain independently eligible. A concurrent Port failure may still divide Commands into handed-off, not-delivered, and externally ambiguous sets; diagnostics must report the exact known disposition.
 
 ### Quarantine And Handoff Linearization
 
@@ -395,9 +402,11 @@ Quarantine commitment and final Command handoff commitment for one logical Port 
 - Immediately before making a reserved Command visible, the runtime revalidates that the exact target incarnation remains `Running` and commits handoff atomically with that check.
 - A failed revalidation releases that Command's reservation and records not-delivered disposition without suppressing healthy-target Commands.
 
+Mailbox-full rejection is also per destination and all-or-none. It never retries or retains a rejected Command. If the ControlPlane cannot preserve the required rejection disposition, that accounting failure poisons the Engine.
+
 The monotonic control sequence and per-Command disposition are automatic audit data. They freeze a live failure-versus-handoff race without exposing control sequence as an application business identifier.
 
-ControlCommands are applied only after every Port Command from the turn has reached an accounted post-turn disposition: published, rejected, or failed under a policy that terminates the turn. Any Engine-global failure, required-record failure, unaccountable publication failure, or turn-publication failure that prevents this completion skips all later ControlCommands from that turn.
+ControlCommands are applied only after every Port Command from the turn has reached an accounted post-turn disposition: published, rejected, or failed under a policy that terminates the turn. If Engine-global or required-record failure prevents this completion, the runtime must not intentionally apply later ControlCommands, but no application guarantee depends on post-fatal suppression.
 
 ## Port-Local Failure And Quarantine
 
@@ -415,14 +424,15 @@ The following are Port-local when the failure is contained to one or more known 
 Port-local failure:
 
 - Quarantines each affected logical Port.
-- Revokes its current incarnation.
+- Closes new Event admission, model scheduling, child creation, and Command handoff for its current incarnation.
+- Preserves every Event already admitted by that incarnation for ordinary later acceptance.
 - Produces one ordered ControlEvent per affected logical Port.
 - Starts or continues backend cleanup of the failed implementation and its children.
 - Does not automatically restart any Port.
 - Does not clear or repair application state.
 - Does not claim that handed-off external effects are known.
 
-Quarantine proves routing revocation, not implementation termination. A separate supervisor result establishes that the old incarnation has terminated or is fenced by a hard isolation boundary. The ControlPlane then transitions the logical Port to `Failed` and emits a later quiescence ControlEvent. Until that transition:
+Quarantine proves closure of new routing authority, not implementation termination or admitted-work drainage. A separate supervisor result establishes that the old incarnation has terminated or is fenced by a hard isolation boundary. Pending wakes and model callbacks owned by an affected simulated endpoint are cancelled, while already committed Event-delivery actions survive. A successful cleanup result remains ControlPlane-private until admitted Event work is empty; only then is the later `PortQuiesced` ControlEvent enqueued. Acceptance of `PortQuiesced` transitions the logical Port to `Failed` for outputs of that turn. Until that acceptance:
 
 - Restart is rejected.
 - Normal StopEngine is rejected.
@@ -433,13 +443,13 @@ Quarantine proves routing revocation, not implementation termination. A separate
 
 One live or simulated implementation unit may provide several logical endpoints. Application topology and failure reporting remain endpoint-based.
 
-If one endpoint fails while shared implementation state remains valid, only that endpoint is quarantined. If the implementation unit loses state required by several endpoints, the Environment privately identifies every affected endpoint, quarantines all of them before ordinary acceptance resumes, and emits one contiguous stable ordered `PortFailed` ControlEvent per logical Port under one failure-sequence identity.
+If one endpoint fails while shared implementation state remains valid, only that endpoint is quarantined. If the implementation unit loses state required by several endpoints, the Environment privately identifies every affected endpoint, immediately closes their new authority, and enqueues one stable ordered `PortFailed` ControlEvent per logical Port under one failure-sequence identity. Those ControlEvents retain ordinary live source-round or simulation schedule-ordinal order without privileged bypass.
 
 There is no application-visible grouped Port identity. A shared model or worker is implementation topology, not application topology.
 
 ### Panic Boundary
 
-A caught Port worker panic quarantines affected Ports. A Kernel, ControlPlane, or Engine-global Environment panic remains capture-and-stop fatal. With `panic = "abort"`, no in-process recovery is possible because the process terminates.
+A caught Port worker panic quarantines affected Ports and produces the ordinary lifecycle consequence `PortFailed { cause: Panic }` or its final typed equivalent. It does not create a privileged panic callback or Event path. A Kernel, ControlPlane, or Engine-global Environment panic remains capture-and-stop fatal. With `panic = "abort"`, no in-process recovery is possible because the process terminates.
 
 Port implementations that use unsafe process-global state or otherwise cannot contain failure to their declared endpoints cannot honestly promise recoverable in-process lifecycle. Such implementations should eventually use a process boundary when hard isolation is required.
 
@@ -456,14 +466,9 @@ The fatal latch remains monotonic and first-failure-wins. It is reserved for fai
 - Global resource-limit failure defined as terminal.
 - Environment failure whose affected logical endpoints cannot be safely identified or isolated.
 
-Once fatal is established:
+Once fatal is established, the Engine is poisoned. Kavod guarantees only the successfully completed execution prefix before fatal establishment, whether or not diagnostics retain that boundary. The active callback or turn may be incomplete, no unpublished output from that turn is guaranteed to take effect, application state is not reusable, cleanup and final diagnostics are best effort, and the Engine never resumes.
 
-- No new Port Event or ControlEvent is accepted.
-- No new turn begins.
-- No new Port Command or ControlCommand takes effect.
-- An active synchronous callback may return but is not followed by another callback.
-- Unpublished outputs from the incomplete turn are abandoned and audited.
-- Runtime cleanup begins and the Engine never resumes.
+A panic on the kernel thread unwinds immediately when supported. A fatal report from another thread sets the latch but cannot preempt arbitrary synchronous Rust code; no semantic guarantee is made for work after fatal establishment while the kernel returns to runtime control. External process termination remains the only hard preemption mechanism.
 
 Port quarantine cannot clear the fatal latch. A failure is classified as contained before fatal establishment or it is terminal.
 
@@ -473,7 +478,7 @@ Restart is always caused by an accepted application decision expressed as a Cont
 
 An explicit restart:
 
-1. Requires a `Failed` logical Port whose prior incarnation is confirmed terminated or isolated and no conflicting lifecycle operation.
+1. Requires a `Failed` logical Port whose prior incarnation is confirmed terminated or isolated, whose admitted Event work is empty, and which has no conflicting lifecycle operation.
 2. Leaves the logical Port identity unchanged.
 3. Allocates a new incarnation identity.
 4. Constructs or resets backend implementation state according to the binding contract.
@@ -495,6 +500,7 @@ Every child thread, task, process, job, or third-party runtime operation belongs
 - Child failure is reported through the owning implementation and classified by affected logical endpoints.
 - A worker is not stopped or joined until all owned children have terminated and been joined.
 - Child-produced Events use the owning logical Port and incarnation authority.
+- Child-produced Events admitted before stopping or quarantine retain ordinary FIFO eligibility; no later child Event may be newly admitted.
 
 Application-requested heavy work such as inference remains a service Port protocol. Environment worker pools are future placement mechanisms for Port-owned work, not capabilities exposed to Components.
 
@@ -518,6 +524,7 @@ Domain actions such as cancel orders, flatten positions, await acknowledgements,
 The normal `StopEngine` request is accepted only when:
 
 - Every logical Port is stopped or failed with its old incarnation confirmed terminated or isolated.
+- Every old-incarnation admitted Event work set is empty.
 - No Port lifecycle operation remains pending.
 - No ordinary application turn is incomplete.
 - No earlier ControlEvent consequence remains pending.
@@ -535,7 +542,17 @@ The embedding host retains two distinct controls:
 - A cooperative request that becomes a ControlEvent and permits application-managed shutdown.
 - An authoritative technical stop that bypasses application approval and requests cleanup of all remaining runtime work.
 
-An authoritative technical stop is serialized against Event acceptance. If acceptance wins first, that already accepted turn runs to quiescence and reaches a fully accounted Port Command disposition; no later input is accepted. If authoritative stop wins first, the offered input remains unaccepted. The ControlPlane then revokes all Port ingress and new handoff authority, requests stop or cancellation from every implementation, waits for owned child and worker termination where possible, records unresolved external ambiguity and cleanup failure, and returns a host-requested terminal outcome or shutdown error. It performs no implicit domain cancel, flatten, or reconciliation action.
+An authoritative technical stop is serialized against new Event admission and any acceptance already in progress. If admission commits first, that Event remains in the FIFO and is drained; if stop closes admission first, the new offer remains outside Kavod. If acceptance has already committed, that turn runs to quiescence and reaches an accounted post-turn disposition.
+
+During authoritative drainage:
+
+- No new Port Event, ordinary ControlEvent, rejection consequence, or lifecycle consequence is admitted.
+- Port Events and still-valid ControlEvents already admitted before closure run in their ordinary order. A lifecycle result invalidated by authoritative cancellation is discarded and audited rather than transitioning a closed Port back to `Running`.
+- No produced Port Command crosses a Port boundary; each receives a terminal host-stop not-delivered audit disposition rather than a new feedback ControlEvent.
+- No produced ControlCommand is applied; each receives a terminal host-stop rejection audit disposition.
+- Messages and deterministic state transitions inside each drained turn execute normally unless fatal establishment poisons the Engine.
+
+The ControlPlane requests stop or cancellation from every implementation, waits for admitted input, owned child, and worker termination where possible, records unresolved external ambiguity and cleanup failure, and returns a host-requested terminal outcome or shutdown error. It performs no implicit domain cancel, flatten, or reconciliation action. Hard process termination or fatal establishment may prevent this cooperative drainage and carries no continuation guarantee.
 
 External process termination remains the only hard preemption mechanism. It provides no callback completion, Port cleanup, join, diagnostic-flush, or consistent-state guarantee.
 
@@ -543,11 +560,12 @@ External process termination remains the only hard preemption mechanism. It prov
 
 A Port stop request is technical:
 
+- New Event admission closes; Events already admitted by the incarnation remain eligible and drain through ordinary Acceptor ordering.
 - New ordinary Commands to the Port become unavailable and are rejected visibly.
 - The backend requests cooperative stop from the current incarnation.
 - The implementation stops creating child work, cancels or completes owned work according to its contract, closes external resources, and joins children.
-- Old-incarnation late Events are rejected after authority is revoked.
-- A successful backend stop becomes a later `PortStopped` ControlEvent.
+- An Event offered after admission closes is not admitted; an Event admitted before closure is not a late Event and is never removed.
+- A successful backend stop result remains ControlPlane-private until all admitted Events from that incarnation have drained; only then is `PortStopped` enqueued. Acceptance of `PortStopped` transitions the logical Port to `Stopped` for outputs of that turn.
 - Stop timeout or failure becomes `PortStopFailed` and leaves the Port quarantined.
 
 Kavod cannot safely force-kill an arbitrary in-process thread. A deployment requiring bounded hard termination must use an external process boundary or terminate the entire Engine process.
@@ -561,11 +579,13 @@ The SimulationEnvironment implements the same logical ControlCommands and Contro
 - Start ControlCommands activate endpoints only after their producing turn completes.
 - Placement requests may normalize to the same deterministic model mechanism.
 - Model lifecycle output is staged and never re-enters the Kernel recursively.
-- `PortStarted`, `PortFailed`, `PortQuiesced`, `PortStopped`, Command-rejection, and restart outcomes are scheduled ControlEvents.
+- `PortStarted`, `PortFailed`, `PortQuiesced`, `PortStopped`, Command-rejection, and restart outcomes are committed directly as globally scheduled ControlEvent actions; they do not pass through the live ControlPlane FIFO.
 - Explicit restart creates a new logical incarnation without hidden Command replay.
 - Fault injection may fail an endpoint or implementation unit but may not automatically restart it.
 
-Lifecycle outcomes, rejection consequences, and ordinary model Events staged at the same virtual time receive global schedule ordinals in commit order. A selected lifecycle outcome that changes routing enters the lifecycle barrier before the scheduler selects another ordinary action; it never re-enters application execution inline.
+Lifecycle outcomes, rejection consequences, and ordinary model Events staged at the same virtual time receive global schedule ordinals in commit order. No lifecycle outcome jumps ahead of an earlier action. Immediate quarantine closes new endpoint authority without rewriting scheduler order, and lifecycle output never re-enters application execution inline.
+
+Event-delivery actions committed before endpoint failure survive and are selected normally. Pending wakes and model-callback actions owned by affected endpoints are cancelled and audited. Actions owned exclusively by unaffected endpoints of a grouped model remain pending.
 
 A grouped model is stored once. Logical endpoint activation and quarantine remain independently tracked where the model can preserve valid shared state. A model-wide failure privately affects every endpoint whose state is no longer trustworthy and reports each logical failure separately.
 
@@ -573,7 +593,7 @@ Basic historical simulation does not model real thread scheduling, async-runtime
 
 ### Simulation Completion
 
-Existing `UntilIdle`, horizon, source-exhaustion, stalled, and action-limit semantics remain. Once technical completion commits, the SimulationEnvironment revokes remaining endpoint authority, accounts for pending lifecycle consequences and scheduled work under the selected completion policy, and performs model cleanup without starting another application turn. Technical simulation completion is a host outcome, not a ControlEvent emitted after completion. If application behavior must react to end-of-data, a simulated source emits an ordinary application-defined Event before completion.
+Existing `UntilIdle`, horizon, source-exhaustion, stalled, and action-limit semantics remain. Technical completion cannot commit while a surviving Event-delivery action or committed lifecycle consequence remains pending under the selected policy. Once completion commits, the SimulationEnvironment closes remaining endpoint authority, accounts for cancelled non-Event work and any horizon-retained work, and performs model cleanup without starting another application turn. Technical simulation completion is a host outcome, not a ControlEvent emitted after completion. If application behavior must react to end-of-data, a simulated source emits an ordinary application-defined Event before completion.
 
 ## Replay
 
@@ -601,7 +621,7 @@ Automatic audit must distinguish control intent, backend action, application-vis
 - `ControlCommandProduced` with operation, target, requested placement, callback, root Event, and production order.
 - Lifecycle operation accepted or rejected.
 - Requested, realized, or normalized placement.
-- Port incarnation allocated and revoked.
+- Port incarnation allocated and closed to new admission or handoff.
 - Port start, stop, quarantine, and explicit restart transitions.
 - Port-local failure and affected logical endpoints.
 - Command handed off, rejected as unavailable, or externally ambiguous where known.
@@ -613,7 +633,7 @@ Required-record policy applies at different authority boundaries:
 
 - A Component-produced lifecycle operation, placement decision, or incarnation allocation must receive its required audit acknowledgement before backend invocation.
 - ControlEvent acceptance follows the ordinary required-record gate before application dispatch.
-- Immediate quarantine and ingress revocation cannot wait for diagnostics because delaying them could permit invalid handoff. The ControlPlane commits the safety transition first, then attempts its required record. Failure to acknowledge that record escalates the already-quarantined run to Engine-global fatal failure; it never rolls quarantine back.
+- Immediate quarantine and closure of new admission and handoff cannot wait for diagnostics because delaying them could permit invalid handoff. The ControlPlane commits the safety transition first, then attempts its required record. Failure to acknowledge that record escalates the already-quarantined run to Engine-global fatal failure; it never rolls quarantine back or removes already admitted Events.
 - Required terminal-record failure may change the host outcome to diagnostics failure but cannot revive stopped work.
 
 Application callbacks cannot observe diagnostics configuration or use diagnostics as control. Physical placement may appear in diagnostics without becoming a Component capability.
@@ -625,7 +645,7 @@ Metrics should make it possible to observe:
 - Start, stop, quarantine, and explicit-restart outcomes.
 - Requested versus realized or normalized placement.
 - Commands rejected by destination state.
-- Old-incarnation late Events.
+- Old-incarnation Events admitted before closure and offers rejected after closure.
 - Port-local failure versus Engine-global fatal counts.
 - Child cancellation and join duration.
 
@@ -686,10 +706,12 @@ Market Event turn is active
 -> active synchronous callback returns and turn reaches quiescence
 -> Commands for healthy Ports remain publishable
 -> Commands for Execution are marked not delivered
--> PortFailed(Execution, incarnation 7) is accepted before ordinary ingress resumes
+-> Events already admitted from Execution incarnation 7 retain FIFO order
+-> PortFailed(Execution, incarnation 7) waits in the ordinary ControlPlane FIFO
+-> earlier queued Events may be accepted before PortFailed
 -> CommandNotDelivered ControlEvents follow in stable causal order
 -> LifecycleReducer updates AppState
--> backend cleanup later reports old incarnation quiesced
+-> backend cleanup and admitted-FIFO drainage later report old incarnation quiesced
 -> LifecycleController chooses restart, degraded operation, or shutdown
 ```
 
@@ -698,11 +720,12 @@ Market Event turn is active
 ```text
 Execution is quarantined
 -> old incarnation terminates or is isolated
+-> every Event admitted before quarantine drains normally
 -> PortQuiesced transitions Execution to Failed
 -> application emits RestartPort(Execution, Process)
 -> ControlPlane allocates incarnation 8
 -> no old Command is resent
--> old incarnation Events remain rejected
+-> offers using old-incarnation authority remain rejected
 -> Environment starts replacement
 -> PortStarted(Execution, incarnation 8)
 -> application performs ordinary reconnect and reconciliation
@@ -719,9 +742,9 @@ simulated venue model provides MarketData and Execution endpoints
 or
 
 -> model-wide corruption invalidates both endpoints
--> ControlPlane privately quarantines both before ordinary acceptance resumes
--> PortFailed(MarketData) accepted
--> PortFailed(Execution) accepted
+-> ControlPlane privately closes new authority for both immediately
+-> already committed Event deliveries retain schedule order
+-> PortFailed(MarketData) and PortFailed(Execution) receive contiguous schedule ordinals
 ```
 
 No grouped application Port appears.
@@ -733,8 +756,9 @@ Inference Port owns running child job
 -> application completes domain policy and requests StopPort(Inference)
 -> new inference Commands are rejected visibly
 -> worker requests child cancellation and joins it
--> late old-incarnation completion Event is rejected
--> PortStopped or PortStopFailed ControlEvent is accepted
+-> a completion Event admitted before stop remains eligible
+-> a completion offer attempted after admission closes is rejected
+-> PortStopped is accepted only after admitted Events drain, or PortStopFailed is accepted
 ```
 
 ## Normative State Machines
@@ -772,13 +796,15 @@ Stopping
     -- success --> Stopped
     -- failure --> Quarantined
 Quarantined
-    -- old incarnation terminated/isolated --> Failed
+    -- old incarnation terminated/isolated
+       + pending non-Event work cancelled
+       + admitted Event work empty --> Failed
 Failed
     -- explicit Restart --> Starting(new incarnation)
     -- explicit Stop --> Stopped
 ```
 
-No transition from `Quarantined` directly to `Starting` is permitted. Restart requires both backend-confirmed termination or isolation of the old incarnation and an accepted application ControlCommand from `Failed`.
+No transition from `Quarantined` directly to `Starting` is permitted. Restart requires backend-confirmed termination or isolation, cancellation of affected pending non-Event work, empty old-incarnation admitted Event work, and an accepted application ControlCommand from `Failed`.
 
 ## Settled Rules
 
@@ -803,7 +829,7 @@ No transition from `Quarantined` directly to `Starting` is permitted. Restart re
 19. Basic simulation need not model physical thread, task, process, or IPC behavior.
 20. PortStarted means technical runtime availability, not connectivity, reconciliation, or application readiness.
 21. Applications own operational projections and arming policy.
-22. Port availability transitions create control barriers, not generic Event priority.
+22. Port availability changes runtime authority immediately but lifecycle ControlEvents retain ordinary queue and scheduler order; no control barrier reprioritizes them.
 23. Port-local failures quarantine affected logical endpoints.
 24. Port-local failure does not set the Engine-global fatal latch.
 25. Application-visible failure identity is always a logical Port identity.
@@ -815,17 +841,20 @@ No transition from `Quarantined` directly to `Starting` is permitted. Restart re
 31. Already handed-off Commands are never silently retried and may remain ambiguous.
 32. No Port restarts automatically.
 33. Explicit restart retains logical Port identity and creates a new incarnation.
-34. Explicit restart requires confirmed termination or isolation of the old incarnation.
-35. Old-incarnation Events are rejected before acceptance.
+34. Explicit restart requires confirmed termination or isolation, cancellation of affected pending non-Event work, and empty old-incarnation admitted Event work.
+35. Events admitted before old-incarnation closure remain eligible; offers attempted after closure are rejected before admission.
 36. Restart does not imply external reconciliation or application arming.
 37. All Port child work is transitively owned, cancelled, and joined.
 38. Application-managed normal shutdown stops Ports before StopEngine.
 39. StopEngine is rejected while active or unquiesced Port lifecycle remains.
 40. The embedding host retains authoritative technical-stop and process-termination authority.
 41. Only Engine-global failure establishes the fatal latch.
-42. Fatal failure permits no later Event, ControlEvent, turn, Port Command, or ControlCommand.
-43. Diagnostics are observational and never a control channel.
+42. Fatal establishment poisons the Engine; Kavod guarantees no application semantics after the completed prefix before that boundary.
+43. Diagnostics have no application authority or control channel, while configured required-record failure may poison the Engine.
 44. Terminal outcomes go to the embedding host, not to stopped application callbacks.
+45. Reducers have no private mutable state, and ordinary Reducer and Component callbacks have no generic return or error channel.
+46. Kavod defines no universal reconciliation, arming, or safe-to-trade state.
+47. Mailbox-full rejection is all-or-none per destination and does not suppress healthy destinations.
 
 ## Minimum Verification
 
@@ -844,12 +873,12 @@ The design must be proved by tests covering at least:
 11. Port Commands produced before PortStarted are rejected visibly.
 12. Port startup failure quarantines only affected logical endpoints.
 13. Worker exit and caught worker panic quarantine without setting fatal.
-14. Kernel or ControlPlane panic sets fatal and permits no later turn.
-15. Failure during an active callback does not preempt that callback.
+14. Kernel or ControlPlane panic poisons the Engine and provides no later application guarantee.
+15. A contained Port failure reported during an active callback does not preempt that callback; kernel-thread panic may unwind it and asynchronous fatal reports poison the run without a hard-preemption guarantee.
 16. A quarantined destination rejects Commands while healthy destinations publish.
 17. Every rejected Command yields exactly one causally linked disposition event while acceptance remains open, or one terminal audit disposition after fatal closure.
 18. No rejected or old Command is delivered after restart.
-19. Restart is rejected until the old incarnation is confirmed terminated or isolated; a permitted restart allocates a new incarnation and rejects old-incarnation Events.
+19. Restart is rejected until the old incarnation is confirmed terminated or isolated, its affected non-Event work is cancelled, and its admitted Event work is empty; a permitted restart allocates a new incarnation and rejects new old-incarnation offers.
 20. No restart occurs from elapsed time, configuration, or supervisor action alone.
 21. A shared-model endpoint-local failure preserves unaffected endpoint operation.
 22. A model-wide failure quarantines and separately reports every affected endpoint.
@@ -864,8 +893,12 @@ The design must be proved by tests covering at least:
 31. Combined Port Command and ControlCommand turn limits terminate deterministically without applying a partial control output set.
 32. Quarantine and final Command handoff to one incarnation have exactly one serialized winner.
 33. Late, duplicate, and stale backend reports cannot mutate a newer lifecycle operation or incarnation.
-34. Multi-endpoint failure consequences are contiguous, stable, and expose completion of their common failure sequence.
-35. Authoritative host stop racing Event acceptance either includes one complete final turn or leaves the offered Event unaccepted.
+34. Multi-endpoint failure consequences are contiguous within the live ControlPlane FIFO or receive contiguous simulation schedule ordinals, remain stable, and expose completion of their common failure sequence without bypassing ordinary environment ordering.
+35. Authoritative host stop racing Event admission has one winner: admitted Events drain without new handoff, while offers losing to admission closure remain outside Kavod; an already accepted turn completes before cooperative drainage continues.
+36. An Event admitted before stop or quarantine remains eligible and prevents `PortStopped`, `PortQuiesced`, restart, or normal `StopEngine` until drained.
+37. Simulation preserves committed Event deliveries after endpoint failure but cancels affected pending wakes and model callbacks.
+38. Mailbox exhaustion rejects the complete destination batch, emits exactly one disposition per Command, and leaves healthy destinations eligible.
+39. A Port worker panic produces ordinary `PortFailed { cause: Panic }` handling without poisoning a trustworthy Engine.
 
 ## Rejected Alternatives
 
@@ -898,6 +931,7 @@ Kavod does not guarantee:
 - That arbitrary unsafe or process-global Port code can fail without compromising the process.
 - That an in-process worker can be forcibly terminated safely.
 - That application arming, disarming, flattening, cancellation, or reconciliation is automatic.
+- That Kavod prevents an application from producing consequential Commands before its own reconciliation and arming policy permits them.
 - That ControlPlane lifecycle audit is durable recovery authority.
 - That terminal failure can be delivered to application callbacks after execution stops.
 

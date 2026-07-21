@@ -27,6 +27,10 @@ This is intentionally narrower than a full deterministic simulation framework. K
 >
 > This guarantee assumes that Components and Reducers obey Kavod's determinism contract.
 
+The guarantee covers execution that completes before fatal establishment. Fatal establishment poisons the Engine: the active callback or turn may be incomplete, no buffered output from that incomplete turn is guaranteed to take effect, and Kavod makes no further application-execution or state-consistency guarantee. The Engine never resumes. This is not Rust memory-model undefined behavior; it is the explicit end of Kavod's semantic guarantee for that run.
+
+A contained Port implementation failure is not fatal while the ControlPlane, Kernel, Acceptor, Environment infrastructure, and affected endpoint boundaries remain trustworthy. It closes new authority for the failed incarnation and is reported later through normally ordered ControlPlane communication. A Kernel, ControlPlane, Acceptor, global scheduler, required-diagnostics, or otherwise uncontained failure is fatal.
+
 "Same build" means the same executable code, not merely the same source revision or version label. Kavod makes no automatic compatibility claim between different builds.
 
 ## Boundary
@@ -56,21 +60,20 @@ Likewise, Kavod deterministically produces Port Commands for logical Port destin
 The single acceptance operation:
 
 1. Validates its logical source and protocol membership.
-2. Assigns its monotonic Event index.
+2. Prepares its candidate monotonic Event index, which becomes final only at acceptance commit.
 3. Freezes its acceptance timestamp.
 4. Establishes its root causation identity.
-5. Emits the complete `EventAccepted` audit record according to the configured diagnostics policy.
-6. Commits the Event as accepted.
+5. Executes the configured acceptance commit protocol, including the complete `EventAccepted` record where enabled.
 
 The acceptance commit is the semantic linearization point. No Reducer or Component receives the Event before that commit.
 
-Diagnostics policy determines whether recording gates the commit:
+Diagnostics policy determines the commit boundary:
 
-- Under best-effort recording, Kavod attempts the audit record and commits acceptance even if recording fails.
-- Under required recording, the configured writer must acknowledge the audit record before Kavod commits acceptance.
+- Under best-effort recording, Kavod commits acceptance first and then attempts `EventAccepted` before processing. Recording failure does not undo acceptance or prevent processing.
+- Under required recording, the writer crossing its declared acknowledgement boundary for the complete `EventAccepted` record is the acceptance commit. There is no later fallible acceptance step. If the Engine fails before observing that acknowledgement, the retained record still describes an accepted but unprocessed Event.
 - If required recording fails, the Event is not accepted or dispatched and the Engine stops.
 
-The audit record is diagnostic evidence of acceptance. It is not application state, external truth, or recovery authority.
+An acknowledged required `EventAccepted` record proves acceptance, not processing. A crash may therefore leave `EventAccepted` without a later `EventProcessingStarted`. The record is not application state, external truth, recovery authority, or evidence that any callback ran.
 
 Port emission, ControlPlane offer, ingress queue insertion, and kernel selection of the next offered Event are not acceptance. They remain pre-acceptance runtime behavior.
 
@@ -82,11 +85,11 @@ The kernel must preserve these rules:
 
 1. One kernel thread executes all application callbacks.
 2. Accepted Events are processed in Event-index order.
-3. One Event turn reaches quiescence before the next Event turn begins.
+3. Absent fatal establishment, one Event turn reaches quiescence before the next Event turn begins.
 4. Matching Reducers execute before matching ordinary Components.
 5. Reducers and Components execute in stable graph registration order.
 6. Messages use the specified breadth-first FIFO propagation order.
-7. Port Commands and ControlCommands are collected in deterministic production order and take effect only after turn completion.
+7. Port Commands and ControlCommands are collected in deterministic production order and become eligible for post-turn handling only after turn completion.
 8. Every callback in a turn observes the root Event's frozen acceptance time.
 9. Internal Messages do not advance logical time.
 10. Event index, not timestamp, establishes accepted Event order.
@@ -110,7 +113,9 @@ Turn quiescence separates accepted Events and delays Command publication. It doe
 
 Every Message and Command in a turn inherits the root Event's logical time. Ordering within the turn comes from causal ordinals, not invented timestamp increments.
 
-Whether live acceptance time must be nondecreasing is not required to establish determinism. The same recorded timestamps reproduce the same kernel behavior even if they regress. A monotonicity requirement, clock source, and NTP policy are live-time policies and remain open for the live runtime discussion. Event index always remains authoritative for ordering.
+Live acceptance time is nondecreasing within one Engine run. At run initialization the live Environment samples one wall-clock anchor and one OS monotonic-clock anchor. Acceptance time is the wall-clock anchor plus elapsed monotonic time. NTP steps and later civil-clock corrections therefore do not move `ctx.now()` backward. Equal acceptance timestamps remain legal, and Event index always remains authoritative for ordering.
+
+The anchored clock may drift from current civil UTC. A Port may carry externally synchronized time, observed clock offset, or clock-correction facts in application-defined payload data. Such facts never rewrite the Engine's acceptance timeline. Kavod exposes no `SyncTime` operation that changes prior or future `ctx.now()` values discontinuously.
 
 ## Deterministic Inputs
 
@@ -126,7 +131,7 @@ Whether live acceptance time must be nondecreasing is not required to establish 
 
 Environment details such as Port thread scheduling and ingress races determine which accepted Event sequence comes into existence. Once that sequence is fixed, they are not kernel inputs.
 
-An external runtime or required-diagnostics failure may terminate execution at a kernel safe boundary. Such a failure truncates an otherwise deterministic execution prefix; it does not reorder or change callbacks and outputs that completed successfully before the failure.
+A fatal runtime or required-diagnostics failure may poison execution at any kernel operation boundary, whether or not diagnostics can retain that boundary. The current callback or turn may be incomplete. Kavod guarantees only the completed deterministic prefix before fatal establishment and does not treat the resulting in-memory state as a reusable terminal state. Reproducing an asynchronously selected fatal point would require that interruption point as an additional fault input; ordinary accepted-Event replay does not promise it.
 
 ## Deterministic Outputs
 
@@ -141,7 +146,7 @@ An external runtime or required-diagnostics failure may terminate execution at a
 
 State hashes are not required to define determinism. They may later be used as a verification mechanism after stable state identity and serialization are designed.
 
-Deterministic turn-limit and invariant failures must occur at the same logical execution point. Exact panic text, backtraces, and process-level failure behavior are not deterministic outputs.
+Deterministic turn-limit and invariant failures caused by deterministic application execution must occur at the same logical execution point. Exact panic text, backtraces, process-level failure behavior, and asynchronously selected fatal timing are not deterministic outputs.
 
 ## Component And Reducer Contract
 
@@ -158,6 +163,8 @@ Components and Reducers must not let behavior depend on:
 - Port implementation state.
 
 The capability API prevents Kavod from supplying these facilities through callback contexts. Testing, linting, dependency review, and code review provide additional confidence but cannot prove arbitrary Rust code deterministic.
+
+Reducers have no private mutable state or behavior-affecting mutable captures. All mutable application state used by a Reducer belongs to canonical `AppState`. Ordinary Component and Reducer callbacks have no generic return or error channel: expected outcomes use typed state transitions, Messages, Port Commands, or ControlCommands; panic poisons the Engine.
 
 ## Minimum Verification
 
@@ -185,6 +192,7 @@ Kavod does not guarantee:
 - Cross-platform numeric equivalence unless separately constrained and tested.
 - Determinism from Components or Reducers that violate their contract.
 - Completion of an accepted Event turn after an external runtime or required-diagnostics failure terminates the Engine.
+- A reusable, internally consistent application-state value after fatal establishment.
 - State hashes, snapshots, state restoration, or full replay in the MVP.
 - Full deterministic simulation testing or deterministic execution of live adapters.
 - Stable panic text, backtraces, OOM behavior, signals, or hardware failures.
@@ -206,7 +214,7 @@ Kavod does not guarantee:
 - The canonical-state discussion defines deterministic application state as one application-owned `AppState` plus Component-private state, all physically owned by the Engine.
 - The turn-scheduling discussion preserves per-payload Reducer-before-Component ordering and breadth-first FIFO propagation. It adds no generic phases; related derived updates that require coherent visibility use one explicit aggregate domain fact.
 - The Port and simulation design defines how deterministic simulated models, post-turn Command delivery, virtual scheduling, and same-time tie-breaking generate accepted Event order and timestamps without expanding the narrower kernel determinism guarantee.
-- The live-runtime discussion defines ingress admission, capacity, and overload policy. Live clock source and acceptance-timestamp monotonicity remain deferred.
+- The live-runtime discussion defines ingress admission, capacity, and overload policy and uses the wall-anchored monotonic acceptance clock defined here.
 - The observability design defines automatic audit detail, user logging, buffering, outputs, and configurable best-effort or required recording without granting recovery authority. Externally caused recording failure may terminate the Engine but cannot alter a successful callback's outputs.
 
 ## Open Questions
@@ -215,8 +223,6 @@ No unresolved question blocks the minimum determinism contract.
 
 The following questions are deliberately deferred because they do not determine whether the kernel is deterministic:
 
-- Must live acceptance timestamps be nondecreasing?
-- Which live clock supplies acceptance timestamps, and how are NTP adjustments handled?
 - Which acknowledgement boundary will a future disk-required writer provide: buffered admission, write completion, flush, or data synchronization?
 - Which exact causal records are persisted versus generated only in memory?
 - How will later builds demonstrate replay compatibility?

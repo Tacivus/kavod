@@ -242,7 +242,7 @@ The exact API is deferred. Its semantic requirements are settled:
 | Global future-action queue | Simulation Environment | Simulation Environment | Scheduler and staged model operations |
 | Schedule ordinal | Simulation Environment | Simulation Environment | Scheduler |
 
-The Environment may physically store domain-defined models without understanding their state. It knows model identities, endpoint registrations, opaque wake payloads, scheduled times, cancellations, and typed Port boundary envelopes. It does not know about books, orders, fills, instruments, or venues.
+The Environment may physically store domain-defined models without understanding their state. It knows model identities, endpoint registrations, endpoint-incarnation ownership for pending wakes and model callbacks, immutable admission authority for committed Event deliveries, scheduled times, cancellations, and typed Port boundary envelopes. It does not know about books, orders, fills, instruments, or venues.
 
 ## Simulated Lifecycle
 
@@ -257,10 +257,13 @@ Simulation bootstrap proceeds as follows:
 5. Accept the ControlPlane `Ready` Event as the first turn.
 6. Apply lifecycle ControlCommands after that turn reaches quiescence.
 7. Activate requested endpoints in deterministic ControlCommand order and stage later lifecycle ControlEvents.
+8. Begin ordinary model activity only after the corresponding `PortStarted` ControlEvent turn opens that endpoint's ingress authority.
 
 One shared model is stored once. Its private implementation lifecycle may initialize once, while logical endpoint activation, incarnation, ingress, and quarantine remain endpoint-addressed according to the ControlPlane report.
 
 Technical start means the deterministic state machine was initialized. Domain readiness, market session state, subscription acknowledgement, reconciliation, and permission to trade remain application-defined facts where required.
+
+Endpoint activation itself stages only its technical lifecycle result. It does not stage ordinary Port Events behind a hidden pre-Running buffer. A source or model that can produce ordinary Events begins that activity only after the complete `PortStarted` turn opens the endpoint.
 
 ### Command Delivery
 
@@ -308,6 +311,8 @@ Scheduler cancellation is model machinery, not application Command-cancellation 
 - Cancelling a wake does not synthesize an application Event.
 - A protocol emits an acknowledgement Event when application behavior needs to observe cancellation outcome.
 
+Endpoint failure applies an additional ownership rule. Every pending wake or model-callback action identifies the endpoint incarnation or set of endpoint incarnations whose authority it requires. Already committed Event-delivery actions are immutable admitted observations and remain in the global queue. They count as admitted Event work and must execute before the source endpoint can become quiesced, failed, replaced, or normally stopped. Pending wakes and model-callback actions owned by an affected endpoint incarnation are cancelled and audited before that endpoint can become quiesced or be replaced. Actions owned exclusively by unaffected endpoints of a grouped model remain pending. Kavod does not invoke a failed endpoint callback merely because its wake was scheduled earlier.
+
 ### Model Completion
 
 Models are not considered complete merely because they are currently idle. Finite source drivers explicitly report source exhaustion. Shared models with several endpoints still report source completion once for each declared finite source, not once per endpoint.
@@ -322,7 +327,7 @@ The simulation Environment owns one global future-action queue ordered by:
 (virtual_time, global_schedule_ordinal)
 ```
 
-The global schedule ordinal is monotonic and allocated when a staged operation is committed. It is diagnostic ordering state, not a business identifier.
+The global schedule ordinal is monotonic and allocated when a staged operation is committed. It is authoritative simulation-scheduler state because it determines application-visible execution order; diagnostics record it, but it is not a business identifier.
 
 The scheduler loop is conceptually:
 
@@ -403,7 +408,7 @@ The following rules are semantic and must be documented and tested:
 3. Existing same-time actions precede newly committed same-time actions.
 4. Model callbacks run to completion before staged outputs are committed.
 5. Staged operations commit in model production order.
-6. One Event is accepted and fully processed before the next Event is accepted.
+6. Absent fatal establishment, one Event is accepted and fully processed before the next Event is accepted.
 7. Commands remain buffered until turn quiescence.
 8. Post-turn Commands are delivered in deterministic production order before the scheduler selects another action.
 9. Events emitted by Command handlers are queued and never processed in the post-turn Command phase.
@@ -412,6 +417,8 @@ The following rules are semantic and must be documented and tested:
 12. No generic market-before-timer, Event-before-wake, or Port-category priority exists.
 13. Scheduling into the past is a terminal causality error.
 14. Cancellation may remove pending same-time work before the next scheduler selection but cannot cancel the active action.
+15. A lifecycle ControlEvent receives an ordinary global schedule ordinal and never jumps ahead of an earlier action.
+16. A committed Event-delivery action survives later endpoint stop or failure; affected endpoint wakes and model-callback actions do not.
 
 Applications and models requiring atomic same-time observations use one batch Event. Kavod does not infer a batch from timestamp equality.
 
@@ -542,7 +549,7 @@ Kavod core and its ControlPlane own technical supervision concepts:
 - Model callback boundaries.
 - Scheduling into the past.
 - Invalid endpoint emission or Command routing.
-- Model panic or unexpected callback error.
+- Model callback panic or invariant failure. Simulated model callbacks have no generic application-result channel.
 - Simulation action and same-time runaway limits.
 - Source-stalled and horizon completion outcomes.
 - Endpoint quarantine and monotonic Engine-global first-failure terminal behavior.
@@ -556,7 +563,7 @@ Applications own protocol facts such as:
 - Reconciliation, readiness, arming, and permission to trade.
 - Timer cancellation acknowledgement when required.
 
-Expected modeled outcomes use Events. A contained endpoint or model failure whose affected logical endpoints are known follows ControlPlane quarantine semantics. A global scheduler, causality, ControlPlane, or model failure whose effects cannot be isolated is terminal. Model state is not rolled back after partial mutation.
+Expected modeled outcomes use Events. A contained endpoint or model failure whose affected logical endpoints are known follows ControlPlane quarantine semantics. Quarantine closes new scheduling authority for those endpoints, preserves their already committed Event-delivery actions, and cancels their pending wakes and model callbacks. A global scheduler, causality, ControlPlane, or model failure whose effects cannot be isolated is terminal. Model state is not rolled back after partial mutation.
 
 ## Simulation Limits
 
@@ -650,7 +657,7 @@ This report restores and refines the coherent v4 direction in which a shared `Hi
 14. Simulated model and endpoint callbacks are synchronous, deterministic, and run to completion.
 15. Model outputs are staged until the callback returns.
 16. Event emissions and wakes become scheduler actions and never dispatch recursively.
-17. One Event is accepted and fully processed before the next Event is accepted.
+17. Absent fatal establishment, one Event is accepted and fully processed before the next Event is accepted.
 18. Commands remain buffered until kernel turn quiescence.
 19. After a turn, simulated Commands are delivered to endpoints in production order before the scheduler resumes.
 20. Events emitted by Command handlers are queued and cannot re-enter the kernel inline.
@@ -666,6 +673,8 @@ This report restores and refines the coherent v4 direction in which a shared `Hi
 30. Normal completion follows an explicit idle or horizon policy.
 31. Contained model or endpoint faults quarantine affected logical Ports; global scheduler, causality, and unisolatable model faults stop the simulation permanently.
 32. Historical deterministic simulation is MVP; full DST and adapter-level deterministic execution are deferred.
+33. Lifecycle outcomes retain ordinary global schedule order and never jump ahead of existing actions.
+34. Event-delivery actions committed before endpoint failure survive; pending wakes and model callbacks owned by affected endpoints are cancelled and audited.
 
 ## Minimum Verification
 
@@ -693,8 +702,10 @@ The design should be proved by tests covering at least:
 20. Source exhaustion allows pending finite fills and timers to drain under `UntilIdle`.
 21. Queue emptiness with an unfinished required source reports `SimulationStalled`.
 22. Horizon completion reports pending scheduled work without silently executing it.
-23. A contained model failure quarantines every affected endpoint before ordinary acceptance resumes; an unisolatable model or global invariant failure stops the simulation.
+23. A contained model failure immediately closes affected endpoint authority, but its `PortFailed` ControlEvents retain ordinary global schedule order; an unisolatable model or global invariant failure stops the simulation.
 24. Repeated runs with identical model input and configuration produce identical scheduler, Event, Command, and terminal-state traces.
+25. An Event-delivery action committed before endpoint failure remains ordered and is accepted normally.
+26. Pending wakes and model callbacks owned by a failed endpoint are cancelled, while actions owned only by unaffected grouped-model endpoints survive.
 
 ## Rejected Alternatives
 
@@ -708,6 +719,7 @@ The design should be proved by tests covering at least:
 - **Inline Event acceptance from a model callback:** reintroduces recursive kernel entry and partially transitioned model observations.
 - **Treating zero latency as `T + epsilon`:** invents domain time and makes behavior depend on clock resolution.
 - **Letting zero-latency Events jump ahead of existing same-time work:** creates hidden action-category priority and starvation risk.
+- **Letting lifecycle outcomes jump ahead of existing work:** rewrites committed scheduler order; authoritative quarantine may happen immediately without reprioritizing its later application-visible ControlEvent.
 - **Treating equal timestamps as atomic:** confuses time equality with domain completeness.
 - **One mandatory live/simulation implementation trait:** forces a least-common-denominator runtime and does not solve grouped ownership.
 - **Full DST in MVP:** requires controlled IO, storage, network, randomness, failures, and scheduling beyond historical simulation needs.
@@ -778,7 +790,7 @@ It preserves the diagnostics report's distinction between Command production, Po
 - Exact grouped-binding builder syntax and endpoint registration API.
 - Exact wake-token representation and stale-token diagnostics.
 - Live Event FIFO semantics when one adapter uses several internal producer tasks.
-- Detailed live stop-accepting, Event drain, Command drain, timeout, and join behavior.
+- Concrete live stop, admitted-Event drainage, cancellation, timeout, and join mechanisms that preserve the settled ControlPlane semantics.
 - Whether and when a future live Environment supports one worker or process exposing several logical Ports.
 
 None of these questions blocks the MVP ownership, scheduling, zero-latency, or completion model.

@@ -2,7 +2,7 @@
 
 > **Status:** Settled for the Kavod MVP live-ingress and Command-backpressure boundary
 > **Scope:** Live Event admission, Acceptor sequencing, source fairness, per-Port capacity, Command-mailbox backpressure, startup gating, fatal overload, and turn limits
-> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` owns Ready-first bootstrap, lifecycle barriers, unavailable-destination Command rejection, Port quarantine, and Engine-global fatal classification. This report continues to own ordinary Port admission and capacity mechanics.
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` owns Ready-first bootstrap, immediate lifecycle authority transitions, normally ordered lifecycle ControlEvents, unavailable-destination Command rejection, Port quarantine, and Engine-global fatal classification. This report continues to own ordinary Port admission and capacity mechanics.
 
 ## Conclusion
 
@@ -28,13 +28,14 @@ single-threaded deterministic kernel turn
 bounded FIFO Command mailbox for each destination Port
 
 ControlPlane lifecycle reports
-    -> lifecycle barrier
+    -> immediate authority update where required
+    -> ordinary ControlPlane FIFO
     -> accepted ControlEvent
 ```
 
 Every live Port binding has independent Event capacity and independent Command-mailbox capacity. A busy Port therefore cannot consume another Port's admission capacity.
 
-One single-threaded logical Acceptor establishes the global Event order. It visits Port bindings in stable binding-order rounds and processes at most the globally configured quantum of Events from each Port per round. This provides bounded source fairness without Event priority.
+One single-threaded logical Acceptor establishes the global Event order. After structurally first `Ready`, it visits the ControlPlane FIFO and Port binding FIFOs in one frozen source-order round and processes at most the globally configured quantum of Events from each source per round. This provides bounded source fairness without Event priority.
 
 Accepted Events always execute in Event-index order. Internal Messages remain breadth-first FIFO. Kavod exposes no Event or Message scheduling priority and has no `Critical` or `Normal` admission classes in the MVP.
 
@@ -50,9 +51,11 @@ The following are different decisions and must not be represented by one priorit
 | Event processing | Execution of accepted Events in Event-index order | Deterministic kernel |
 | Queue capacity | Maximum bounded work waiting at a live boundary | Port binding configuration |
 | Command backpressure | Whether a completed turn's Commands can enter destination mailboxes | Live Environment |
-| Lifecycle barrier | Whether Port availability must be reduced before ordinary ingress resumes | Engine ControlPlane |
+| Lifecycle authority | Immediate closure of new admission or handoff without reprioritizing the later ControlEvent | Engine ControlPlane |
 
 An offered Event is not accepted merely because it entered a Port's Event queue. It has no committed Event index, acceptance time, or causation root until the Acceptor performs the acceptance operation defined by the determinism-and-time design.
+
+Queue admission is nevertheless an irrevocable Environment commitment for the MVP. Admission freezes the payload, logical source, and source incarnation as eligible future input. Later stop, quarantine, or worker exit closes new admission but does not remove, rewrite, reprioritize, or invalidate Events already admitted. Acceptance later assigns Event index, acceptance time, and root causation in the ordinary Acceptor order.
 
 ## Per-Port Event Admission
 
@@ -72,10 +75,11 @@ The queues provide capacity isolation:
 - A high-rate Port cannot prevent another Port from offering an Event merely by filling its own queue.
 - Total live ingress memory is bounded by the sum of configured per-binding capacities.
 - FIFO order is preserved within each Port's emitted Event stream.
+- Once admitted, an Event remains eligible even if its source incarnation later stops or fails.
 
 The central Event ingress boundary is therefore one logical Acceptor over per-binding queues, not one undifferentiated shared queue whose capacity can be monopolized by one Port.
 
-ControlPlane input is not a Port binding and does not consume a Port's capacity. Ordinary ControlEvents participate in the same acceptance authority. Ready and Port-availability transitions use the structural lifecycle barriers defined by the ControlPlane report rather than payload priority.
+ControlPlane input is not a Port binding and does not consume a Port's capacity. Ordinary ControlEvents participate in the same acceptance authority and ordinary Acceptor ordering. `Ready` is structurally first, but later lifecycle ControlEvents receive no bypass around the frozen source-order rounds. Authoritative quarantine may precede its application-visible ControlEvent without reprioritizing accepted input.
 
 ControlPlane ingress is separately bounded and Engine-owned. Host requests may use explicitly defined coalescing, but supervisor reports and application-visible lifecycle outcomes are never silently dropped. Exhaustion that prevents the ControlPlane from preserving an authoritative lifecycle transition is an Engine-global fatal failure.
 
@@ -85,20 +89,20 @@ Every binding must explicitly configure its Event capacity and full policy. Queu
 
 ## Acceptor Rounds And Global Quantum
 
-For ordinary Port ingress, the Acceptor uses stable binding-order rounds with one global Event quantum `Q`.
+For ordinary ingress after `Ready`, the Acceptor uses one frozen source order containing the ControlPlane FIFO and every Port binding FIFO, with one global Event quantum `Q`. The ControlPlane's exact slot is frozen during Environment construction and is run provenance; it has no privileged bypass position.
 
 For each round:
 
-1. Visit Port bindings in stable binding order.
-2. At each binding, observe the Events already waiting when that visit begins.
+1. Visit sources in frozen source order.
+2. At each source, observe the Events already waiting when that visit begins.
 3. Select, accept, and process at most `Q` of those Events in FIFO order.
 4. Events offered during that visit wait for a later round.
-5. Move to the next binding without waiting when the current binding is empty.
-6. Begin the next round immediately after all bindings have been visited.
+5. Move to the next source without waiting when the current source is empty.
+6. Begin the next round immediately after all sources have been visited.
 
-For each selected Event, the Acceptor prepares its identity and time, applies the configured automatic-audit policy, commits acceptance, and processes the complete turn before selecting the next Event. The Acceptor does not accept an entire quantum ahead of kernel execution.
+For each selected Event, the Acceptor prepares its identity and time, applies the configured automatic-audit policy, commits acceptance, and, absent fatal establishment, processes the complete turn before selecting the next Event. The Acceptor does not accept an entire quantum ahead of kernel execution.
 
-Example with binding order `MarketData`, `Execution`, `ReferenceData` and `Q = 4`:
+Example with an empty ControlPlane FIFO, Port order `MarketData`, `Execution`, `ReferenceData`, and `Q = 4`:
 
 ```text
 MarketData queue: M1 M2 M3 M4 M5 M6
@@ -122,14 +126,14 @@ A single kernel thread cannot both drain an arbitrary burst from one Port first 
 The approximate service delay before the Acceptor revisits another nonempty Port is determined by:
 
 ```text
-global quantum
-x number of other active Port bindings
+ global quantum
+ x number of other active ingress sources
 x duration of their Event turns
 ```
 
 The quantum bounds consecutive Event count, not wall-clock duration. Components remain responsible for synchronous, nonblocking callbacks, and turn metrics must reveal work that is too slow for the configured live latency budget.
 
-Events that carry the same application domain timestamp do not thereby receive the same acceptance timestamp. The Acceptor freezes acceptance time as part of the acceptance operation before any configured required-audit acknowledgement and the final commit. Required acknowledgement may delay the commit after that value is frozen. Time spent waiting behind other Events is real queueing delay and must not be hidden by preparing a backlog ahead of execution.
+Events that carry the same application domain timestamp do not thereby receive the same acceptance timestamp. The Acceptor freezes acceptance time from the run's wall-anchored monotonic clock as part of the acceptance operation before any configured required-audit acknowledgement. Under required recording, acknowledgement of `EventAccepted` is the acceptance commit. Required acknowledgement may delay processing after that value is frozen. Time spent waiting behind other Events is real queueing delay and must not be hidden by preparing a backlog ahead of execution.
 
 If an application requires several external observations to form one atomic input with one logical time, its Port protocol may define one application-specific batch Event. Kavod does not infer or construct such batches.
 
@@ -140,7 +144,7 @@ Once an Event is accepted:
 1. Its Event index is final.
 2. It is processed after every lower Event index.
 3. It is processed before every higher Event index.
-4. Its turn reaches quiescence before the next accepted Event turn begins.
+4. Absent fatal establishment, its turn reaches quiescence before the next accepted Event turn begins.
 5. It is never reprioritized by Event type, source, payload, or later arrival.
 
 Live queue visibility and Port timing may affect which accepted order comes into existence. Event indices freeze that observed order for deterministic execution. Configured diagnostics may record the order for later inspection.
@@ -180,12 +184,12 @@ Configuration is separated by semantic owner.
 | Message, callback, and Command limits per turn | Engine configuration |
 | Global Acceptor quantum | Live Environment configuration |
 | Event queue capacity and full policy | Live Port binding configuration |
-| Command mailbox capacity and full policy | Live Port binding configuration |
+| Command mailbox capacity | Live Port binding configuration; full means settled per-destination rejection |
 | External subscriptions, decoding, reconnect behavior, batching, or domain-aware coalescing | Concrete live Port configuration |
 
 These operational capacities do not belong to `PortSpec`. A `PortSpec` is shared application topology and protocol meaning across live and simulation; queue construction is live Environment machinery.
 
-The exact builder syntax is intentionally unresolved. The semantic requirement is that consequential capacities and full policies are explicit during Environment construction rather than hidden implementation defaults.
+The exact builder syntax is intentionally unresolved. The semantic requirement is that consequential capacities and Event-admission full policies are explicit during Environment construction rather than hidden implementation defaults. Command-mailbox exhaustion has one core MVP outcome rather than a configurable policy menu.
 
 ## Domain-Specific Loss And Coalescing
 
@@ -209,7 +213,7 @@ Each live Port binding has one bounded FIFO Command mailbox.
 - Commands are published only after the complete Event turn reaches quiescence.
 - Per-Port Command production order is preserved.
 - The kernel never blocks waiting for mailbox capacity.
-- Mailbox-full behavior follows an explicit binding policy and is never a silent drop.
+- Mailbox-full rejects the complete destination batch visibly and never silently drops, retains, or retries it.
 - Kavod performs no hidden retry.
 
 Blocking is rejected because a full mailbox could stop the kernel from accepting and processing later Events, including Events from other Ports.
@@ -218,20 +222,21 @@ Blocking is rejected because a full mailbox could stop the kernel from accepting
 
 Engine configuration includes a mandatory global `max_commands_per_turn` alongside the existing Message and callback-invocation limits. The bound covers the combined Port Command and ControlCommand production count.
 
-At turn completion, the ControlPlane first classifies Commands by authoritative destination state. Commands for stopped, starting, stopping, or quarantined Ports are rejected per destination and produce later ControlEvents. Kavod then reserves capacity for the complete eligible Command batch before making any eligible Command visible. Reservations are attempted in stable Port order.
+At turn completion, the ControlPlane first classifies Commands by authoritative destination state. Commands for stopped, starting, stopping, or quarantined Ports are rejected per destination and produce later ControlEvents. Kavod then groups eligible Commands by destination and attempts one all-or-none capacity reservation for each destination batch in stable Port order.
 
-If capacity cannot be obtained according to the configured policies:
+If one destination lacks capacity:
 
-- No partial publication is caused merely by ordinary mailbox exhaustion.
-- Acquired reservations are released.
-- The configured nonblocking failure policy is applied.
+- None of that destination's Commands cross the Port boundary.
+- Every Command in that destination batch receives a causally linked later `CommandNotDelivered` ControlEvent with reason `MailboxFull` while the Engine remains nonfatal.
+- Commands for other destinations remain independently eligible and are not suppressed.
+- No rejected Command is retained or retried.
 - No callback is resumed and the kernel does not wait for capacity.
 
-Whole-batch reservation bounds in-process publication behavior. It does not create a transaction across external systems.
+Per-destination all-or-none reservation bounds in-process publication behavior without inventing cross-Port atomicity. If Kavod cannot preserve the required rejection dispositions, that accounting failure poisons the Engine.
 
 Unavailable-destination rejection is not partial publication caused by capacity exhaustion. Healthy-target Commands remain eligible; rejected Commands never cross their Port boundary and are never retained for implicit delivery after restart.
 
-Turn quiescence and whole-batch reservation govern Command publication timing only. They do not prove that a Command was computed against final turn state, and they do not recompute or validate an immutable Command payload after later Reducers run.
+Turn quiescence and per-destination reservation govern Command publication timing only. They do not prove that a Command was computed against final turn state, and they do not recompute or validate an immutable Command payload after later Reducers run.
 
 Once Commands cross their Port boundaries, Kavod does not guarantee:
 
@@ -259,24 +264,26 @@ No Reducer or Component executes before Engine infrastructure crosses this barri
 
 This barrier establishes only that deterministic control execution can begin. Technical Port start, external connectivity, authentication, reconciliation, readiness, and permission to trade remain distinct later transitions.
 
+A starting live Port has no Event-admission authority. Before reading, decoding, or constructing an ordinary application Event, the implementation waits on the Environment's cancellable ingress gate until its `PortStarted` turn completes and opens admission. Any buffering performed by an external transport before that gate is Port/external-system state, not a hidden Kavod Event buffer. Simulated endpoints begin ordinary model activity only after the same completed-turn transition.
+
 ## Fatal Latch And Terminal Failure
 
 The live runtime has one monotonic first-failure fatal latch for Engine-global failure. Contained Port-local failures use ControlPlane quarantine and do not set this latch.
 
-Once fatal failure is established:
+Once fatal failure is established, the Engine is poisoned:
 
 - The primary failure is retained.
 - Later failures may be retained as secondary diagnostics but cannot replace the primary failure.
-- No new Event is accepted.
-- No new Event turn begins.
-- No new Command batch is published.
+- No later Event is guaranteed to be accepted.
+- No later Event turn is guaranteed to begin.
+- No later Command batch is guaranteed to be published.
 - All runtime waits are awakened so shutdown can begin.
 - The Engine is permanently terminal and cannot resume.
 - No Port is restarted after Engine-global fatal failure.
 
-The fatal transition must be linearized with Event acceptance and Command publication so that these guarantees do not depend on a racy check-then-act sequence.
+Fatal establishment occurs at the operation boundary where it is observed, whether or not diagnostics can retain that boundary. Kavod guarantees only the successfully completed prefix before it. The current callback or turn may be incomplete, its buffered outputs need not take effect, and its state is not reusable.
 
-A synchronous callback cannot be safely preempted. Fatal failure or an external kill request can take effect only when control returns to a kernel safe boundary. A global emergency stop requiring stronger preemption belongs outside the deterministic kernel and may terminate the process.
+A panic on the kernel thread unwinds the active callback immediately when the build permits unwinding. An asynchronous fatal report from another thread sets the fatal latch but cannot safely preempt arbitrary synchronous Rust code; the kernel observes it when control returns. A global emergency stop requiring stronger preemption belongs outside the deterministic kernel and may terminate the process.
 
 Port lifecycle, quarantine, application-managed shutdown, and worker ownership semantics are defined by the ControlPlane report. Concrete queue, cancellation, timeout, and join implementations remain deferred.
 
@@ -299,7 +306,7 @@ Panics remain reserved for:
 - Impossible runtime states.
 - Explicit panics from application callbacks or Engine-global runtime code. A caught, contained Port worker panic follows quarantine semantics.
 
-Kernel, callback, ControlPlane, and Engine-global runtime panics follow capture-and-stop behavior when the build's panic strategy permits unwinding. A caught Port worker panic may continue only by discarding that failed incarnation and quarantining every affected logical endpoint; the worker itself never resumes.
+Kernel, callback, ControlPlane, and Engine-global runtime panics follow capture-and-stop behavior when the build's panic strategy permits unwinding. A caught Port worker panic discards the failed worker, closes new authority, and quarantines every affected logical endpoint; the worker itself never resumes, but Events it admitted before panic remain in the Environment FIFO.
 
 ## Concrete Scenarios
 
@@ -313,11 +320,11 @@ The fill waits in its emitting Port's Event queue. It cannot interrupt the curre
 
 ### Execution Command Mailbox Fills
 
-The kernel does not block. Whole-turn Command reservation fails according to the binding's configured policy, and ordinary capacity exhaustion does not expose only part of the turn's Command batch. Commands that crossed a Port boundary before an unrelated later failure retain no external completion guarantee.
+The kernel does not block. A full destination rejects its complete destination batch with causally linked `CommandNotDelivered(MailboxFull)` ControlEvents. Other destinations remain eligible. Commands that crossed a Port boundary before an unrelated later failure retain no external completion guarantee.
 
 ### Port Unexpectedly Exits
 
-An unexpected live worker exit is a Port-local supervisor failure when its affected logical endpoints can be isolated. The ControlPlane quarantines those endpoints, revokes their ingress and Command handoff, and accepts lifecycle ControlEvents before ordinary ingress resumes. No restart occurs without an application ControlCommand. If the failure cannot be isolated from Engine-global infrastructure, the fatal latch is set instead.
+An unexpected live worker exit is a Port-local supervisor failure when its affected logical endpoints can be isolated. The ControlPlane quarantines those endpoints, closes new Event admission and Command handoff, and enqueues normally ordered lifecycle ControlEvents. Events already admitted by the failed incarnation remain in their FIFO and are accepted under ordinary Acceptor fairness. No restart occurs without an application ControlCommand and without draining that admitted FIFO. If the failure cannot be isolated from Engine-global infrastructure, the fatal latch is set instead.
 
 ### Operator Requests A Kill Switch
 
@@ -337,29 +344,32 @@ These comparisons support mechanisms, not technology selection. Kavod does not r
 ## Settled Rules
 
 1. Every live Port binding has one bounded FIFO Event queue.
-2. Event admission capacity is isolated per Port binding.
+2. Event admission capacity is isolated per Port binding, with separately bounded ControlPlane ingress.
 3. One global single-threaded Acceptor establishes accepted Event order.
-4. The Acceptor uses stable binding-order rounds.
-5. Each binding receives at most one global configured quantum per round.
-6. Events arriving during a binding's visit wait for a later round.
-7. Each Event is accepted and fully processed before the next Event is accepted.
+4. After structurally first `Ready`, the Acceptor uses one frozen source order containing the ControlPlane and Port FIFOs.
+5. Each source receives at most one global configured quantum per round.
+6. Events arriving during a source's visit wait for a later round.
+7. Absent fatal establishment, each Event is accepted and fully processed before the next Event is accepted.
 8. The acceptance commit is the Event acceptance linearization point; required diagnostics acknowledgement may gate that commit.
 9. Accepted Events process strictly in Event-index order.
 10. Internal Messages remain breadth-first FIFO.
 11. Events and Messages expose no scheduling priority.
 12. The MVP has no generic Critical or Normal admission classes.
-13. Queue capacities and full policies are explicit live binding configuration.
+13. Queue capacities and Event-admission full policies are explicit live binding configuration; Command-mailbox full behavior is fixed by core semantics.
 14. Domain-aware loss, batching, coalescing, and gap handling are not Kavod kernel semantics.
 15. Each live Port binding has one bounded FIFO Command mailbox.
 16. The kernel never blocks while publishing Commands.
 17. A turn has a mandatory global maximum combined Port Command and ControlCommand count.
-18. After unavailable destinations are rejected visibly, Kavod reserves capacity for the whole eligible turn Command batch before ordinary publication.
+18. After unavailable destinations are rejected visibly, Kavod reserves each eligible destination batch all-or-none; mailbox-full destinations receive `CommandNotDelivered(MailboxFull)` while healthy destinations remain eligible.
 19. Crossing a Port boundary creates no external effect guarantee or cross-Port atomicity.
 20. Engine infrastructure crosses a private startup barrier before Ready, and Ready precedes every Port worker start.
-21. Contained Port-local failure quarantines affected endpoints; Engine-global fatal failure prevents further Event acceptance, turns, and Command publication.
+21. Contained Port-local failure quarantines affected endpoints. After Engine-global fatal establishment, the runtime must not intentionally dispatch or publish further work, but application correctness cannot depend on any post-fatal behavior.
 22. There is no automatic Port restart; restart requires an accepted application ControlCommand.
 23. Configured turn-limit exhaustion is an ordinary terminal error, not a panic.
 24. A kill-switch Event cannot preempt a synchronous callback or current turn.
+25. Event queue admission is irrevocable for the MVP even though it is not Event acceptance.
+26. Stop or quarantine closes new admission but does not remove already admitted Events.
+27. Port stop, quiescence, restart eligibility, and normal Engine completion require the old incarnation's admitted FIFO to be empty.
 
 ## Rejected Alternatives
 
@@ -371,7 +381,7 @@ These comparisons support mechanisms, not technology selection. Kavod does not r
 - **Exactly one Event per Port per round:** provides maximum fairness but is unnecessarily rigid for burst handling; a bounded global quantum exposes the tradeoff.
 - **Accept an entire quantum before processing it:** creates an accepted-but-unprocessed backlog and delays later Port observations behind already accepted Events.
 - **Blocking Command publication:** can stall all Event processing behind one slow Port.
-- **Partial publication on ordinary capacity exhaustion:** avoidable through whole-batch reservation.
+- **Partial publication within one destination on ordinary capacity exhaustion:** avoided through per-destination all-or-none reservation; unrelated destinations are not coupled.
 - **Turn-limit panic:** misclassifies an anticipated safety bound as an impossible invariant failure.
 - **Kernel-defined trading or feed-loss Events:** violates Kavod's domain-agnostic protocol boundary.
 
@@ -404,7 +414,7 @@ High-cardinality application identities do not belong in metric labels. Exact re
 
 - Diagnostics implementations must provide the settled recording, metric, queue-lag, and fatal-diagnostic semantics without exposing diagnostics state to callbacks.
 - Logical shutdown, quarantine, restart, and failure-race semantics are settled by the ControlPlane report; concrete worker timeout and join mechanisms remain implementation work.
-- Exact worker-exit detection and queue implementation must preserve the ControlPlane barriers and per-destination Command-disposition rules.
+- Exact worker-exit detection and queue implementation must preserve immediate ControlPlane authority changes, ordinary ControlEvent ordering, admitted-Event drainage, and per-destination Command-disposition rules.
 - Domain applications must define their own readiness, reconciliation, disarming, loss handling, and external safety controls.
 
 ## Open Questions
@@ -415,7 +425,7 @@ The following details remain deliberately deferred:
 
 - The numeric default or required explicit value for the global Acceptor quantum.
 - Default Event and Command capacities.
-- The exact set and spelling of permitted binding full policies.
+- The exact set and spelling of permitted Event-admission full policies. Command-mailbox full behavior is settled as per-destination rejection with typed disposition.
 - Public builder and binding syntax.
 - Concrete queue and capacity-reservation implementations.
 - Detailed technical shutdown and worker-join semantics.

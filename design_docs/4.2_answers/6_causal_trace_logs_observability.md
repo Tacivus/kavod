@@ -6,7 +6,7 @@
 
 ## Conclusion
 
-Kavod has one Engine-owned diagnostics facility and one ordered audit stream per Engine run.
+Kavod has one Engine-owned diagnostics facility and one ordered diagnostic stream per Engine run.
 
 ```text
 automatic Kavod audit records ----\
@@ -16,7 +16,7 @@ user ctx.log.*() records ----------/             |
                                                  +--> filtering and batching
 ```
 
-The stream contains distinct automatic-audit and user-log record kinds, but they share correlation, ordering, buffering, and output configuration. Separate physical Event tapes, Command tapes, causal-trace files, and user-log files are not required by the semantic model. A configured writer may expose filtered logical views over the one stream.
+The stream contains distinct automatic-audit and user-log record kinds, but they share correlation, ordering, buffering, and output configuration. The automatic-audit subset is the run's audit view; user logs do not become audit records merely because they share a pipeline. Separate physical Event tapes, Command tapes, causal-trace files, and user-log files are not required by the semantic model. A configured writer may expose filtered logical views over the one stream.
 
 The exact implementation remains open. Kavod may use the Rust `log` ecosystem, `tracing`, a small custom recorder, or a combination behind its public diagnostics boundary. No dependency-specific type is part of the settled application API.
 
@@ -33,13 +33,14 @@ Diagnostics are never application state, broker truth, a recovery log, an outbox
 | Diagnostics | The Engine-owned facility that accepts automatic audit records and user logs and routes them to configured outputs |
 | Audit record | A structured record emitted automatically by Kavod for a kernel, ControlPlane, Environment, or Port-boundary action |
 | User log | An observational record emitted explicitly through `ctx.log.*()` |
-| Audit stream | The ordered stream containing both record classes for one Engine run |
-| Metric | An aggregate operational measurement; not an audit record and not ordered with the audit stream |
+| Diagnostic stream | The ordered stream containing both record classes for one Engine run |
+| Audit view | The automatic-audit records selected from the diagnostic stream |
+| Metric | An aggregate operational measurement; not an audit record and not ordered with the diagnostic stream |
 | Distributed trace | Optional exporter-dependent telemetry using external trace and span identities |
 
 Kavod should not call this facility a journal. In event-sourced, database, and replicated-state-machine systems, a journal normally implies restoration, authoritative history, or redelivery. Those semantics are explicitly absent here.
 
-`AuditRecord`, `audit stream`, or `diagnostics` accurately describe the facility without granting recovery authority. `Trace` is a recording detail level, not the facility's name.
+`DiagnosticRecord`, `diagnostic stream`, `AuditRecord`, and `audit view` describe the facility without granting recovery authority. `Trace` is a recording detail level, not the facility's name.
 
 ## One Unified Stream
 
@@ -53,7 +54,7 @@ DiagnosticRecord
 
 This provides one correlation and output path while preserving the important distinction between records Kavod emits automatically and text or fields supplied by application code.
 
-Metrics remain aggregates rather than stream records. OpenTelemetry export remains an optional projection from selected diagnostic activity rather than the audit stream's storage or identity model.
+Metrics remain aggregates rather than stream records. OpenTelemetry export remains an optional projection from selected diagnostic activity rather than the diagnostic stream's storage or identity model.
 
 ## Common Record Envelope
 
@@ -119,6 +120,7 @@ The `Audit` level includes at least:
 
 - `RunStarted`, including executable/application identity, graph identity, determinism-affecting configuration identity, and diagnostics configuration.
 - `EventAccepted`, including complete Port Event or ControlEvent payload, source identity, Event index, and acceptance time.
+- `EventProcessingStarted`, proving that kernel processing began for an accepted Event without proving completion.
 - `CommandProduced`, including complete Port Command or ControlCommand payload, destination or operation, root Event index, producing callback, and production order.
 - Consequential Port-boundary observations, including worker lifecycle, Command handoff or submission attempts where observable, and infrastructure faults.
 - Consequential ControlPlane observations, including Ready, lifecycle request and result, placement realization or normalization, incarnation, quarantine, explicit restart, unavailable-destination rejection, and Engine-global fatal classification.
@@ -144,13 +146,13 @@ Invocation is recorded before entering the callback. If a callback panics or the
 The `Trace` level adds at least:
 
 - `ReducerCompleted`.
-- `StateModified`.
+- `ReducerMutationBoundaryCompleted`.
 - `ComponentCompleted`.
 - Detailed queue, acceptance, publication, and Port observations selected by configuration.
 
-`StateModified` records that a Reducer completed with mutable access to canonical `AppState`. It does not claim that a particular field or byte changed. The MVP records no old value, new value, field-level diff, state serialization, or state hash.
+`ReducerMutationBoundaryCompleted` records that a Reducer completed with mutable access to canonical `AppState`. It does not claim that a particular field or byte changed. The MVP records no old value, new value, field-level diff, state serialization, or state hash.
 
-A Reducer panic may leave partially changed state and therefore has no successful `StateModified` completion record. The fault record and preceding `ReducerInvoked` identify the mutation boundary at which execution failed. Kavod does not roll the state back or resume that Engine.
+A Reducer panic may leave partially changed state and therefore has no successful `ReducerMutationBoundaryCompleted` record. The fault record and preceding `ReducerInvoked` identify the mutation boundary at which execution failed. Kavod does not roll the state back or resume that Engine.
 
 Component-private state changes are not automatically detected. `ComponentInvoked` and `ComponentCompleted` identify the callback boundary within which private state may have changed.
 
@@ -238,12 +240,14 @@ The destination and failure policy are conceptually independent even if convenie
 
 ### Event Acceptance
 
-The Acceptor prepares the candidate Event index, acceptance time, source identity, and root action, then emits `EventAccepted` according to the selected policy before callback dispatch.
+The Acceptor prepares the candidate Event index, acceptance time, source identity, and root action, then applies the selected `EventAccepted` policy before callback dispatch.
 
-- Under best effort, recording is attempted and the Event is committed as accepted even if recording fails.
-- Under required recording, the Event is committed as accepted only after the configured writer acknowledges the automatic record.
+- Under best effort, the Event is committed as accepted first and `EventAccepted` recording is then attempted before processing. Recording failure does not undo acceptance or prevent processing.
+- Under required recording, the writer crossing its declared acknowledgement boundary for the complete automatic record is the Event acceptance commit. There is no separate later fallible acceptance step. Failure before the Acceptor observes that acknowledgement may leave an accepted-but-unprocessed record and poisons the Engine rather than undoing acceptance.
 - If required recording fails, the Event is not dispatched, the fatal latch is set, and the Engine does not continue.
 - The acceptance commit remains the semantic linearization point. A record is diagnostic evidence of that operation, not the authority that makes the external Event true.
+
+`EventAccepted` proves only that acceptance committed. `EventProcessingStarted` records that kernel processing began. A retained `EventAccepted` without `EventProcessingStarted` is a valid diagnosis of an accepted-but-unprocessed Event after fatal failure or process termination.
 
 The same rule applies before publishing produced Commands when required Command audit is configured: required records must be acknowledged before the Command batch crosses the Port boundary. This creates no resend, delivery, or external-effect guarantee.
 
@@ -253,18 +257,22 @@ The writer acknowledgement boundary must be explicit:
 - Buffered disk acknowledgement may mean only successful admission to memory and does not imply crash durability.
 - A future disk-required mode must state whether acknowledgement means write completion, flush, or data synchronization.
 
+A required writer must not expose pre-acknowledgement bytes as a committed `EventAccepted` record. Framing or an equivalent commit marker must let inspection distinguish a complete acknowledged record from an incomplete tail. This is record truthfulness, not recovery authority.
+
 Kavod must not call buffered admission durable. Exact disk-required and fsync semantics remain deferred.
 
 ### User Logs And Required Audit
 
-User logs are best effort from callback code even when automatic audit records are required:
+Only automatic records may be configured as required. User logs are best effort from callback code even when automatic audit records are required:
 
 - A `ctx.log.*()` call never returns failure and never changes callback control flow.
 - Optional user logs must not consume capacity reserved for required automatic records.
-- If a shared physical sink becomes unhealthy, the failure is handled by diagnostics supervision and any required automatic record fails at a kernel safe boundary.
+- If a shared physical sink becomes unhealthy, the failure is handled by diagnostics supervision and the next failed required automatic-record acknowledgement poisons the Engine at that record boundary.
 - A callback is never interrupted because one user log could not be written.
 
-Required recording intentionally affects Engine liveness. It must not affect successful callback outputs or permit callbacks to observe diagnostics state. Recording configuration is therefore Engine provenance and must be included in run diagnostics.
+Required recording intentionally affects Engine liveness. A failed required acknowledgement poisons the Engine at that record boundary: the current callback or turn may be incomplete, buffered output from that turn is not guaranteed to take effect, and no later application semantics are promised. Recording configuration is therefore Engine provenance and must be included in run diagnostics.
+
+Automatic boundary records have precise meanings. Required `ReducerInvoked` and `ComponentInvoked` records are acknowledged before invocation. `ReducerCompleted` and `ComponentCompleted` exist only after normal return. Under required recording, acknowledgement of `MessageProduced` or `CommandProduced` commits that deterministic production; under best effort, production commits first and recording is attempted afterward. A missing completion record means the callback may have partially mutated private or canonical state. Required recording does not provide rollback or a reusable terminal state.
 
 ### Buffer Exhaustion And Sink Failure
 
@@ -307,11 +315,13 @@ Kavod records Port activity at two levels:
 
 If a reconnect, timeout, rejection, or service state changes application behavior, the application must also represent it as a typed Event. A Port log alone cannot trigger deterministic behavior.
 
+Application-provided `Display`, `Debug`, formatting, cloning, and serialization code executed for diagnostics is subject to the same determinism and purity contract as Component and Reducer code. Kavod does not sandbox these implementations. A panic while Kavod invokes required formatting or encoding poisons the Engine; impure behavior is an application contract violation. Public logging APIs should still avoid lazy user callbacks whose execution depends on filtering because that creates an unnecessary source of mode-dependent behavior.
+
 Port records should correlate to a Command identity when they concern one produced Command. Port-local operation sequence and wall time may supplement, but never replace, the Command's kernel identity.
 
 ## Metrics
 
-Metrics are aggregate operational signals and are not written into the ordered audit stream by default.
+Metrics are aggregate operational signals and are not written into the ordered diagnostic stream by default.
 
 The MVP must make it possible to observe:
 
@@ -353,7 +363,7 @@ If diagnostic replay is later implemented, it should create new OTel traces and 
 
 Replay, state hashes, and divergence tooling are not MVP diagnostics guarantees.
 
-The audit stream deliberately preserves accepted Port Events and ControlEvents plus produced Port Commands and ControlCommands so a later diagnostic tool may use them. If added, that tool must:
+The audit view deliberately preserves accepted Port Events and ControlEvents plus produced Port Commands and ControlCommands so a later diagnostic tool may use them. If added, that tool must:
 
 - Cold-start a new Engine instance.
 - Treat recorded Events only as explicit diagnostic inputs to that isolated run.
@@ -379,15 +389,15 @@ These patterns justify separation and observability mechanics. They do not justi
 
 ## Settled Rules
 
-1. Kavod has one Engine-owned diagnostics facility and one logical audit stream per run.
+1. Kavod has one Engine-owned diagnostics facility and one logical diagnostic stream per run; its automatic records form the audit view.
 2. Automatic audit records and user logs are distinct record kinds in the same pipeline.
 3. Diagnostics configuration belongs to the Engine run, not the Application graph.
 4. The exact Rust logging or tracing dependency remains open.
 5. Components, Reducers, and Ports log through `ctx.log.error/warn/info/debug/trace` semantics.
 6. Context logging is write-only and reveals no enablement, sampling, buffering, or writer state.
 7. Automatic audit detail and user-log severity are configured separately.
-8. `Trace` enables an automatic record for every semantic action visible to Kavod; configured failure policy determines whether a missing acknowledgement creates an accounted gap or stops the Engine.
-9. `StateModified` records only a successful Reducer mutation boundary, never old or new state values.
+8. `Trace` enables an automatic record for every configured semantic action visible to Kavod; configured failure policy determines whether a missing acknowledgement creates an accounted gap or poisons the Engine.
+9. `ReducerMutationBoundaryCompleted` records only successful completion with mutable Reducer access, never proof of a changed value or old and new state values.
 10. Event index and turn action sequence define deterministic kernel order; diagnostic record sequence defines recorder observation order.
 11. Every Port Command and ControlCommand retains its root Event, production order, producer callback, and destination or operation.
 12. Port Event, ControlEvent, Port Command, and ControlCommand payloads are recorded at the Audit level; Message records begin at Debug.
@@ -430,7 +440,7 @@ The MVP diagnostics design does not provide:
 - Guaranteed preservation after process, hardware, or recorder failure.
 - Proof that diagnostics have zero physical performance effect.
 
-Instrumentation consumes CPU and memory and may change live latency or which external Event becomes visible first. The enforceable invariant is narrower: callbacks cannot observe diagnostics configuration or failure and cannot branch on it. Once an Event is accepted, diagnostics do not reorder callbacks or alter successful callback outputs. A required-record failure may terminate the Engine at a safe boundary and truncate the remaining deterministic execution prefix.
+Instrumentation consumes CPU and memory and may change live latency or which external Event becomes visible first. The enforceable invariant is narrower: callbacks cannot observe diagnostics configuration or failure and cannot branch on it. Once an Event is accepted, successful diagnostics operations do not reorder callbacks or alter successful callback outputs. A required-record failure poisons the Engine at that record boundary; the active callback or turn may be incomplete and Kavod makes no state-consistency guarantee afterward.
 
 ## Dependencies And Required Reconciliation
 
@@ -438,14 +448,14 @@ This report refines the determinism and live-runtime reports where they previous
 
 - The acceptance commit is the semantic linearization point.
 - Best-effort recording failure does not prevent that commit.
-- Required recording acknowledgement gates the commit and callback dispatch.
+- Required `EventAccepted` acknowledgement is the commit and gates callback dispatch.
 - Recording configuration may affect liveness under failure but never grants recovery authority.
 
-The state report's observability dependency is resolved for the MVP: record only the `StateModified` boundary and defer state values, hashes, serialization, and replay comparison.
+The state report's observability dependency is resolved for the MVP: record only `ReducerMutationBoundaryCompleted` and defer state values, hashes, serialization, and replay comparison.
 
 The ControlPlane report additionally requires diagnostics to distinguish Port-local quarantine from Engine-global fatal failure and to record the causal chain from ControlCommand through backend realization to accepted ControlEvent.
 
-Required lifecycle recording follows the ControlPlane authority boundary: application-produced lifecycle operations are acknowledged before backend invocation, while immediate quarantine and routing revocation commit before recording and escalate to fatal if their required record cannot be acknowledged. Required recording never delays or rolls back a safety revocation.
+Required lifecycle recording follows the ControlPlane authority boundary: application-produced lifecycle operations are acknowledged before backend invocation, while immediate quarantine and closure of new admission and handoff commit before recording and escalate to fatal if their required record cannot be acknowledged. Required recording never delays or rolls back that authority change and never removes Events admitted before it.
 
 ## Open Questions
 

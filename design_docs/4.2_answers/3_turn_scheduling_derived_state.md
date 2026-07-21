@@ -24,7 +24,7 @@ The MVP adds no generic phases, additional callback classes, joins, state-settle
 
 ## Exact Current Guarantee
 
-Absent terminal interruption, for each delivered Event or Message:
+Absent fatal establishment, for each delivered Event or Message:
 
 1. All matching Reducers run in stable registration order.
 2. Each Reducer completes before the next callback begins.
@@ -32,7 +32,7 @@ Absent terminal interruption, for each delivered Event or Message:
 4. Messages emitted by Components append to the turn FIFO in production order.
 5. Port Commands and ControlCommands are collected in production order and do not take effect during a callback.
 
-If runtime or required-diagnostics failure terminates dispatch between callbacks, no later ordinary Component bypasses unfinished matching Reducers; the Engine stops instead.
+If fatal establishment terminates dispatch between callbacks, the Engine is poisoned. No later ordinary Component bypasses unfinished matching Reducers, no output from the incomplete turn is guaranteed to take effect, and Kavod makes no consistency guarantee for that partial turn.
 
 Therefore a Component handling payload `X` observes all canonical-state transitions registered directly on `X`.
 
@@ -151,6 +151,8 @@ The settled design is:
    BarsClosed([Bar1m, Bar5m, Bar15m, BarDaily])
 
 4. Every Reducer(BarsClosed) completes successfully.
+   One cohesive bar-projection transition stores every bar required
+   by the decision.
    AppState bars = [new, new, new, new]
 
 5. Strategy(BarsClosed) runs once against the updated bar projection.
@@ -176,6 +178,8 @@ It:
 
 Completed bars that must be shared across Components belong in canonical `AppState`. Application Reducers consuming `BarsClosed` perform that projection.
 
+When several bar fields or related derived fields must remain mutually coherent for the decision, one `BarsClosed` Reducer performs the complete required canonical transition. Splitting required bar and risk mutations across order-dependent Reducers may remain deterministic while still being semantically stale; Kavod does not infer or validate those hidden field dependencies.
+
 The aggregation scope must be clear from application construction and payload meaning. It may be one instrument and configured timeframe family, or another application-defined bounded grouping. `BarsClosed` guarantees completeness only within the producing Component's declared domain scope. It does not combine unrelated aggregator instances.
 
 If one input closes multiple consecutive bars for one timeframe under the application's gap or empty-bar policy, the aggregate contains all such closures. Bars within the aggregate use a stable application-defined order. Application behavior must not depend on nondeterministic collection iteration.
@@ -195,13 +199,15 @@ When its callback begins:
 
 This is a limited guarantee. Consuming `BarsClosed` does not settle unrelated `AppState` fields whose updates are represented by other Messages still in the FIFO. A Strategy must not claim whole-state coherence merely because its bar projection is coherent.
 
+Likewise, completion of several matching Reducers does not prove that order-dependent Reducer logic was correct. Canonical values that the Strategy requires as one coherent transition must be updated together within one Reducer callback, normally through one cohesive `AppState` operation.
+
 A Strategy may consume the raw Tick for tick-specific logic, but it must not make a decision requiring newly closed bars from that callback. Tick Components execute before Messages emitted by other Tick Components are reduced.
 
 Singular `BarCompleted` facts remain legitimate when no consumer requires coherence with sibling bar closures. They are not the decision trigger for a Strategy that requires the complete multi-timeframe transition.
 
 ## Minimal MVP Semantic Rule
 
-> If a decision depends on several related state changes caused by one input, the producer must represent the complete required set as one delivered Event or Message, and the decision callback must consume that complete fact rather than an independently actionable member fact.
+> If a decision depends on several related state changes caused by one input, the producer must represent the complete required set as one delivered Event or Message, the canonical fields that must remain mutually coherent must be transitioned cohesively, and the decision callback must consume that complete fact rather than an independently actionable member fact.
 
 For external observations that must be atomic, a Port emits one application-defined batch Event. For deterministic internal derivations, an ordinary Component emits one aggregate Message such as `BarsClosed`.
 
@@ -266,7 +272,7 @@ DFS is rejected because it prioritizes descendants over siblings, worsens partia
 
 Port Commands and ControlCommands remain collected in deterministic production order and become eligible only after the turn reaches quiescence.
 
-This prevents callback-to-Port reentrancy and supports whole-turn publication-capacity reservation. It does not make the decision that created a Command safe:
+This prevents callback-to-Port reentrancy and supports per-destination publication-capacity reservation. It does not make the decision that created a Command safe:
 
 ```text
 Component reads partial state
@@ -276,7 +282,7 @@ Component reads partial state
     -> original payload remains unchanged
 ```
 
-Kavod does not recompute, validate, or cancel an output merely because later state differs. After quiescence, the runtime classifies and publishes eligible Port Commands before applying ControlCommands as specified by the ControlPlane report. A lifecycle ControlCommand does not make a sibling Port Command deliverable in the same turn. Publication or control application may also fail under capacity, destination-state, required-diagnostics, or fatal-failure rules. Turn-end collection is not a guarantee of external delivery or effect.
+Kavod does not recompute, validate, or cancel an output merely because later state differs. After quiescence, the runtime classifies and publishes eligible Port Commands before applying ControlCommands as specified by the ControlPlane report. A lifecycle ControlCommand does not make a sibling Port Command deliverable in the same turn. Publication or control application may also fail under capacity, destination-state, required-diagnostics, or fatal-failure rules. Turn-end collection is not a guarantee of external delivery or effect. Fatal establishment poisons the Engine and may abandon the incomplete turn without further application semantics.
 
 ## Time And Same-Timestamp Ordering
 
@@ -348,6 +354,8 @@ These systems solve different problems, including distributed progress, runner-s
 16. The MVP has no generic join, additional derive/reaction callback classes, application decision phase, or public state-settled callback.
 17. Equal timestamps never combine separate Events or Messages into one atomic transition.
 18. Existing cycle diagnostics and mandatory turn limits remain sufficient.
+19. Canonical fields required as one coherent transition are updated within one Reducer callback, normally through one cohesive `AppState` operation.
+20. Stable multi-Reducer order does not prove semantic independence or correct cross-Reducer dependencies.
 
 ## Minimum Verification
 
@@ -366,8 +374,10 @@ The decision should be proved by tests covering at least:
 11. Repeated runs with the same build, graph, state, configuration, and Event tape produce identical aggregate payloads, state, Messages, and Commands.
 12. Separate accepted Events with equal domain timestamps remain separate ordered turns.
 13. Port Commands and ControlCommands remain deferred during callbacks and retain their original payload after production.
-14. A Reducer panic stops the Engine without running later Components or publishing the turn's Commands.
+14. A Reducer panic poisons the Engine; the runtime must not intentionally run later Components or publish the incomplete turn's Commands, but application correctness cannot depend on post-fatal behavior.
 15. Application graph tests confirm that callbacks making coherent bar decisions consume `BarsClosed` rather than singular closures or the triggering Tick.
+16. A cohesive `BarsClosed` Reducer updates every canonical bar field required by the Strategy before it runs.
+17. A negative test demonstrates that an order-dependent risk Reducer registered before bar projection can remain deterministic but stale, and is rejected as an application design error.
 
 ## Rejected Alternatives
 
