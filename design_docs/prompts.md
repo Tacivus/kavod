@@ -12,6 +12,7 @@ The recommended order is:
 4. Port and simulation architecture.
 5. Live runtime, backpressure, and safety.
 6. Causal trace, logs, and observability.
+7. Runtime control, supervision, and lifecycle.
 
 At the end of each discussion, capture only settled decisions, rejected alternatives, open questions, and dependencies on the other discussions. Do not manufacture certainty where a decision needs more evidence.
 
@@ -395,6 +396,108 @@ Keep in mind that I dont want a dissertation. I want something actionable/simpli
 
 ---
 
+## 7. Runtime Control, Supervision, And Lifecycle
+
+```text
+I am designing Kavod, a deterministic single-writer application kernel.
+
+Read:
+
+- design_docs/design-v4.md
+- design_docs/design-4.1.md
+- design_docs/thoughts.md
+- design_docs/4.2_answers/*
+
+The prior deep dives settle the deterministic application data plane:
+
+Port -> Event -> Component
+Component -> Message -> Component
+Component -> Command -> Port
+
+They also settle bounded live queues, a technical startup barrier, a fatal latch, no automatic Port restart in the MVP, capture-and-stop panics, and application-defined lifecycle Events where application behavior must react.
+
+The remaining hole is the runtime control and supervision plane.
+
+I need precise semantics for communication among:
+
+- The embedding host that constructs and runs the Engine.
+- The Engine and Environment.
+- Port workers or simulated models.
+- Deterministic Components and Reducers.
+- External operators or control systems.
+
+Examples include Port startup, readiness, unexpected exit, panic, stop requests, draining, joining, restart policy, normal Engine completion, external shutdown, application-requested shutdown, pausing or idling, and fatal failure. Today most Engine-to-outside communication is diagnostics or a terminal RunError, while application code has no explicit way to request a runtime transition.
+
+I want a design workshop, not implementation code. Be brutally honest. First settle authority, communication directions, safe boundaries, and failure semantics. Do not propose Rust traits, handles, builder syntax, or ctx methods until those semantics are clear.
+
+Briefly compare relevant patterns from structured concurrency, actor supervision, realtime runtimes, service managers, and Zig's std.Io-style semantic interfaces. Use them as evidence, not templates. In particular, examine whether Kavod can expose semantic operations whose live and simulation mechanisms differ without accidentally requiring full adapter-level deterministic simulation.
+
+Explore:
+
+1. Define the application data plane, runtime control plane, supervision plane, and observability plane. Which information belongs on each?
+2. Distinguish the deterministic application from the embedding host. Which one is meant when we say "the application requests shutdown"?
+3. What requests may the embedding host send to a running Engine: request stop, abort, pause acceptance, resume, inspect status, or something smaller?
+4. At what kernel safe boundaries may each control request take effect?
+5. What outcomes must the Engine report to its host besides RunError: normal completion, externally requested stop, application-requested stop, simulation exhaustion, or drained shutdown?
+6. How do Port workers report Starting, Running, stopped, unexpectedly exited, panicked, or failed to the Environment supervisor without pretending these are ordinary domain Events?
+7. When should Port connectivity, readiness, degradation, reconnect, or restart become application-defined Events?
+8. Which technical failures must immediately set the fatal latch instead of entering the application as Events?
+9. Can application code request that the Engine stop? If so, should this be a new kernel-level output, a Command to an application-defined Control Port, or another mechanism?
+10. If an external Shutdown request enters through a Control Port as an Event, how does the resulting deterministic decision become an actual Engine stop without granting Components an Engine handle?
+11. Must an application-requested stop wait until the current turn reaches quiescence? Are the turn's Commands published before stopping?
+12. Define stop-accepting, Event drain, Command drain, Port stop request, timeout, forced termination, worker join, and final diagnostics flush. Which order is safe?
+13. What happens to Events already offered but not accepted, accepted work, unpublished Commands, Commands already handed to Ports, and late Port Events during shutdown?
+14. How are concurrent stop requests, worker failures, and Command publication linearized with the existing fatal latch?
+15. Is Port restart ever safe within one Engine run? If deferred from MVP, what future semantics would prevent hidden loss, duplicate effects, or stale application assumptions?
+16. Should a restarted Port retain the same logical Port identity, receive a new worker incarnation identity, and emit application-visible lifecycle facts?
+17. What does Engine pause or sleep mean? Distinguish no-work idling, virtual-time advancement, Timer Port behavior, stopping Event acceptance, and suspending external workers.
+18. Where should execution placement be selected: Environment binding, Port implementation, or a controlled Port runtime context?
+19. Is a Zig std.Io-style semantic facade useful for live Port implementations while simulation uses different mechanics? Which guarantees would it need around cancellation, deferred completion, time, spawning, and no reentrant Event delivery?
+20. Would a shared facade accidentally expand Kavod into adapter-level DST by requiring network, storage, time, randomness, and concurrency to use Kavod primitives?
+21. How should short-lived background work such as ML inference be represented? When is it a service Port, a Port-internal worker, an Environment worker-pool job, or work that does not belong in Kavod?
+22. Can a Port spawn child work? If so, who owns cancellation, failure propagation, shutdown, joining, and Event attribution?
+23. Which lifecycle transitions and control actions must be represented in automatic audit records and metrics?
+24. What is the smallest coherent MVP control and supervision model that leaves room for async, pools, process Ports, restart, and deterministic adapter testing later?
+
+Use concrete traces for:
+
+- Normal startup followed by operator-requested shutdown.
+- A Control Port receiving Shutdown and deterministic application logic approving or delaying it.
+- A Port unexpectedly exiting during a kernel turn.
+- Shutdown while Events are queued and Commands are awaiting publication.
+- A Port with child ML work still running during shutdown.
+- A future configured Port restart without silently changing logical application behavior.
+
+Preserve these existing commitments unless the workshop finds a contradiction:
+
+- Components never receive Engine, Environment, scheduler, executor, channel, or Port handles.
+- Application-visible operational facts are typed Events.
+- Technical infrastructure failures are never silent.
+- Fatal failure prevents new Event acceptance, turns, and Command publication.
+- A synchronous callback and active turn cannot be safely preempted.
+- Runtime-private shutdown is distinct from domain actions such as disarm, cancel orders, or flatten positions.
+- No hidden retry or automatic restart exists in the MVP.
+- Simulation remains single-threaded and non-reentrant.
+- Diagnostics are observational and not a control channel.
+
+End with:
+
+- A communication and authority matrix for every participant.
+- A classification of domain Events, runtime control requests, supervisor signals, terminal outcomes, and diagnostics.
+- The normative startup, normal-stop, and fatal-stop state machines.
+- Safe-boundary and linearization rules.
+- A decision on whether deterministic application code can request Engine control and through what semantic mechanism.
+- Port child-work ownership and cancellation rules.
+- A recommendation on Zig-style semantic runtime operations and their proper boundary.
+- The smallest MVP scope and explicitly deferred restart, placement, and adapter-level DST work.
+- Tests and failure traces needed to validate the design.
+- Open questions that still block the public Engine, Environment, or Port interfaces.
+
+Keep in mind that I dont want a dissertation. I want something actionable and simplified for an MVP. I want the core semantics worked out so that I am not shooting myself in the foot later.
+```
+
+---
+
 ## Final Synthesis Prompt
 
 Use this only after the seven focused discussions have produced settled decisions.
@@ -408,6 +511,7 @@ I have completed focused Kavod design discussions covering:
 4. Port and simulation architecture.
 5. Live runtime, backpressure, and safety.
 6. Causal tracing, logging, and observability.
+7. Runtime control, supervision, and lifecycle.
 
 I will provide the conclusions, rejected alternatives, and open questions from each discussion.
 
@@ -427,7 +531,10 @@ Check for:
 10. Incomplete state boundaries.
 11. Backpressure, shutdown, or failure behavior that violates no-silent-drop.
 12. Observability behavior that can affect deterministic execution.
-13. Claims that should be deferred rather than promised by the MVP.
+13. Runtime control that bypasses deterministic application authority or exposes Engine machinery to Components.
+14. Supervisor signals confused with domain Events, terminal outcomes, or diagnostics.
+15. Port child work without clear ownership, cancellation, failure propagation, or joining.
+16. Claims that should be deferred rather than promised by the MVP.
 
 Produce:
 
@@ -435,8 +542,10 @@ Produce:
 - Settled invariants and explicit non-goals.
 - The normative deterministic turn lifecycle.
 - The normative cold-start, reconciliation, and arming lifecycle.
-- State, Port, simulation, and observability ownership boundaries.
-- Failure and safety principles.
+- The normative technical startup, normal-stop, and fatal-stop lifecycles.
+- State, Port, simulation, runtime-control, supervision, and observability ownership boundaries.
+- A communication and authority matrix for the embedding host, Engine, Environment, Ports, application code, and external control systems.
+- Failure, cancellation, shutdown, and safety principles.
 - The narrowed MVP scope.
 - Design decisions that still block implementation.
 - A dependency-ordered list of the next design conversations or validation exercises.
