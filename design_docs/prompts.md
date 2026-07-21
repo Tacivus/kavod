@@ -201,7 +201,7 @@ End with:
 - Tests and invariants that would prove the decision.
 - Open questions that affect the state model or graph model.
 
-Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core sematics worked out for my design so that I'm not shooting myself in the foot later 
+Keep in mind that I dont want a dissertation. I want something actionable/simplified for an MVP. I want the core simple sematics worked out for my design so that I'm not shooting myself in the foot later 
 ```
 
 ---
@@ -216,6 +216,7 @@ Read:
 - design_docs/design-v4.md
 - design_docs/design-4.1.md
 - design_docs/thoughts.md
+- design_docs/4.2_answers/* to see what has already been resolved in a deep dive
 
 Kavod has logical Port specifications shared across live and simulation. Live Ports are concurrent external workers. Simulated Ports are synchronous deterministic state machines under virtual time. The application graph must remain the same across environments, but live and simulated implementations do not need the same execution interface.
 

@@ -117,7 +117,7 @@ x duration of their Event turns
 
 The quantum bounds consecutive Event count, not wall-clock duration. Components remain responsible for synchronous, nonblocking callbacks, and turn metrics must reveal work that is too slow for the configured live latency budget.
 
-Events that carry the same application domain timestamp do not thereby receive the same acceptance timestamp. Acceptance time records when the Acceptor commits each Event. Time spent waiting behind other Events is real queueing delay and must not be hidden by accepting a backlog ahead of execution.
+Events that carry the same application domain timestamp do not thereby receive the same acceptance timestamp. The Acceptor freezes acceptance time as part of the acceptance operation before any configured required-audit acknowledgement and the final commit. Required acknowledgement may delay the commit after that value is frozen. Time spent waiting behind other Events is real queueing delay and must not be hidden by preparing a backlog ahead of execution.
 
 If an application requires several external observations to form one atomic input with one logical time, its Port protocol may define one application-specific batch Event. Kavod does not infer or construct such batches.
 
@@ -216,6 +216,8 @@ If capacity cannot be obtained according to the configured policies:
 - No callback is resumed and the kernel does not wait for capacity.
 
 Whole-batch reservation bounds in-process publication behavior. It does not create a transaction across external systems.
+
+Turn quiescence and whole-batch reservation govern Command publication timing only. They do not prove that a Command was computed against final turn state, and they do not recompute or validate an immutable Command payload after later Reducers run.
 
 Once Commands cross their Port boundaries, Kavod does not guarantee:
 

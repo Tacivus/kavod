@@ -92,7 +92,7 @@ Automatic audit detail has four levels:
 
 User logs use the familiar severities `Error`, `Warn`, `Info`, `Debug`, and `Trace`. User-log filtering is separate from automatic audit detail even though both record classes use the same pipeline and outputs.
 
-`Trace` means every semantic action visible to Kavod, not every Rust statement or field assignment. It includes every callback boundary, Message and Command production, canonical-state mutation boundary, and configured Port/runtime action.
+`Trace` enables an automatic record for every semantic action visible to Kavod, not every Rust statement or field assignment. This includes every callback boundary, Message and Command production, canonical-state mutation boundary, and configured Port/runtime action. Best-effort failure may still create an explicitly accounted recording gap; required-record failure stops the Engine.
 
 Full tracing can be expensive. Its volume scales approximately with:
 
@@ -380,7 +380,7 @@ These patterns justify separation and observability mechanics. They do not justi
 5. Components, Reducers, and Ports log through `ctx.log.error/warn/info/debug/trace` semantics.
 6. Context logging is write-only and reveals no enablement, sampling, buffering, or writer state.
 7. Automatic audit detail and user-log severity are configured separately.
-8. `Trace` records every semantic action visible to Kavod.
+8. `Trace` enables an automatic record for every semantic action visible to Kavod; configured failure policy determines whether a missing acknowledgement creates an accounted gap or stops the Engine.
 9. `StateModified` records only a successful Reducer mutation boundary, never old or new state values.
 10. Event index and turn action sequence define deterministic kernel order; diagnostic record sequence defines recorder observation order.
 11. Every Command retains its root Event, production order, producer callback, and destination Port.
@@ -424,7 +424,7 @@ The MVP diagnostics design does not provide:
 - Guaranteed preservation after process, hardware, or recorder failure.
 - Proof that diagnostics have zero physical performance effect.
 
-Instrumentation consumes CPU and memory and may change live latency or which external Event becomes visible first. The enforceable invariant is narrower: callbacks cannot observe diagnostics configuration or failure and cannot branch on it. Once an Event is accepted, diagnostics do not change deterministic callback ordering or successful outputs.
+Instrumentation consumes CPU and memory and may change live latency or which external Event becomes visible first. The enforceable invariant is narrower: callbacks cannot observe diagnostics configuration or failure and cannot branch on it. Once an Event is accepted, diagnostics do not reorder callbacks or alter successful callback outputs. A required-record failure may terminate the Engine at a safe boundary and truncate the remaining deterministic execution prefix.
 
 ## Dependencies And Required Reconciliation
 

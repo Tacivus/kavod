@@ -80,14 +80,16 @@ A Reducer:
 - Performs no external IO or blocking work.
 - Cannot retain an `AppState` reference after the callback returns.
 
-For each delivered Event or Message:
+For each delivered Event or Message whose callback dispatch completes without terminal interruption:
 
 1. Matching Reducer callbacks execute in stable registration order.
 2. Each Reducer completes before the next begins.
 3. Matching ordinary Component callbacks execute only after all matching Reducers complete.
 4. Ordinary Components therefore observe the fully reduced state for that input.
 
-The later turn-scheduling discussion may refine how derived Messages form additional state transitions, but it may not weaken Reducer-before-Component visibility for one delivered input.
+If runtime failure terminates dispatch between callbacks, no later ordinary Component is allowed to bypass the unfinished matching Reducers; the Engine stops instead.
+
+The settled turn-scheduling design preserves this per-input guarantee. It does not claim that an ordinary Component observes canonical-state transitions caused by other Messages still waiting in the turn FIFO. Related updates that a decision requires together must be represented by one complete aggregate Event or Message.
 
 ## Multiple Reducers
 
@@ -154,7 +156,7 @@ Reusable Component
     -> Reducer maps it into the application's AppState
 ```
 
-For example, a reusable bar aggregator may emit `BarCompleted`. The application decides whether its Reducer:
+For example, a reusable bar aggregator may emit `BarCompleted` when one closure is independently actionable, or `BarsClosed` when consumers require coherent visibility of every closure caused by one input. The application decides whether its Reducer:
 
 - Stores every completed bar.
 - Retains only the latest bar.
@@ -285,10 +287,10 @@ Kavod does not currently provide:
 - **One logical writer per container:** unnecessary because Reducers are callbacks over one application-owned state root.
 - **Projector Components as state owners:** imports an abstraction that does not match Kavod's callback model.
 
-## Dependencies On Later Discussions
+## Dependencies On Other Discussions
 
-- The turn-scheduling discussion must determine how Reducer phases interact with derived Messages and multi-stage state changes.
-- The failure discussion must define the terminal behavior of a panic after partial state mutation.
+- The turn-scheduling design settles Reducer visibility as local to each delivered input and uses explicit aggregate domain facts for correlated derived updates. It adds no generic Reducer phase or turn-wide state-settlement guarantee.
+- The settled failure policy captures and stops after a panic; partially mutated state is not rolled back and the Engine never resumes.
 - The observability design defers state hashes, state encoding, and state-value recording; the MVP records only the successful Reducer mutation boundary.
 - The Component identity discussion is relevant only if behavior-affecting private state is later recorded or compared.
 

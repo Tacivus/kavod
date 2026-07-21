@@ -22,7 +22,7 @@ This is intentionally narrower than a full deterministic simulation framework. K
 
 ## Determinism Statement
 
-> Given the same executable Kavod/application build, frozen application graph, initial deterministic application state, determinism-affecting application and Engine configuration, and the same sequence of accepted Events with identical payloads, source identities, order, and acceptance timestamps, Kavod executes callbacks in the same order and produces the same ordered Messages, ordered Commands at the Port boundary, and deterministic application state after each completed turn.
+> Given the same executable Kavod/application build, frozen application graph, initial deterministic application state, determinism-affecting application and Engine configuration, and the same sequence of accepted Events with identical payloads, source identities, order, and acceptance timestamps, Kavod executes callbacks in the same order and produces the same ordered Messages, ordered Commands with logical Port destinations, and deterministic application state after each completed turn.
 >
 > This guarantee assumes that Components and Reducers obey Kavod's determinism contract.
 
@@ -41,14 +41,14 @@ Event acceptance commit
         v
 deterministic Kavod kernel
         |
-        | ordered Commands
+        | ordered produced Commands
         v
 nondeterministic external world
 ```
 
 Kavod freezes observed external behavior at Event acceptance. It does not make the behavior that produced the Event deterministic.
 
-Likewise, Kavod deterministically produces a Command at a Port boundary. It does not guarantee when, how, or whether the requested external effect occurs.
+Likewise, Kavod deterministically produces a Command for one logical Port destination. Environment publication and the requested external effect remain outside that production guarantee.
 
 ## Event Acceptance
 
@@ -92,6 +92,8 @@ The kernel must preserve these rules:
 
 OS scheduling may change physical latency but cannot change these logical execution rules.
 
+Turn quiescence separates accepted Events and delays Command publication. It does not imply that an earlier Component observed the final canonical state produced by later Messages in the same turn. Related state changes that a decision requires together must use the explicit aggregate-fact semantics settled by the turn-scheduling design.
+
 ## Time Concepts
 
 | Term | Meaning |
@@ -122,6 +124,8 @@ Whether live acceptance time must be nondecreasing is not required to establish 
 - Any future explicitly approved deterministic capability input, such as an RNG choice tape.
 
 Environment details such as Port thread scheduling and ingress races determine which accepted Event sequence comes into existence. Once that sequence is fixed, they are not kernel inputs.
+
+An external runtime or required-diagnostics failure may terminate execution at a kernel safe boundary. Such a failure truncates an otherwise deterministic execution prefix; it does not reorder or change callbacks and outputs that completed successfully before the failure.
 
 ## Deterministic Outputs
 
@@ -178,6 +182,7 @@ Kavod does not guarantee:
 - Compatibility between different application or Kavod builds.
 - Cross-platform numeric equivalence unless separately constrained and tested.
 - Determinism from Components or Reducers that violate their contract.
+- Completion of an accepted Event turn after an external runtime or required-diagnostics failure terminates the Engine.
 - State hashes, snapshots, state restoration, or full replay in the MVP.
 - Full deterministic simulation testing or deterministic execution of live adapters.
 - Stable panic text, backtraces, OOM behavior, signals, or hardware failures.
@@ -194,13 +199,13 @@ Kavod does not guarantee:
 - **Cross-build compatibility as part of basic determinism:** compatibility is a separate future replay and evolution concern.
 - **Requiring full DST to justify kernel determinism:** controlled whole-system simulation is useful but outside the minimum contract.
 
-## Dependencies On Later Discussions
+## Dependencies On Other Discussions
 
-- The canonical-state discussion must define exactly which state is deterministic application state and how Component-private and shared state are owned.
-- The turn-scheduling discussion may refine callback phases, but any refinement must remain a fixed deterministic order.
+- The canonical-state discussion defines deterministic application state as one application-owned `AppState` plus Component-private state, all physically owned by the Engine.
+- The turn-scheduling discussion preserves per-payload Reducer-before-Component ordering and breadth-first FIFO propagation. It adds no generic phases; related derived updates that require coherent visibility use one explicit aggregate domain fact.
 - The Port and simulation discussion must define how simulated Environments generate accepted Event order and timestamps.
-- The live runtime discussion must decide clock source, timestamp monotonicity, ingress admission, capacity, and overload policy.
-- The observability design defines automatic audit detail, user logging, buffering, outputs, and configurable best-effort or required recording without granting recovery authority.
+- The live-runtime discussion defines ingress admission, capacity, and overload policy. Live clock source and acceptance-timestamp monotonicity remain deferred.
+- The observability design defines automatic audit detail, user logging, buffering, outputs, and configurable best-effort or required recording without granting recovery authority. Externally caused recording failure may terminate the Engine but cannot alter a successful callback's outputs.
 
 ## Open Questions
 
