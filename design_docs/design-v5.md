@@ -58,7 +58,7 @@ The terms Port Event, ControlEvent, Message, Port Command, and ControlCommand ar
 | Reducer | A restricted stateless callback that alone may mutate canonical `AppState` and produces no output |
 | `AppState` | The application's one concrete canonical shared-state value |
 | Component-private state | Deterministic state owned by one Component instance and inaccessible to other Components |
-| Turn | One accepted input plus all causally produced Messages processed to quiescence |
+| Turn | Processing of one accepted input plus all causally produced Messages through quiescence, unless fatal establishment interrupts it |
 | Quiescence | The point at which the current turn's Message FIFO is empty and no callback is active |
 | Queue admission | The pre-acceptance commitment that a Port Event has entered its bounded Environment FIFO |
 | Acceptance commit | The linearization point that fixes an accepted input's Event index, acceptance time, source, and root causation before dispatch |
@@ -83,7 +83,7 @@ The terms Port Event, ControlEvent, Message, Port Command, and ControlCommand ar
 
 1. One kernel thread executes all Reducer and Component callbacks for one Engine run.
 2. One Engine owns all deterministic application state; no process-global mutable state may affect deterministic behavior.
-3. Every accepted input creates exactly one turn.
+3. Absent fatal establishment between acceptance commit and dispatch, every accepted input creates exactly one turn.
 4. Accepted inputs execute in Event-index order, one complete turn at a time absent fatal establishment.
 5. Reducers run before ordinary Components for each delivered Port Event, ControlEvent, or Message.
 6. Only Reducers mutate canonical `AppState`.
@@ -97,7 +97,7 @@ The terms Port Event, ControlEvent, Message, Port Command, and ControlCommand ar
 14. Port Event, ControlEvent, Message, Port Command, and ControlCommand payloads are immutable after their semantic production or acceptance boundary.
 15. Live queue admission is not input acceptance.
 16. Event index, not timestamp, establishes accepted-input order.
-17. No accepted Port Event is silently removed, rewritten, reprioritized, or invalidated by later stop, quarantine, worker failure, or restart.
+17. No successfully admitted Port Event is silently removed, rewritten, reprioritized, or invalidated by later stop, quarantine, worker failure, or restart.
 18. Kavod never silently retries a rejected or ambiguous Port Command.
 19. A contained Port-local failure quarantines affected logical Ports; it does not automatically poison the Engine.
 20. An uncontained Kernel, ControlPlane, Acceptor, global scheduler, required-diagnostics, or global Environment failure establishes fatal state.
@@ -317,7 +317,7 @@ Engine construction
 
 Before execution, construction must validate at least:
 
-- Every declared Port Event flow has a matching callback.
+- Every Port Event variant that a declared and bound logical Port may emit has at least one matching callback.
 - Every declared Message production has a matching callback.
 - Every Port Command production targets one declared logical Port.
 - Every ControlCommand production names a supported core operation and valid logical target where applicable.
@@ -421,7 +421,7 @@ The exact arguments and methods are deferred. The capability separation is norma
 
 ## 11. Normative Turn Lifecycle
 
-One accepted input creates one isolated turn:
+When processing begins, one accepted input creates one isolated turn. Absent fatal establishment, it proceeds as follows:
 
 1. Acceptance commits the input's Event index, acceptance time, logical source, and root causation.
 2. The Kernel creates callback contexts containing the frozen logical time and permitted capabilities.
@@ -476,9 +476,11 @@ Equal domain or acceptance timestamps do not combine separate inputs or Messages
 
 Kavod's deterministic claim is:
 
-> Given the same executable Kavod/application build, frozen application graph and registration order, initial `AppState`, initial Component-private state, determinism-affecting application and Engine configuration, and the same accepted Port Event and ControlEvent sequence with identical payloads, source identities, Event order, and acceptance times, the Kernel executes callbacks in the same order and produces the same ordered Messages, Port Commands, ControlCommands, private-state transitions, and canonical-state transitions after each completed turn.
+> Given the same executable Kavod/application build, frozen application graph and registration order, initial `AppState`, initial Component-private state, determinism-affecting application and Engine configuration, and the same accepted Port Event and ControlEvent sequence with identical payloads, source identities, Event order, and acceptance times, the Kernel executes callbacks in the same order and produces the same ordered Messages, Port Commands, ControlCommands, private-state transitions, and canonical-state transitions for each turn completed before fatal establishment.
 
-“Same build” means the same executable behavior, not merely the same source revision or version label. Kavod does not claim compatibility between different builds.
+If an external runtime or required-diagnostics failure establishes fatal state, Kavod guarantees only the successfully completed deterministic prefix before that boundary. Reproducing an asynchronously selected fatal point requires that interruption point as an additional fault input; the accepted-input sequence alone does not determine it.
+
+“Same build” means the same executable code, not merely the same source revision or version label. Kavod makes no automatic compatibility claim between different builds.
 
 ### 13.1 Deterministic Inputs
 
@@ -533,8 +535,8 @@ Port emission, ControlPlane production, queue insertion, and selection are not a
 2. Prepares the candidate Event index.
 3. Freezes acceptance time.
 4. Establishes root causation.
-5. Executes the configured acceptance recording protocol.
-6. Commits before any application callback receives the input.
+5. Establishes acceptance commit according to the configured recording policy: best-effort acceptance commits before its recording attempt, while required `EventAccepted` acknowledgement is the commit.
+6. Dispatches no application callback before that commit.
 
 The acceptance commit is the semantic linearization point.
 
@@ -637,7 +639,7 @@ For each round:
 5. Move on immediately when the source is empty.
 6. Begin another round after all sources have been visited.
 
-For each selected input, acceptance commits and the complete turn runs before the Acceptor selects another input. It does not accept an entire quantum ahead of execution.
+For each selected input, acceptance commits and the Acceptor begins its turn unless fatal establishment intervenes before dispatch. Absent fatal establishment, the complete turn and post-turn handling finish before the Acceptor selects another input. It does not accept an entire quantum ahead of execution.
 
 The quantum bounds consecutive input count, not wall-clock latency. A long synchronous callback can still delay every source.
 
@@ -676,7 +678,7 @@ While the Engine remains trustworthy, every Port Command reaches one accounted K
 - **Handed off:** crossed the logical Port boundary to one incarnation.
 - **Not delivered:** did not cross because the destination was unavailable, mailbox capacity was insufficient, authority closed, or another nonfatal publication rule rejected it.
 
-If publication bookkeeping cannot establish a disposition, that accounting failure establishes fatal state. Kavod then makes no false claim that the Command was handed off or not delivered; available diagnostics record the unresolved boundary.
+If publication bookkeeping cannot establish a disposition, or if Kavod cannot preserve a not-delivered disposition and its required application-visible consequence while acceptance remains open, that accounting failure establishes fatal state. Kavod then makes no false claim that the Command was handed off or not delivered; available diagnostics record the unresolved boundary.
 
 A nonfatal not-delivered disposition creates exactly one later `CommandNotDelivered` ControlEvent while application-input acceptance remains open. The event carries an unambiguous run-scoped reference to the produced Command, its destination, and its reason. A root Event index plus turn-wide production order is conceptually sufficient; exact representation is deferred. This technical reference is not a business ID.
 
@@ -757,7 +759,7 @@ The scheduler:
 2. Advances virtual time to that action's time.
 3. Runs its model, lifecycle, wake, or accepted-input action to completion.
 4. Commits staged outputs in production order after callback return.
-5. If a Port Event or ControlEvent action is selected, accepts it and runs its Kernel turn to quiescence.
+5. If a Port Event or ControlEvent action is selected, accepts it and begins its Kernel turn unless fatal establishment intervenes before dispatch; absent fatal establishment, the turn runs to quiescence.
 6. Classifies every Port Command against authoritative lifecycle state and records unavailable-destination consequences.
 7. Delivers eligible Port Commands to simulated endpoints synchronously in global Command production order. Each endpoint callback returns and commits staged outputs before the next Command is delivered.
 8. Commits all not-delivered ControlEvent actions in original global Command production order.
@@ -798,13 +800,13 @@ Pending wakes and model callbacks identify the endpoint incarnation or endpoint-
 
 Ordinary token cancellation succeeds only while its target remains pending. It becomes effective after the active callback returns and before the next scheduler selection. It cannot cancel an action already selected or completed and does not synthesize a Port Event unless the application protocol explicitly requires an acknowledgement.
 
-Scheduling into the past is a terminal simulation causality error. Total model-callback/action limits and per-virtual-timestamp limits are finite; exhaustion returns a terminal error identifying the limit and virtual time rather than dropping work, advancing time, or inventing latency.
+Scheduling into the past is a simulation causality violation that establishes Engine-global fatal state. Total model-callback/action limits and per-virtual-timestamp limits are finite; exhaustion returns a terminal error identifying the limit and virtual time rather than dropping work, advancing time, or inventing latency.
 
 Model state is not rolled back after partial mutation. An endpoint-local failure may quarantine only that endpoint when the remaining shared model state is known to remain valid. A panic or invariant failure that may have compromised shared state affects every dependent endpoint. If the affected set cannot be identified or isolated, the failure is Engine-global fatal.
 
 ### 18.6 Source Exhaustion And Completion
 
-Source exhaustion is not automatically simulation completion. Scheduled acknowledgements, fills, cancellations, or timers may remain.
+Source exhaustion is not automatically simulation completion. Scheduled acknowledgements, fills, cancellations, or timers may remain. Model idleness and queue emptiness do not establish source exhaustion. Each finite source driver explicitly reports exhaustion once per declared finite source; endpoints exposed by one grouped model do not multiply those reports.
 
 The MVP supports:
 
@@ -813,7 +815,7 @@ The MVP supports:
 
 Queue emptiness while a required finite source is not exhausted is `SimulationStalled`, not success. Eligible Port Event deliveries and lifecycle consequences block completion under the selected policy. Work after an `Until(T)` horizon is retained and reported but does not execute.
 
-Technical simulation completion is a terminal host outcome, not a final application ControlEvent. An application that must react to end-of-data uses an ordinary application-defined Port Event before completion.
+Technical simulation completion is a terminal host outcome, not a final application ControlEvent. An application that must react to end-of-data uses an ordinary application-defined Port Event before completion. Once completion commits, the Simulation Environment closes remaining endpoint authority, accounts for cancelled non-Event work and any horizon-retained work, performs model cleanup, and starts no further application turn.
 
 The terminal simulation outcome reports the last accepted Event index, final virtual time, exhausted finite sources, and a pending-work summary where applicable.
 
@@ -893,9 +895,9 @@ The minimum operation behavior is:
 | `Quarantined` | Reject | Continue cleanup without claiming `Stopped` | Reject until `Failed` |
 | `Failed` | Reject; use Restart | Transition to `Stopped` without reviving old incarnation | Begin `Starting` with a new incarnation |
 
-A successful backend stop result remains ControlPlane-private until owned child work is terminated or fenced and every Port Event admitted by that incarnation has drained. Only then is `PortStopped` queued. Acceptance of `PortStopped` establishes `Stopped` for outputs of that turn. A stop timeout or failure queues `PortStopFailed` and leaves the Port quarantined.
+A successful backend stop result remains ControlPlane-private until owned child work has terminated and been joined and every Port Event admitted by that incarnation has drained. Only then is `PortStopped` queued. Acceptance of `PortStopped` establishes `Stopped` for outputs of that turn. A stop timeout, failed join, escaped child, or fence-only outcome queues `PortStopFailed` and leaves the Port quarantined. Hard fencing may later satisfy failed-incarnation isolation for `PortQuiesced -> Failed`; it does not establish successful normal stop.
 
-Requested placement is deterministic ControlCommand intent. Realized placement is a live Environment mechanism. Normalized placement is the Simulation Environment's deterministic mapping. Supported requests and normalization are frozen before `Ready`. Unsupported requests fail visibly; a live Environment does not silently fall back.
+Requested placement is deterministic ControlCommand intent. Realized placement is a live Environment mechanism. Normalized placement is the Simulation Environment's deterministic mapping. Supported requests and normalization are frozen before `Ready`. A statically knowable unsupported request is a build error. A dynamically produced unsupported request is rejected before `Starting`, leaves the Port `Stopped`, allocates no incarnation, invokes no backend, and produces a later ControlEvent. Failure after the backend accepts a supported start operation quarantines the allocated incarnation. A live Environment never silently falls back to another placement.
 
 The protocol may describe conceptual requests such as threaded, asynchronous task, or process placement without requiring every MVP Environment to implement them. A basic simulation may normalize every supported request to its single deterministic model scheduler.
 
@@ -999,7 +1001,8 @@ Fatal state is monotonic and first-failure-wins. Causes include:
 
 - Kernel panic or invariant violation.
 - ControlPlane panic or authority-state corruption.
-- Acceptor, global routing, or global scheduler corruption.
+- Acceptor or global routing corruption.
+- Global scheduler corruption or simulation causality violation.
 - Required-diagnostics failure.
 - Publication bookkeeping failure that prevents Command disposition accounting.
 - A configured global resource-limit terminal failure.
@@ -1046,11 +1049,11 @@ Every child thread, task, process, job, or third-party runtime operation belongs
 - The Environment initiates lifecycle cancellation; the implementation propagates it.
 - Cancellation is cooperative and proves neither completion nor rollback.
 - Child failure reports through its owning implementation and is classified by affected logical endpoints.
-- An implementation is not reported quiesced or safely finalized until all owned children terminate and are joined or are fenced by a hard isolation boundary.
+- An implementation is not reported successfully stopped until all owned children terminate and are joined. A failed incarnation is not reported quiesced until all owned children terminate and are joined or are fenced by a hard isolation boundary.
 - Child-produced Port Events use the owning logical Port and incarnation authority.
 - Child Port Events admitted before closure drain normally; later offers are rejected before admission.
 
-A timeout, escaped child, or failed join prevents the affected endpoint from becoming safely `Failed`, restarting, or participating in normal Engine completion. A deployment requiring bounded hard termination must use an appropriate process boundary or terminate the Engine process.
+A timeout, escaped child, or failed join prevents the affected endpoint from becoming safely `Failed`, restarting, or participating in normal Engine completion until the child terminates and is joined or a hard isolation boundary fences it. Fencing permits failed-incarnation quiescence but never converts the failed stop into `PortStopped`. A deployment requiring bounded hard termination must use an appropriate process boundary or terminate the Engine process.
 
 Application-requested heavy work such as inference remains a service Port protocol. Environment worker pools, if later added, are placement mechanisms for Port-owned work and are never Component capabilities.
 
@@ -1072,17 +1075,24 @@ This facility is not a journal. It is never application state, broker truth, a r
 
 ### 25.2 Causal Identity
 
-Deterministic causality is described by the applicable combination of:
+Every diagnostic record carries the applicable subset of the common correlation envelope. Deterministic causality is described by:
 
 - Engine run identity.
+- Monotonic diagnostic sequence.
 - Root Event index.
 - Turn action sequence.
 - Parent action sequence.
 - Callback identity.
 - Produced Command identity or run-scoped reference.
 - Logical Port, implementation-unit, and incarnation identities where applicable.
+- Lifecycle operation or multi-endpoint failure-sequence identity where applicable.
+- ControlPlane source or destination where applicable.
+- Frozen logical time when associated with an accepted-input turn.
+- Record kind and detail or user-log level.
 
-Diagnostic sequence describes recorder observation order and may reflect concurrent live records. No diagnostic or causal identity is a durable business identifier.
+The diagnostics context attaches applicable correlation fields automatically to automatic records and user logs. Records for one lifecycle operation share its operation identity so audit can connect the producing ControlCommand, validation or rejection, placement and incarnation decisions, backend invocation and result, stale-result disposition where applicable, and resulting accepted ControlEvent. Multi-endpoint consequences likewise share their failure-sequence identity.
+
+Diagnostic sequence describes recorder observation order and may reflect concurrent live records. Optional wall time and thread information may be attached by diagnostics infrastructure without exposing those capabilities to Components or Reducers. No diagnostic or causal identity is a durable business identifier.
 
 ### 25.3 Automatic Detail Levels
 
@@ -1136,7 +1146,7 @@ Required acknowledgement occurs at the authority boundary of the action being re
 - Required `ReducerInvoked` and `ComponentInvoked` records are acknowledged before invocation.
 - Required `MessageProduced` and `CommandProduced` acknowledgement commits deterministic production; under best effort, production commits first and recording follows.
 - Reducer and Component completion records exist only after normal return. Their absence may identify a partially mutated callback boundary but provides no rollback.
-- A required Component-produced lifecycle operation is acknowledged before backend invocation.
+- A required Component-produced lifecycle operation, placement decision, and incarnation allocation are each acknowledged before backend invocation.
 - Required Port Command publication records are acknowledged before handoff.
 - Immediate quarantine cannot wait for diagnostics; authority closes first, recording follows, and recording failure then escalates to fatal without rolling quarantine back.
 - Required terminal-record failure may change the host outcome to diagnostics failure but cannot revive or roll back stopped work.
@@ -1161,7 +1171,8 @@ Such a tool must:
 - Use the same executable build, graph, initial state, and relevant configuration.
 - Inject recorded Port Events and ControlEvents in Event-index order with recorded acceptance times.
 - Recompute Messages, Port Commands, and ControlCommands.
-- Use passive Port and ControlPlane backends that create no live effects or duplicate lifecycle consequences.
+- Use passive Port bindings that compare recomputed Port Commands but produce no Port Events, wakes, scheduled work, or external effects.
+- Use a passive ControlPlane that updates authoritative replay lifecycle and incarnation state from recorded ControlEvents and compares recomputed ControlCommands without starting implementations or generating new lifecycle consequences.
 - Compare produced outputs and report observed divergence.
 - Create new diagnostic and distributed-trace identities linked to, but distinct from, the original run.
 
@@ -1271,7 +1282,7 @@ The implementation must eventually prove at least the following semantic propert
 3. Messages propagate in exact breadth-first production order without recursion.
 4. A Reducer panic exposes no later Component or publication guarantee and the Engine never resumes.
 5. Turn-limit exhaustion returns the matching terminal limit error without applying a partial ControlCommand set.
-6. Graph construction rejects missing consumers, undeclared targets, duplicate or missing bindings, unstable configuration, and undeclared runtime production.
+6. Graph construction rejects every Port Event variant lacking a consumer, undeclared targets, duplicate or missing bindings, unstable configuration, and undeclared runtime production.
 
 ### 29.2 Derived State
 
@@ -1286,7 +1297,7 @@ The implementation must eventually prove at least the following semantic propert
 12. A Port Event admitted immediately before stop or quarantine remains eligible and blocks quiescence/restart until drained.
 13. An offer losing to admission closure remains outside Kavod.
 14. ControlPlane-ingress exhaustion that cannot preserve an authoritative transition and consequence establishes fatal state rather than dropping or coalescing it.
-15. Mailbox exhaustion rejects the complete destination batch while healthy destinations remain eligible.
+15. Mailbox exhaustion rejects the complete destination batch while healthy destinations remain eligible; inability to preserve any required `CommandNotDelivered` consequence establishes fatal state.
 16. Multiple rejected Port Commands produce exactly one disposition each in original global production order with unambiguous Command references.
 17. Final handoff racing quarantine, Port stop, or host stop has exactly one serialized winner.
 18. Required publication-record failure prevents handoff and poisons the Engine.
@@ -1296,31 +1307,35 @@ The implementation must eventually prove at least the following semantic propert
 19. `Ready` is the first accepted input and no implementation starts before its turn completes.
 20. Ordinary ingress opens only after the matching `PortStarted` turn completes.
 21. A stale provisional start result cannot reopen a cancelled or newer incarnation.
-22. A successful stop result remains private until child and admitted work drain; stop failure produces `PortStopFailed` and quarantine.
-23. Contained worker exit or panic quarantines only the identified affected endpoints and does not set fatal state.
-24. A grouped-model failure quarantines every endpoint whose shared state may be compromised.
-25. Multi-endpoint failure consequences are contiguous, stable, and expose completion of their common sequence.
-26. `PortFailed` reports quarantine, while restart remains rejected until `PortQuiesced` acceptance establishes `Failed`.
-27. Explicit restart allocates a new incarnation, rejects stale offers, and never resends old Commands.
-28. Escaped or unjoined child work prevents safe quiescence, restart, and normal completion.
-29. Normal `StopEngine` is rejected while active, pending, admitted, or feedback work remains.
-30. Authoritative host stop drains admitted work without new handoff or feedback input.
+22. A dynamically unsupported placement is rejected before `Starting`, leaves the Port `Stopped`, allocates no incarnation, and invokes no backend; a statically knowable unsupported placement fails construction.
+23. A successful stop result remains private until child termination, joining, and admitted-work drainage complete; a timeout, failed join, escaped child, or fence-only outcome produces `PortStopFailed` and quarantine rather than `PortStopped`.
+24. Contained worker exit or panic quarantines only the identified affected endpoints and does not set fatal state.
+25. A grouped-model failure quarantines every endpoint whose shared state may be compromised.
+26. Multi-endpoint failure consequences are contiguous, stable, and expose completion of their common sequence.
+27. `PortFailed` reports quarantine, while restart remains rejected until `PortQuiesced` acceptance establishes `Failed`.
+28. Explicit restart allocates a new incarnation, rejects stale offers, and never resends old Commands.
+29. Escaped or unjoined child work prevents safe quiescence, restart, and normal completion until termination and joining or hard fencing; fencing cannot produce `PortStopped`.
+30. Normal `StopEngine` is rejected while active, pending, admitted, or feedback work remains.
+31. Authoritative host stop drains admitted work without new handoff or feedback input.
 
 ### 29.5 Simulation And Diagnostics
 
-31. Same virtual time is ordered by global schedule ordinal; zero latency never re-enters callbacks recursively.
-32. Existing same-time actions precede outputs newly committed at that time.
-33. Port Events and ControlEvents both execute as scheduled accepted inputs, and post-turn ControlCommands produce later scheduled consequences.
-34. Eligible simulated Port Commands execute synchronously in global production order, committing each callback's staged output before the next Command.
-35. Changing future historical records cannot alter an earlier execution prefix, and a due occurrence updates model truth before its public Port Event.
-36. Endpoint failure preserves committed Port Event deliveries and cancels affected pending wakes/model callbacks.
-37. Scheduling into the past and total or same-time action-limit exhaustion terminate visibly.
-38. `UntilIdle`, `Until(T)`, source exhaustion, stalled, and action-limit outcomes satisfy their distinct completion rules.
-39. Best-effort diagnostic failure creates accounted loss without changing callback control flow.
-40. Required acceptance-record failure prevents dispatch; an acknowledged acceptance may remain accepted but unprocessed.
-41. Immediate quarantine precedes required recording and remains committed if recording then fails fatally.
-42. Required invocation and production records commit at their specified boundaries, and completion records exist only after normal return.
-43. Logging configuration, filtering, and OTel sampling are unobservable to deterministic callbacks.
+32. Same virtual time is ordered by global schedule ordinal; zero latency never re-enters callbacks recursively.
+33. Existing same-time actions precede outputs newly committed at that time.
+34. Port Events and ControlEvents both execute as scheduled accepted inputs, and post-turn ControlCommands produce later scheduled consequences.
+35. Eligible simulated Port Commands execute synchronously in global production order, committing each callback's staged output before the next Command.
+36. Changing future historical records cannot alter an earlier execution prefix, and a due occurrence updates model truth before its public Port Event.
+37. Endpoint failure preserves committed Port Event deliveries and cancels affected pending wakes/model callbacks.
+38. Scheduling into the past establishes Engine-global fatal state, while total or same-time action-limit exhaustion returns its defined terminal limit error.
+39. Finite source exhaustion is explicitly reported once per declared source, not inferred from idleness or multiplied by grouped endpoints.
+40. `UntilIdle`, `Until(T)`, source exhaustion, stalled, and action-limit outcomes satisfy their distinct completion rules; committed completion closes endpoint authority, accounts for cancelled and retained work, cleans up models, and starts no later turn.
+41. Best-effort diagnostic failure creates accounted loss without changing callback control flow.
+42. Required acceptance-record failure prevents dispatch; an acknowledged acceptance may remain accepted but unprocessed.
+43. Immediate quarantine precedes required recording and remains committed if recording then fails fatally.
+44. Required invocation and production records commit at their specified boundaries, completion records exist only after normal return, and required lifecycle-operation, placement, and incarnation records precede backend invocation.
+45. Every automatic record and user log carries its applicable correlation envelope, and lifecycle audit links ControlCommand, backend realization, and accepted ControlEvent through one operation identity.
+46. Passive replay Ports produce no Events or scheduled work, and the passive ControlPlane projects recorded lifecycle state without generating consequences.
+47. Logging configuration, filtering, and OTel sampling are unobservable to deterministic callbacks.
 
 ## 30. Required Failure Traces
 
