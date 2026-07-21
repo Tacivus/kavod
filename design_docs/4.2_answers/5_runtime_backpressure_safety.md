@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod MVP live-ingress and Command-backpressure boundary
 > **Scope:** Live Event admission, Acceptor sequencing, source fairness, per-Port capacity, Command-mailbox backpressure, startup gating, fatal overload, and turn limits
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` owns Ready-first bootstrap, lifecycle barriers, unavailable-destination Command rejection, Port quarantine, and Engine-global fatal classification. This report continues to own ordinary Port admission and capacity mechanics.
 
 ## Conclusion
 
@@ -25,6 +26,10 @@ single-threaded deterministic kernel turn
     | bounded Command batch
     v
 bounded FIFO Command mailbox for each destination Port
+
+ControlPlane lifecycle reports
+    -> lifecycle barrier
+    -> accepted ControlEvent
 ```
 
 Every live Port binding has independent Event capacity and independent Command-mailbox capacity. A busy Port therefore cannot consume another Port's admission capacity.
@@ -45,17 +50,20 @@ The following are different decisions and must not be represented by one priorit
 | Event processing | Execution of accepted Events in Event-index order | Deterministic kernel |
 | Queue capacity | Maximum bounded work waiting at a live boundary | Port binding configuration |
 | Command backpressure | Whether a completed turn's Commands can enter destination mailboxes | Live Environment |
+| Lifecycle barrier | Whether Port availability must be reduced before ordinary ingress resumes | Engine ControlPlane |
 
 An offered Event is not accepted merely because it entered a Port's Event queue. It has no committed Event index, acceptance time, or causation root until the Acceptor performs the acceptance operation defined by the determinism-and-time design.
 
 ## Per-Port Event Admission
 
-Each live Port binding has one bounded FIFO Event queue between its dedicated worker thread and the Acceptor.
+Each active live Port binding has one bounded FIFO Event queue between its Environment-owned implementation unit and the Acceptor.
 
 ```text
 MarketData Event queue ----\
 Execution Event queue ------+--> one Acceptor
-Control Event queue --------/
+Other Port Event queue -----/
+
+ControlPlane ingress ---------> same acceptance authority
 ```
 
 The queues provide capacity isolation:
@@ -67,13 +75,17 @@ The queues provide capacity isolation:
 
 The central Event ingress boundary is therefore one logical Acceptor over per-binding queues, not one undifferentiated shared queue whose capacity can be monopolized by one Port.
 
+ControlPlane input is not a Port binding and does not consume a Port's capacity. Ordinary ControlEvents participate in the same acceptance authority. Ready and Port-availability transitions use the structural lifecycle barriers defined by the ControlPlane report rather than payload priority.
+
+ControlPlane ingress is separately bounded and Engine-owned. Host requests may use explicitly defined coalescing, but supervisor reports and application-visible lifecycle outcomes are never silently dropped. Exhaustion that prevents the ControlPlane from preserving an authoritative lifecycle transition is an Engine-global fatal failure.
+
 This refines the earlier description of live Ports racing through one central ingress queue. Live queue visibility remains nondeterministic, but Acceptor selection is deterministic for the queues visible during a round: Port binding order breaks ties, and the global quantum bounds each visit.
 
 Every binding must explicitly configure its Event capacity and full policy. Queue exhaustion is never silently ignored. The exact configuration syntax and policy vocabulary are deferred, but every permitted policy must remain bounded, explicit, observable, and consistent with Kavod's no-silent-drop rule.
 
 ## Acceptor Rounds And Global Quantum
 
-The Acceptor uses stable binding-order rounds with one global Event quantum `Q`.
+For ordinary Port ingress, the Acceptor uses stable binding-order rounds with one global Event quantum `Q`.
 
 For each round:
 
@@ -86,15 +98,15 @@ For each round:
 
 For each selected Event, the Acceptor prepares its identity and time, applies the configured automatic-audit policy, commits acceptance, and processes the complete turn before selecting the next Event. The Acceptor does not accept an entire quantum ahead of kernel execution.
 
-Example with binding order `MarketData`, `Execution`, `Control` and `Q = 4`:
+Example with binding order `MarketData`, `Execution`, `ReferenceData` and `Q = 4`:
 
 ```text
 MarketData queue: M1 M2 M3 M4 M5 M6
 Execution queue:  E1 E2
-Control queue:    C1
+Reference queue:  R1
 
 accepted order:
-M1 M2 M3 M4 E1 E2 C1 M5 M6
+M1 M2 M3 M4 E1 E2 R1 M5 M6
 ```
 
 The global quantum is an operational fairness bound, not payload priority. It is the same for every Port in the MVP. Per-Port weights or per-Port quanta are deferred because they would introduce a more complex scheduling policy.
@@ -204,9 +216,9 @@ Blocking is rejected because a full mailbox could stop the kernel from accepting
 
 ## Command Batch Bounds And Reservation
 
-Engine configuration includes a mandatory global `max_commands_per_turn` alongside the existing Message and callback-invocation limits.
+Engine configuration includes a mandatory global `max_commands_per_turn` alongside the existing Message and callback-invocation limits. The bound covers the combined Port Command and ControlCommand production count.
 
-At turn completion, Kavod determines the number of Commands destined for each Port and reserves capacity for the complete turn batch before making any Command from that batch visible. Reservations are attempted in stable Port order.
+At turn completion, the ControlPlane first classifies Commands by authoritative destination state. Commands for stopped, starting, stopping, or quarantined Ports are rejected per destination and produce later ControlEvents. Kavod then reserves capacity for the complete eligible Command batch before making any eligible Command visible. Reservations are attempted in stable Port order.
 
 If capacity cannot be obtained according to the configured policies:
 
@@ -216,6 +228,8 @@ If capacity cannot be obtained according to the configured policies:
 - No callback is resumed and the kernel does not wait for capacity.
 
 Whole-batch reservation bounds in-process publication behavior. It does not create a transaction across external systems.
+
+Unavailable-destination rejection is not partial publication caused by capacity exhaustion. Healthy-target Commands remain eligible; rejected Commands never cross their Port boundary and are never retained for implicit delivery after restart.
 
 Turn quiescence and whole-batch reservation govern Command publication timing only. They do not prove that a Command was computed against final turn state, and they do not recompute or validate an immutable Command payload after later Reducers run.
 
@@ -230,23 +244,24 @@ Once Commands cross their Port boundaries, Kavod does not guarantee:
 
 A Port failure concurrent with publication may therefore leave an externally ambiguous outcome. Kavod does not silently retry or claim that prior effects were undone.
 
-## Startup Barrier
+## Ready-First Startup Barrier
 
-The live Environment uses a small private technical startup barrier:
+The live runtime uses a small private Engine-infrastructure barrier:
 
 1. Validate the application and Environment.
 2. Construct every Event queue and Command mailbox.
-3. Start every live Port worker.
-4. Confirm that every worker entered its run loop and installed its runtime controls.
-5. Open the Acceptor and permit Event processing.
+3. Construct the Kernel, ControlPlane, diagnostics, and inert Port bindings.
+4. Establish every logical Port as stopped with ingress and Command handoff closed.
+5. Accept `Ready` as the first ControlEvent turn.
+6. Start workers only in response to deferred lifecycle ControlCommands.
 
-No Reducer or Component executes before all required live workers have successfully crossed this barrier. If any worker fails before the barrier opens, startup fails and no Event turn begins.
+No Reducer or Component executes before Engine infrastructure crosses this barrier. Port worker startup and failure occur after Ready and become later lifecycle ControlEvents under the ControlPlane report.
 
-This barrier establishes only technical worker startup. External connectivity, authentication, reconciliation, readiness, and permission to trade remain application- and Port-specific concepts.
+This barrier establishes only that deterministic control execution can begin. Technical Port start, external connectivity, authentication, reconciliation, readiness, and permission to trade remain distinct later transitions.
 
 ## Fatal Latch And Terminal Failure
 
-The live runtime has one monotonic first-failure fatal latch.
+The live runtime has one monotonic first-failure fatal latch for Engine-global failure. Contained Port-local failures use ControlPlane quarantine and do not set this latch.
 
 Once fatal failure is established:
 
@@ -257,13 +272,13 @@ Once fatal failure is established:
 - No new Command batch is published.
 - All runtime waits are awakened so shutdown can begin.
 - The Engine is permanently terminal and cannot resume.
-- No Port is automatically restarted.
+- No Port is restarted after Engine-global fatal failure.
 
 The fatal transition must be linearized with Event acceptance and Command publication so that these guarantees do not depend on a racy check-then-act sequence.
 
 A synchronous callback cannot be safely preempted. Fatal failure or an external kill request can take effect only when control returns to a kernel safe boundary. A global emergency stop requiring stronger preemption belongs outside the deterministic kernel and may terminate the process.
 
-Exact worker supervision, technical shutdown, draining, joining, and timeout semantics are deferred from this discussion.
+Port lifecycle, quarantine, application-managed shutdown, and worker ownership semantics are defined by the ControlPlane report. Concrete queue, cancellation, timeout, and join implementations remain deferred.
 
 ## Turn Limits
 
@@ -273,7 +288,7 @@ Exceeding any configured limit, including:
 
 - Maximum Messages per turn.
 - Maximum callback invocations per turn.
-- Maximum Commands per turn.
+- Maximum combined Port Commands and ControlCommands per turn.
 - Any future explicit causal-depth bound.
 
 produces an ordinary terminal `RunError` identifying the exceeded limit. The Engine stops and processes no later Event.
@@ -282,15 +297,15 @@ Panics remain reserved for:
 
 - Internal invariant violations.
 - Impossible runtime states.
-- Explicit panics from application callbacks or Port workers.
+- Explicit panics from application callbacks or Engine-global runtime code. A caught, contained Port worker panic follows quarantine semantics.
 
-All panics follow capture-and-stop behavior when the build's panic strategy permits unwinding. Kavod never catches a panic in order to continue the Engine.
+Kernel, callback, ControlPlane, and Engine-global runtime panics follow capture-and-stop behavior when the build's panic strategy permits unwinding. A caught Port worker panic may continue only by discarding that failed incarnation and quarantining every affected logical endpoint; the worker itself never resumes.
 
 ## Concrete Scenarios
 
 ### Market-Data Burst
 
-The MarketData Port may fill only its own bounded Event queue. It cannot consume the Execution or Control Port queues. During each Acceptor round it receives at most the global quantum before the Acceptor visits later bindings. If its queue reaches capacity, its configured explicit full policy applies.
+The MarketData Port may fill only its own bounded Event queue. It cannot consume another Port's queue or the ControlPlane ingress capacity. During each Acceptor round it receives at most the global quantum before the Acceptor visits later bindings. If its queue reaches capacity, its configured explicit full policy applies.
 
 ### Fill During A Long Market Turn
 
@@ -302,11 +317,11 @@ The kernel does not block. Whole-turn Command reservation fails according to the
 
 ### Port Unexpectedly Exits
 
-An unexpected live worker exit is a terminal infrastructure failure under the existing no-automatic-restart rule. It sets the fatal latch, prevents further acceptance and publication, and leaves the Engine permanently unusable. Exact worker detection and shutdown mechanics are deferred.
+An unexpected live worker exit is a Port-local supervisor failure when its affected logical endpoints can be isolated. The ControlPlane quarantines those endpoints, revokes their ingress and Command handoff, and accepts lifecycle ControlEvents before ordinary ingress resumes. No restart occurs without an application ControlCommand. If the failure cannot be isolated from Engine-global infrastructure, the fatal latch is set instead.
 
 ### Operator Requests A Kill Switch
 
-An application-defined kill-switch Event, if the application has one, cannot preempt the currently executing turn. It follows ordinary Event acceptance and processing rules. A kill action requiring immediate preemption must operate outside Kavod's deterministic kernel, including process termination when that is the selected operational response.
+A cooperative kill-switch request may enter as a ControlEvent and cannot preempt the currently executing turn. It follows ordinary acceptance and processing rules. A kill action requiring immediate preemption must operate outside Kavod's deterministic kernel, including process termination when that is the selected operational response.
 
 ## Comparable Patterns
 
@@ -337,12 +352,12 @@ These comparisons support mechanisms, not technology selection. Kavod does not r
 14. Domain-aware loss, batching, coalescing, and gap handling are not Kavod kernel semantics.
 15. Each live Port binding has one bounded FIFO Command mailbox.
 16. The kernel never blocks while publishing Commands.
-17. A turn has a mandatory global maximum Command count.
-18. Kavod reserves capacity for the whole turn Command batch before ordinary publication.
+17. A turn has a mandatory global maximum combined Port Command and ControlCommand count.
+18. After unavailable destinations are rejected visibly, Kavod reserves capacity for the whole eligible turn Command batch before ordinary publication.
 19. Crossing a Port boundary creates no external effect guarantee or cross-Port atomicity.
-20. All live workers cross a private startup barrier before the first Event turn.
-21. Fatal failure prevents further Event acceptance, turns, and Command publication.
-22. There is no automatic Port restart in the MVP.
+20. Engine infrastructure crosses a private startup barrier before Ready, and Ready precedes every Port worker start.
+21. Contained Port-local failure quarantines affected endpoints; Engine-global fatal failure prevents further Event acceptance, turns, and Command publication.
+22. There is no automatic Port restart; restart requires an accepted application ControlCommand.
 23. Configured turn-limit exhaustion is an ordinary terminal error, not a panic.
 24. A kill-switch Event cannot preempt a synchronous callback or current turn.
 
@@ -370,7 +385,7 @@ This design does not make Kavod responsible for:
 - Cross-Port transactions.
 - Preempting synchronous Rust callbacks.
 - Making a single kernel thread keep up with every offered workload.
-- Automatic Port restart or reconciliation.
+- Automatic Port restart or reconciliation; explicit application-requested restart is defined separately.
 - Generic business-safe shutdown, cancel, flatten, or disarm behavior.
 
 ## Observability Requirements
@@ -381,15 +396,15 @@ The diagnostics design owns exact metric names, labels, storage, and failure pol
 - Acceptor rounds, quantum use, accepted counts, and time since each Port was last serviced.
 - Per-Port Command mailbox occupancy, capacity, reservation failures, and queueing lag.
 - Turn duration and Message, callback, and Command counts.
-- Startup failures, fatal-latch origin, terminal turn-limit errors, and abandoned queued work.
+- Ready/bootstrap state, Port start and quarantine failures, fatal-latch origin, terminal turn-limit errors, unavailable-destination rejections, and abandoned queued work.
 
 High-cardinality application identities do not belong in metric labels. Exact recording and telemetry semantics are defined by the dedicated causal trace, logs, and observability report.
 
-## Dependencies On Later Discussions
+## Dependencies On ControlPlane And Implementation Work
 
 - Diagnostics implementations must provide the settled recording, metric, queue-lag, and fatal-diagnostic semantics without exposing diagnostics state to callbacks.
-- Technical shutdown, stop-accepting, Event drain, Command drain, worker timeout, and join behavior require a separate runtime lifecycle decision.
-- Exact worker-exit detection and races between Port failure, Event acceptance, and Command publication require implementation-level supervision semantics consistent with the fatal-latch guarantees above.
+- Logical shutdown, quarantine, restart, and failure-race semantics are settled by the ControlPlane report; concrete worker timeout and join mechanisms remain implementation work.
+- Exact worker-exit detection and queue implementation must preserve the ControlPlane barriers and per-destination Command-disposition rules.
 - Domain applications must define their own readiness, reconciliation, disarming, loss handling, and external safety controls.
 
 ## Open Questions

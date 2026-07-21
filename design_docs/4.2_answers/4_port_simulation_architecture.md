@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod MVP Port and deterministic-simulation boundary
 > **Scope:** Logical Ports, live and simulated implementation contracts, shared simulated-world ownership, grouped bindings, virtual scheduling, zero latency, source exhaustion, and simulation completion
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` owns Ready-first activation, requested placement, endpoint quarantine, and explicit restart. This report continues to own Port/model topology and deterministic scheduling.
 
 ## Conclusion
 
@@ -47,6 +48,7 @@ The application graph contains:
 - Event edges from Ports.
 - Message edges inside the application.
 - Command edges to Ports.
+- The distinguished ControlPlane boundary and its control edges.
 
 The Environment implementation topology contains:
 
@@ -92,6 +94,7 @@ Live and simulation may differ in:
 - Simulated books, fills, and latency policies.
 - Startup and shutdown implementation.
 - Fault injection and deterministic-choice facilities.
+- Physical realization or deterministic normalization of requested placement.
 
 Live Port implementations need not be deterministic. Their accepted Events freeze the external behavior the kernel observed.
 
@@ -112,11 +115,11 @@ It says nothing about implementation cardinality or placement.
 
 An implementation unit is the Environment-owned object that executes external behavior:
 
-- One dedicated live worker in the MVP live Environment.
+- One live thread, task, process proxy, or other supported placement unit.
 - One independent simulated model.
 - One shared simulated model exposing several endpoints.
 
-For MVP live bindings, one logical Port maps to one dedicated worker. This is a live placement restriction, not a permanent property of `PortSpec`. A future live Environment may allow one adapter worker or process to expose several logical Ports without changing the application graph.
+The ControlPlane report defines application-requested placement and logical lifecycle. Physical implementation cardinality remains Environment topology and is not a property of `PortSpec`.
 
 ## Live Implementation Contract
 
@@ -127,10 +130,10 @@ A live Port implementer must understand these public semantics even if the exact
 - The Port may emit only Events associated with its bound logical Port.
 - Event emission offers work to the live Environment; it never invokes application callbacks directly.
 - The Port cannot borrow kernel state, `AppState`, Component state, the Acceptor, or kernel channels.
-- The Environment owns worker placement, queues, startup supervision, cooperative stop, and joining.
+- The ControlPlane owns logical lifecycle authority; the Environment realizes requested placement and owns queues, workers, cooperative stop, and joining.
 - Technical worker startup does not imply connectivity, authentication, reconciliation, or permission to trade.
 - Expected operational outcomes are application-defined Events when application reaction is required.
-- Unexpected worker exit, panic, mailbox failure, and prohibited overflow are visible technical failures.
+- Unexpected worker exit, panic, mailbox failure, and prohibited overflow are visible supervisor reports classified under the ControlPlane quarantine or Engine-global fatal rules.
 - Kavod performs no hidden retry or restart.
 - Command receipt by the worker does not prove remote receipt, execution, or completion.
 
@@ -243,26 +246,27 @@ The Environment may physically store domain-defined models without understanding
 
 ## Simulated Lifecycle
 
-### Construction And Start
+### Construction, Ready, And Activation
 
-Simulation startup proceeds as follows:
+Simulation bootstrap proceeds as follows:
 
 1. Validate the application and all Environment bindings.
 2. Assign stable model and endpoint identities.
 3. Construct the virtual clock and empty future-action queue.
-4. Invoke each model's `start` callback once in stable model-registration order.
-5. Stage and commit startup outputs using ordinary model-output rules.
-6. Process no scheduled action or Event turn until every model has started successfully.
+4. Construct models inertly without activating endpoint behavior.
+5. Accept the ControlPlane `Ready` Event as the first turn.
+6. Apply lifecycle ControlCommands after that turn reaches quiescence.
+7. Activate requested endpoints in deterministic ControlCommand order and stage later lifecycle ControlEvents.
 
-One shared model is started once, not once per endpoint.
+One shared model is stored once. Its private implementation lifecycle may initialize once, while logical endpoint activation, incarnation, ingress, and quarantine remain endpoint-addressed according to the ControlPlane report.
 
 Technical start means the deterministic state machine was initialized. Domain readiness, market session state, subscription acknowledgement, reconciliation, and permission to trade remain application-defined facts where required.
 
 ### Command Delivery
 
-Components produce Commands during a kernel turn. Commands remain buffered until the turn reaches quiescence.
+Components produce Port Commands and ControlCommands during a kernel turn. Both remain buffered until the turn reaches quiescence.
 
-After a successful turn, the Simulation Environment submits its Commands to simulated endpoints in deterministic production order. For each Command:
+After a successful turn, the Simulation Environment submits eligible Port Commands to running simulated endpoints in deterministic production order. The ControlPlane separately applies ControlCommands under its post-turn lifecycle rules. For each eligible Port Command:
 
 1. Resolve the logical Port endpoint.
 2. Invoke the owning model's endpoint callback synchronously.
@@ -530,10 +534,10 @@ No generic shutdown callback may emit new application work after completion has 
 
 ## Lifecycle And Fault Classification
 
-Kavod core owns technical supervision concepts:
+Kavod core and its ControlPlane own technical supervision concepts:
 
 - Binding and configuration validation.
-- Stable model construction and startup.
+- Stable inert model construction and application-requested activation.
 - Scheduler action selection.
 - Model callback boundaries.
 - Scheduling into the past.
@@ -541,7 +545,7 @@ Kavod core owns technical supervision concepts:
 - Model panic or unexpected callback error.
 - Simulation action and same-time runaway limits.
 - Source-stalled and horizon completion outcomes.
-- Monotonic first-failure terminal behavior.
+- Endpoint quarantine and monotonic Engine-global first-failure terminal behavior.
 
 Applications own protocol facts such as:
 
@@ -552,7 +556,7 @@ Applications own protocol facts such as:
 - Reconciliation, readiness, arming, and permission to trade.
 - Timer cancellation acknowledgement when required.
 
-Expected modeled outcomes use Events. A model invariant violation, panic, past schedule, invalid endpoint, or deterministic resource-limit exhaustion is a terminal run failure. Model state is not rolled back after partial mutation, and the failed simulation instance never resumes.
+Expected modeled outcomes use Events. A contained endpoint or model failure whose affected logical endpoints are known follows ControlPlane quarantine semantics. A global scheduler, causality, ControlPlane, or model failure whose effects cannot be isolated is terminal. Model state is not rolled back after partial mutation.
 
 ## Simulation Limits
 
@@ -637,7 +641,7 @@ This report restores and refines the coherent v4 direction in which a shared `Hi
 5. Every logical Port has exactly one Environment endpoint binding.
 6. Every simulated endpoint belongs to exactly one model.
 7. One simulated model may expose one or several logical Port endpoints.
-8. A grouped model is stored and started exactly once.
+8. A grouped model is stored exactly once and activated only through lifecycle ControlCommands after Ready.
 9. Grouped bindings do not change the application graph.
 10. Model state is external-world state and is inaccessible to Components and Reducers.
 11. Historical readers, cursors, books, orders, and deterministic latency policies belong to domain-defined models.
@@ -660,7 +664,7 @@ This report restores and refines the coherent v4 direction in which a shared `Hi
 28. Pending-action cancellation is effective only before target selection.
 29. Finite source exhaustion is explicit and is not automatically application-visible.
 30. Normal completion follows an explicit idle or horizon policy.
-31. Technical model and scheduler faults stop the simulation permanently.
+31. Contained model or endpoint faults quarantine affected logical Ports; global scheduler, causality, and unisolatable model faults stop the simulation permanently.
 32. Historical deterministic simulation is MVP; full DST and adapter-level deterministic execution are deferred.
 
 ## Minimum Verification
@@ -669,7 +673,7 @@ The design should be proved by tests covering at least:
 
 1. Live and simulation use identical application graph construction.
 2. Two logical Port endpoints dispatch into one shared simulated model instance.
-3. A grouped model starts once rather than once per endpoint.
+3. A grouped model is stored once while logical endpoints activate only through lifecycle ControlCommands.
 4. Endpoint identity remains distinct for routing and Event source attribution.
 5. Duplicate, missing, and undeclared grouped endpoint bindings fail at build time.
 6. A market occurrence updates the book before its public Event is accepted.
@@ -689,7 +693,7 @@ The design should be proved by tests covering at least:
 20. Source exhaustion allows pending finite fills and timers to drain under `UntilIdle`.
 21. Queue emptiness with an unfinished required source reports `SimulationStalled`.
 22. Horizon completion reports pending scheduled work without silently executing it.
-23. Model panic or invariant failure stops before another Event acceptance or Command delivery.
+23. A contained model failure quarantines every affected endpoint before ordinary acceptance resumes; an unisolatable model or global invariant failure stops the simulation.
 24. Repeated runs with identical model input and configuration produce identical scheduler, Event, Command, and terminal-state traces.
 
 ## Rejected Alternatives
@@ -729,7 +733,7 @@ Kavod does not guarantee:
 MVP includes:
 
 - Logical Port Specs shared across environments.
-- Dedicated-worker live bindings under the settled live runtime.
+- Environment bindings capable of realizing supported live placement requests.
 - Independent and grouped deterministic simulated models.
 - One virtual clock and global future-action queue.
 - Stable same-time schedule ordinals.
@@ -740,13 +744,14 @@ MVP includes:
 - Timer scheduling and cancellation.
 - Past-scheduling and deterministic action-limit failures.
 - Simulation provenance covering model, source, ordering, and determinism-relevant configuration.
+- Ready-first activation, deterministic placement normalization, endpoint quarantine, and explicit application-requested restart from the ControlPlane report.
 
 Deferred full DST includes:
 
 - Random schedule exploration.
 - Choice and fault tapes.
 - Generic simulated network and storage systems.
-- Crash, restart, recovery, and liveness stabilization.
+- Random crash exploration, recovery modeling, and liveness stabilization beyond the settled logical quarantine and explicit-restart protocol.
 - Shrinking and minimized failing schedules.
 - Finite-entropy and probabilistic model facilities.
 - Production live adapters running against deterministic IO primitives.
@@ -760,7 +765,7 @@ It preserves the application-state report's prohibition on Port access to `AppSt
 
 It preserves the turn-scheduling report's one-Event turn, breadth-first Messages, and Command publication only after quiescence. Post-turn simulated delivery occurs only after that boundary.
 
-It preserves the live-runtime report's dedicated workers, bounded per-binding queues, Acceptor sequencing, and live Command-mailbox rules. Simulation scheduling does not become a live cross-Port ordering guarantee.
+It preserves bounded per-binding queues, Acceptor sequencing, and live Command-mailbox rules. The Environment realizes or normalizes ControlPlane placement requests; simulation scheduling does not become a live cross-Port ordering guarantee.
 
 It preserves the diagnostics report's distinction between Command production, Port handoff, external outcome, and accepted Event. The following tracing and live-runtime details remain open:
 

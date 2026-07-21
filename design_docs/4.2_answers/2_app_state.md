@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod application-state boundary
 > **Scope:** Canonical shared state, Component-private state, Reducer authority, dynamic state, and state dependencies
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` adds Engine-owned authoritative ControlPlane state and permits ordinary Reducers to project accepted ControlEvents into `AppState`. ControlPlane state is not canonical application state.
 
 ## Conclusion
 
@@ -62,21 +63,24 @@ Callbacks registered on the same Component instance may share that Component's p
 | Canonical `AppState` | Application | Engine | Reducer callbacks |
 | Component-private state | Component instance | Engine | That Component's callbacks |
 | Environment implementation state | Live Port implementation or simulated model | Environment-owned worker or model storage | Owning live implementation or simulated-model callbacks |
+| ControlPlane lifecycle state | Engine ControlPlane | Engine | ControlPlane |
 | Kernel ordering state | Kernel | Engine | Kernel |
 
 A Reducer does not own the state it changes. It is one registered transition callback with temporary mutable access to application-owned canonical state.
 
 There is no separate projector ownership model.
 
+Applications may project ControlEvents into an application-defined runtime view such as logical Port status. That projection is deterministic decision state; it does not replace or mutate the ControlPlane's authoritative lifecycle, quarantine, placement, or incarnation state.
+
 ## Reducer Semantics
 
 A Reducer:
 
-- Consumes one typed Event or Message.
+- Consumes one typed Port Event, ControlEvent, or Message.
 - Receives mutable access to the complete `AppState`.
 - May read or change any part of `AppState`.
 - May update several related fields in one callback.
-- Emits no Messages or Commands.
+- Emits no Messages, Port Commands, or ControlCommands.
 - Performs no external IO or blocking work.
 - Cannot retain an `AppState` reference after the callback returns.
 
@@ -177,11 +181,11 @@ A declaration such as "reads positions" would not enforce anything if the callba
 
 The graph therefore records:
 
-- Which Event or Message invokes a Reducer.
-- Which Event or Message invokes an ordinary Component callback.
+- Which Port Event, ControlEvent, or Message invokes a Reducer.
+- Which Port Event, ControlEvent, or Message invokes an ordinary Component callback.
 - That Reducers may mutate canonical state.
 - That ordinary Components may read canonical state.
-- Which Messages and Commands ordinary callbacks may produce.
+- Which Messages, Port Commands, and ControlCommands ordinary callbacks may produce.
 
 It does not record individual `AppState` fields or dynamic entity reads.
 
@@ -290,7 +294,7 @@ Kavod does not currently provide:
 ## Dependencies On Other Discussions
 
 - The turn-scheduling design settles Reducer visibility as local to each delivered input and uses explicit aggregate domain facts for correlated derived updates. It adds no generic Reducer phase or turn-wide state-settlement guarantee.
-- The settled failure policy captures and stops after a panic; partially mutated state is not rolled back and the Engine never resumes.
+- The settled failure policy captures and stops after an application callback or Engine-global panic; partially mutated state is not rolled back and the Engine never resumes. Contained Port worker panic follows the separate ControlPlane quarantine policy.
 - The observability design defers state hashes, state encoding, and state-value recording; the MVP records only the successful Reducer mutation boundary.
 - The Component identity discussion is relevant only if behavior-affecting private state is later recorded or compared.
 

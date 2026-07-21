@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod MVP diagnostics boundary
 > **Scope:** Automatic audit records, user logging, causal correlation, recording outputs, buffering, failure policy, metrics, and optional distributed tracing
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` adds accepted ControlEvents, produced ControlCommands, requested and effective placement, Port incarnation, quarantine, explicit restart, and per-destination Command disposition to the required audit model.
 
 ## Conclusion
 
@@ -30,7 +31,7 @@ Diagnostics are never application state, broker truth, a recovery log, an outbox
 | Term | Meaning |
 |---|---|
 | Diagnostics | The Engine-owned facility that accepts automatic audit records and user logs and routes them to configured outputs |
-| Audit record | A structured record emitted automatically by Kavod for a kernel, Environment, or Port-boundary action |
+| Audit record | A structured record emitted automatically by Kavod for a kernel, ControlPlane, Environment, or Port-boundary action |
 | User log | An observational record emitted explicitly through `ctx.log.*()` |
 | Audit stream | The ordered stream containing both record classes for one Engine run |
 | Metric | An aggregate operational measurement; not an audit record and not ordered with the audit stream |
@@ -65,6 +66,8 @@ Every diagnostic record carries the applicable subset of:
 - Parent action sequence when one recorded action directly caused another.
 - Callback identity when emitted during or about a callback.
 - Port instance identity when emitted by or about a Port.
+- ControlPlane source or destination when emitted by or about control activity.
+- Port incarnation and requested, realized, or normalized placement when applicable.
 - Produced Command identity when associated with one Command.
 - Frozen logical time when associated with an Event turn.
 - Optional wall time and thread information supplied by diagnostics infrastructure.
@@ -86,7 +89,7 @@ Automatic audit detail has four levels:
 | Level | Automatic records |
 |---|---|
 | `Off` | No automatic audit records |
-| `Audit` | Run lifecycle, accepted Events, produced Commands, consequential Port-boundary actions, recording gaps, and faults |
+| `Audit` | Run lifecycle, accepted Port Events and ControlEvents, produced Port Commands and ControlCommands, consequential boundary actions, recording gaps, and faults |
 | `Debug` | `Audit` plus turn boundaries, callback invocation, and produced Messages |
 | `Trace` | `Debug` plus callback completion, canonical-state mutation boundaries, and detailed kernel and Port actions |
 
@@ -115,9 +118,10 @@ Trace buffering, write rate, dropped-record count, and sink latency must be meas
 The `Audit` level includes at least:
 
 - `RunStarted`, including executable/application identity, graph identity, determinism-affecting configuration identity, and diagnostics configuration.
-- `EventAccepted`, including complete Event payload, source Port identity, Event index, and acceptance time.
-- `CommandProduced`, including complete Command payload, destination Port, root Event index, producing callback, and production order.
+- `EventAccepted`, including complete Port Event or ControlEvent payload, source identity, Event index, and acceptance time.
+- `CommandProduced`, including complete Port Command or ControlCommand payload, destination or operation, root Event index, producing callback, and production order.
 - Consequential Port-boundary observations, including worker lifecycle, Command handoff or submission attempts where observable, and infrastructure faults.
+- Consequential ControlPlane observations, including Ready, lifecycle request and result, placement realization or normalization, incarnation, quarantine, explicit restart, unavailable-destination rejection, and Engine-global fatal classification.
 - `EngineFault` and terminal runtime failures.
 - `RecordingGap` or equivalent loss accounting when a best-effort path loses records and later remains usable.
 - `RunStopped`, including terminal status and last completed Event index.
@@ -162,13 +166,13 @@ Engine run ID
 + callback identity
 ```
 
-Every produced Command records at least:
+Every produced Port Command or ControlCommand records at least:
 
 - Root Event index.
 - Command production order.
 - Producing callback identity.
 - Immediate parent action when detailed causal recording is enabled.
-- Destination Port instance.
+- Destination Port instance or ControlPlane operation and logical target.
 
 At `Audit`, the root Event and producing callback explain the Command's outer cause. At `Debug` and `Trace`, Message and callback records with parent action sequences reconstruct the detailed causal chain.
 
@@ -298,7 +302,7 @@ Retention deletes diagnostic evidence; it does not checkpoint state. Compaction,
 
 Kavod records Port activity at two levels:
 
-- Environment-owned automatic records for worker lifecycle, queue interaction, Command handoff, unexpected exit, and known runtime failures.
+- ControlPlane- and Environment-owned automatic records for lifecycle intent, requested and effective placement, incarnation, queue interaction, Command disposition, quarantine, unexpected exit, and known runtime failures.
 - Port-authored `ctx.log.*()` records for protocol details such as reconnects, wire errors, remote status, submission attempts, and wall-clock latency.
 
 If a reconnect, timeout, rejection, or service state changes application behavior, the application must also represent it as a typed Event. A Port log alone cannot trigger deterministic behavior.
@@ -316,7 +320,9 @@ The MVP must make it possible to observe:
 - Per-Port Command mailbox occupancy, reservation failures, and queueing lag.
 - Turn duration and Message, callback, and Command counts.
 - Callback duration by stable callback identity where cardinality is bounded.
-- Worker startup, reconnect, failure, unexpected exit, and fatal-latch counts.
+- ControlEvent and ControlCommand counts and latency.
+- Worker startup, reconnect, failure, unexpected exit, quarantine, explicit restart, and Engine-global fatal-latch counts.
+- Requested versus realized or normalized placement and unavailable-destination Command rejection counts.
 - Diagnostics buffer occupancy, batch size, write latency, dropped records, gaps, and sink failures.
 - OpenTelemetry or external-export drops when those outputs are configured.
 
@@ -347,12 +353,12 @@ If diagnostic replay is later implemented, it should create new OTel traces and 
 
 Replay, state hashes, and divergence tooling are not MVP diagnostics guarantees.
 
-The audit stream deliberately preserves accepted Events and produced Commands so a later diagnostic tool may use them. If added, that tool must:
+The audit stream deliberately preserves accepted Port Events and ControlEvents plus produced Port Commands and ControlCommands so a later diagnostic tool may use them. If added, that tool must:
 
 - Cold-start a new Engine instance.
 - Treat recorded Events only as explicit diagnostic inputs to that isolated run.
-- Use passive Ports and produce no live external effects.
-- Compare produced Commands and report the first observed mismatch.
+- Use passive Ports and a passive ControlPlane backend and produce no live external effects.
+- Compare produced Port Commands and ControlCommands and report the first observed mismatch.
 - State honestly that without state hashes or detailed causal records, the first Command mismatch may be later than the first internal divergence.
 - Create new diagnostic and distributed-trace identities linked to, but distinct from, the original run.
 
@@ -383,9 +389,9 @@ These patterns justify separation and observability mechanics. They do not justi
 8. `Trace` enables an automatic record for every semantic action visible to Kavod; configured failure policy determines whether a missing acknowledgement creates an accounted gap or stops the Engine.
 9. `StateModified` records only a successful Reducer mutation boundary, never old or new state values.
 10. Event index and turn action sequence define deterministic kernel order; diagnostic record sequence defines recorder observation order.
-11. Every Command retains its root Event, production order, producer callback, and destination Port.
-12. Event and Command payloads are recorded at the Audit level; Message records begin at Debug.
-13. Business facts remain typed Events, Messages, Commands, or state.
+11. Every Port Command and ControlCommand retains its root Event, production order, producer callback, and destination or operation.
+12. Port Event, ControlEvent, Port Command, and ControlCommand payloads are recorded at the Audit level; Message records begin at Debug.
+13. Business facts remain typed Events, Messages, Commands, or state; ControlPlane lifecycle facts remain typed ControlEvents.
 14. The default diagnostics path uses bounded memory buffering and batched output writes.
 15. Output, buffering, detail, and failure policy are independently configurable.
 16. Best-effort diagnostics failure does not stop execution.
@@ -436,6 +442,10 @@ This report refines the determinism and live-runtime reports where they previous
 - Recording configuration may affect liveness under failure but never grants recovery authority.
 
 The state report's observability dependency is resolved for the MVP: record only the `StateModified` boundary and defer state values, hashes, serialization, and replay comparison.
+
+The ControlPlane report additionally requires diagnostics to distinguish Port-local quarantine from Engine-global fatal failure and to record the causal chain from ControlCommand through backend realization to accepted ControlEvent.
+
+Required lifecycle recording follows the ControlPlane authority boundary: application-produced lifecycle operations are acknowledged before backend invocation, while immediate quarantine and routing revocation commit before recording and escalate to fatal if their required record cannot be acknowledged. Required recording never delays or rolls back a safety revocation.
 
 ## Open Questions
 

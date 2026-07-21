@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod deterministic kernel boundary
 > **Scope:** The mapping from accepted Events to deterministic application execution
+> **ControlPlane reconciliation:** `7_control_plane_lifecycle_supervision.md` extends accepted Events to include ControlEvents and deterministic outputs to include ControlCommands. Its lifecycle and failure classification supersedes conflicting assumptions here.
 
 ## Conclusion
 
@@ -12,7 +13,7 @@ same executable Kavod/application build
 + same frozen graph
 + same initial deterministic application state
 + same determinism-affecting configuration
-+ same accepted Event sequence and metadata
++ same accepted Port Event and ControlEvent sequence and metadata
 = same kernel outputs and application state transitions
 ```
 
@@ -22,7 +23,7 @@ This is intentionally narrower than a full deterministic simulation framework. K
 
 ## Determinism Statement
 
-> Given the same executable Kavod/application build, frozen application graph, initial deterministic application state, determinism-affecting application and Engine configuration, and the same sequence of accepted Events with identical payloads, source identities, order, and acceptance timestamps, Kavod executes callbacks in the same order and produces the same ordered Messages, ordered Commands with logical Port destinations, and deterministic application state after each completed turn.
+> Given the same executable Kavod/application build, frozen application graph, initial deterministic application state, determinism-affecting application and Engine configuration, and the same sequence of accepted Port Events and ControlEvents with identical payloads, source identities, order, and acceptance timestamps, Kavod executes callbacks in the same order and produces the same ordered Messages, ordered Port Commands, ordered ControlCommands, and deterministic application state after each completed turn.
 >
 > This guarantee assumes that Components and Reducers obey Kavod's determinism contract.
 
@@ -31,9 +32,9 @@ This is intentionally narrower than a full deterministic simulation framework. K
 ## Boundary
 
 ```text
-nondeterministic external world
+nondeterministic external world and Engine ControlPlane
         |
-        | Port offers Event
+        | Port offers Event or ControlPlane offers ControlEvent
         v
 Event acceptance commit
         |
@@ -41,14 +42,14 @@ Event acceptance commit
         v
 deterministic Kavod kernel
         |
-        | ordered produced Commands
+        | ordered produced Port Commands and ControlCommands
         v
 nondeterministic external world
 ```
 
 Kavod freezes observed external behavior at Event acceptance. It does not make the behavior that produced the Event deterministic.
 
-Likewise, Kavod deterministically produces a Command for one logical Port destination. Environment publication and the requested external effect remain outside that production guarantee.
+Likewise, Kavod deterministically produces Port Commands for logical Port destinations and ControlCommands for the Engine ControlPlane. Environment publication, lifecycle realization, and requested external effects remain outside that production guarantee.
 
 ## Event Acceptance
 
@@ -71,7 +72,7 @@ Diagnostics policy determines whether recording gates the commit:
 
 The audit record is diagnostic evidence of acceptance. It is not application state, external truth, or recovery authority.
 
-Port emission, ingress queue insertion, and kernel selection of the next offered Event are not acceptance. They remain nondeterministic live Environment behavior.
+Port emission, ControlPlane offer, ingress queue insertion, and kernel selection of the next offered Event are not acceptance. They remain pre-acceptance runtime behavior.
 
 Exact diagnostics encoding, storage backend, buffering, batching, and acknowledgement policy are not deterministic callback semantics. Required recording may intentionally change Engine liveness under recorder failure, so the selected diagnostics policy is included in Engine provenance.
 
@@ -85,7 +86,7 @@ The kernel must preserve these rules:
 4. Matching Reducers execute before matching ordinary Components.
 5. Reducers and Components execute in stable graph registration order.
 6. Messages use the specified breadth-first FIFO propagation order.
-7. Commands are collected in deterministic production order and leave only after turn completion.
+7. Port Commands and ControlCommands are collected in deterministic production order and take effect only after turn completion.
 8. Every callback in a turn observes the root Event's frozen acceptance time.
 9. Internal Messages do not advance logical time.
 10. Event index, not timestamp, establishes accepted Event order.
@@ -119,7 +120,7 @@ Whether live acceptance time must be nondecreasing is not required to establish 
 - Initial Component-private state.
 - Determinism-affecting application configuration.
 - Determinism-affecting Engine configuration, including turn bounds.
-- Ordered accepted Events.
+- Ordered accepted Port Events and ControlEvents.
 - Event payload, source identity, Event index, and acceptance timestamp for each accepted Event.
 - Any future explicitly approved deterministic capability input, such as an RNG choice tape.
 
@@ -131,7 +132,8 @@ An external runtime or required-diagnostics failure may terminate execution at a
 
 - Callback execution and delivery order.
 - Ordered internal Messages.
-- Ordered Commands and their logical Port destinations.
+- Ordered Port Commands and their logical Port destinations.
+- Ordered ControlCommands and their ControlPlane operations.
 - Component-private state transitions.
 - Canonical application state transitions.
 - Application state after each completed turn.
@@ -161,7 +163,7 @@ The capability API prevents Kavod from supplying these facilities through callba
 
 The determinism contract should be supported by:
 
-1. Running the same application, initial state, configuration, and accepted Event sequence repeatedly and comparing Messages, Commands, causal order, and final state.
+1. Running the same application, initial state, configuration, and accepted Event sequence repeatedly and comparing Messages, Port Commands, ControlCommands, causal order, and final state.
 2. Explicit tests for registration order, Reducer-before-Component order, breadth-first Message order, Command production order, and frozen turn time.
 3. Selected fresh-process tests to detect accidental global state, environment dependence, and randomized collection iteration.
 4. Review or lint rules forbidding direct clocks, entropy, IO, threading, and inappropriate unordered iteration in deterministic application code.

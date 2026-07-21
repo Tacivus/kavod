@@ -2,6 +2,7 @@
 
 > **Status:** Settled for the Kavod MVP turn-scheduling boundary
 > **Scope:** Event turns, Message propagation, Reducer visibility, correlated derived facts, multi-timeframe bar closure, and Command timing
+> **ControlPlane reconciliation:** Accepted ControlEvents use the same turn scheduling. `7_control_plane_lifecycle_supervision.md` adds deferred ControlCommands and defines their post-turn ordering relative to Port Commands.
 
 ## Conclusion
 
@@ -12,7 +13,7 @@ one accepted Event
     -> one isolated turn
     -> Reducers before ordinary Components for each delivered payload
     -> breadth-first Message FIFO until empty
-    -> collected Commands become eligible for publication after quiescence
+    -> collected Port Commands and ControlCommands become eligible after quiescence
 ```
 
 These semantics are deterministic, but they do not create a general turn-wide derived-state barrier. An ordinary Component sees canonical state fully reduced for its current delivered Event or Message. It is not guaranteed to see every state change that later Messages in the same turn may cause.
@@ -29,7 +30,7 @@ Absent terminal interruption, for each delivered Event or Message:
 2. Each Reducer completes before the next callback begins.
 3. All matching ordinary Components run only after every matching Reducer completes successfully.
 4. Messages emitted by Components append to the turn FIFO in production order.
-5. Commands are collected in production order and do not leave during a callback.
+5. Port Commands and ControlCommands are collected in production order and do not take effect during a callback.
 
 If runtime or required-diagnostics failure terminates dispatch between callbacks, no later ordinary Component bypasses unfinished matching Reducers; the Engine stops instead.
 
@@ -261,9 +262,9 @@ BFS does not provide:
 
 DFS is rejected because it prioritizes descendants over siblings, worsens partial-state reactions, and encourages reentrant execution. Correct state coherence must not depend on either traversal policy.
 
-## Command Timing
+## Command And Control Timing
 
-Commands remain collected in deterministic production order and become eligible for Environment publication only after the turn reaches quiescence.
+Port Commands and ControlCommands remain collected in deterministic production order and become eligible only after the turn reaches quiescence.
 
 This prevents callback-to-Port reentrancy and supports whole-turn publication-capacity reservation. It does not make the decision that created a Command safe:
 
@@ -275,7 +276,7 @@ Component reads partial state
     -> original payload remains unchanged
 ```
 
-Kavod does not recompute, validate, or cancel a Command merely because later state differs. Publication may also fail under the configured Command-reservation policy, required diagnostics policy, or fatal-failure rules. Turn-end collection is not a guarantee of publication, external delivery, or external effect.
+Kavod does not recompute, validate, or cancel an output merely because later state differs. After quiescence, the runtime classifies and publishes eligible Port Commands before applying ControlCommands as specified by the ControlPlane report. A lifecycle ControlCommand does not make a sibling Port Command deliverable in the same turn. Publication or control application may also fail under capacity, destination-state, required-diagnostics, or fatal-failure rules. Turn-end collection is not a guarantee of external delivery or effect.
 
 ## Time And Same-Timestamp Ordering
 
@@ -333,9 +334,9 @@ These systems solve different problems, including distributed progress, runner-s
 2. Reducers run before ordinary Components for every delivered Event or Message.
 3. Reducer-before-Component visibility applies to the current payload, not arbitrary later derivations.
 4. Messages process breadth-first through one deterministic FIFO.
-5. Reducers emit no Messages or Commands.
-6. Ordinary Components are the only producers of internal Messages and external Commands.
-7. Commands are collected until turn quiescence and are never dispatched reentrantly.
+5. Reducers emit no Messages, Port Commands, or ControlCommands.
+6. Ordinary Components are the only producers of internal Messages, Port Commands, and ControlCommands.
+7. Port Commands and ControlCommands are collected until turn quiescence and are never dispatched reentrantly.
 8. Command buffering does not validate or refresh a decision payload.
 9. Related derived updates required together by a decision are represented by one complete domain fact.
 10. One ordinary multi-timeframe `BarAggregator` owns the in-progress bars that require coherent closure.
@@ -364,7 +365,7 @@ The decision should be proved by tests covering at least:
 10. The Strategy updates all relevant private indicators before producing its one decision.
 11. Repeated runs with the same build, graph, state, configuration, and Event tape produce identical aggregate payloads, state, Messages, and Commands.
 12. Separate accepted Events with equal domain timestamps remain separate ordered turns.
-13. Commands remain unpublished during callbacks and retain their original payload after production.
+13. Port Commands and ControlCommands remain deferred during callbacks and retain their original payload after production.
 14. A Reducer panic stops the Engine without running later Components or publishing the turn's Commands.
 15. Application graph tests confirm that callbacks making coherent bar decisions consume `BarsClosed` rather than singular closures or the triggering Tick.
 
