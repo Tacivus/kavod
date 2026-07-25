@@ -75,7 +75,7 @@ Storage may persist a complete record even when synchronization reports failure 
 | Audit journal | The mandatory append-only ordered record of Kernel-visible semantic actions and run boundaries |
 | Audit storage contract | The declared set of process, kernel, host, power, filesystem, metadata, namespace, and device failures covered by audit synchronization |
 | Global run gate | The monotonic Engine-owned authority that admits acceptance, callback execution, Message dispatch, ordinary commit synchronization, simulation actions, Command handoff, and startup release, and prevents later admissions after closure |
-| Run phase | The small private Engine state machine `Constructing -> Starting -> Running -> Closing(reason) -> Terminated`; it is not a Port lifecycle |
+| Run phase | The small private Engine state machine `Constructing -> Starting -> Running -> Closing(initial_reason, effective_status) -> Terminated`; it is not a Port lifecycle |
 | Event index | The authoritative monotonic total order of accepted Port Events and Engine Events |
 | Logical time | The accepted input's frozen acceptance time, inherited by its complete turn |
 | Business ID | Application-domain identity such as a client order ID; it is never replaced by a Kavod run, Event, Command, or audit identity |
@@ -106,13 +106,14 @@ Storage may persist a complete record even when synchronization reports failure 
 20. The first denied, failed, or indeterminate Command handoff establishes terminal closure and suppresses every later handoff attempt.
 21. `TurnCommitted` exists only after every Command handoff for that turn succeeds.
 22. Kavod never automatically retries or resends a Port Command.
-23. Every technical Port failure terminates the complete Engine; failure before static preparation completes yields startup failure, while failure after the run enters `Running` is Engine-global fatal.
+23. Every technical Port failure terminates the complete Engine; failure before static preparation completes requests startup failure, while failure after the run enters `Running` requests Engine-global fatal closure. An earlier authoritative closing reason remains primary.
 24. Once the run phase leaves `Running`, it never returns; application or simulation completion may be promoted to fatal if required terminal audit or cleanup fails.
 25. Fatal state and state from a fatally incomplete turn are never reused.
 26. Live and simulation share application semantics and typed Port protocols, not physical runtime behavior.
 27. Application callbacks cannot observe the selected Environment mode.
-28. Every Kavod-controlled queue, payload, turn, output collection, audit buffer, scheduler chain, and identifier domain has a finite bound.
+28. Every Kavod-controlled queue, turn, output collection, audit buffer, scheduler chain, and identifier domain has a finite bound. Application payload values need not have a separate resident-memory size limit, but every mandatory audit encoding has a finite configured record and journal bound.
 29. Kavod identity never substitutes for application-owned business identity or idempotency policy.
+30. Kavod identifiers never wrap or reuse within their scope. Exhaustion is detected before the operation requiring the next identifier and is fatal once a run has started.
 
 ## 5. Explicit Non-Goals And Deferred Capabilities
 
@@ -129,7 +130,7 @@ The MVP does not provide or promise:
 - Generic domain concepts such as order, fill, disconnect, reconciliation, arming, safe-to-trade state, cancel, or flatten.
 - Generic joins, watermarks, state-settled callbacks, Reducer-produced Messages, or runtime priorities.
 - Safe forced termination of arbitrary in-process callbacks, threads, or third-party code.
-- Detailed simulation horizon, source-exhaustion, and completion policy semantics; these remain `SimulationEnvironment` configuration work.
+- Concrete simulation horizon, source-exhaustion, and completion policy choices; their common authority and scheduling contract is defined in Section 19.3, while the selected policy remains `SimulationEnvironment` configuration.
 - Final public Rust trait, builder, context, registry, queue, error, identity, or audit-encoding syntax.
 
 The audit journal is evidence, not recovery authority, application state, broker truth, or an outbox.
@@ -182,13 +183,15 @@ V6 introduces identity only where one invariant requires it. The semantic minimu
 
 Simulation additionally needs one private schedule ordinal to order equal virtual time. Exact representations are deferred. V6 has no implementation-unit, incarnation, lifecycle-operation, failure-sequence, restart, or generalized causal-tree identity.
 
+All Kavod identifier allocation uses checked monotonic advancement. An identifier is never wrapped, saturated into duplicate use, or recycled. Configuration must ensure that callback, Message, Command, scheduler, and audit limits fit their corresponding identifier domains. If the next Event index, action ordinal, Command ordinal, audit-record sequence, or simulation schedule ordinal is unavailable after `RunStarted` has synchronized, the operation that needed it does not begin or commit and the run closes fatally. Exhaustion before the Engine observes `RunStarted` synchronization is a typed construction or run-start error. Audit reservation includes sequence values for protected terminal evidence as well as bytes.
+
 ## 7. Protocol Semantics
 
 ### 7.1 Closed Typed Protocols
 
 An application supplies enumerable closed concrete Port Event, Message, and Port Command protocol manifests. Kavod supplies the closed Engine Event protocol.
 
-Callbacks receive concrete typed payloads, never a top-level `dyn Message`, `Any`, or user-visible downcast. Port Event routing is keyed by static logical Port plus declared event variant, so identical Rust payload types may appear in different Port protocols without losing source authority. Engine Event routing is keyed by built-in variant and Message routing by declared Message variant. Narrow internal erasure may be used only if it preserves these typed keys.
+Callbacks receive concrete typed payloads, never a top-level `dyn Message`, `Any`, or user-visible downcast. Port Event routing is keyed by static logical Port plus declared event variant, so identical Rust payload types may appear in different Port protocols without losing source authority. A capability-bound typed staging queue establishes both source and protocol membership; ordinary acceptance does not trust candidate-supplied source metadata or dynamically revalidate a closed protocol. Engine Event routing is keyed by built-in variant and Message routing by declared Message variant. Narrow internal erasure may be used only if it preserves these typed keys. A mismatch after internal erasure is an impossible internal invariant violation and fatal, not an ordinary ingress outcome.
 
 ### 7.2 Port Event
 
@@ -281,7 +284,7 @@ Before execution, construction must validate at least:
 - One initial `AppState` of the required concrete type is supplied and passes configured validation.
 - Every declared Port has exactly one compatible static binding.
 - No binding exists for an undeclared Port.
-- Queue, mailbox, turn, payload, scheduler, and audit bounds are finite and valid.
+- Queue, mailbox, turn, scheduler, encoded-audit, journal, and identifier bounds are finite, mutually compatible, and valid.
 - The complete run provenance required by the audit journal is available.
 
 Potential Message cycles may be reported but are not automatically invalid because declarations mean “may produce.” Mandatory runtime bounds prevent an actual cycle from running forever.
@@ -366,15 +369,17 @@ validate Application and Environment
 -> release ordinary Port activity
 ```
 
-Successful `RunStarted` synchronization establishes that a run exists. Append or synchronization failure before the Engine observes that success returns a typed run-start error rather than `RunOutcome`; a complete trailing `RunStarted` record may still exist and is interpreted using Section 16.3.
+`Starting` owns one private startup operation scope covering `RunStarted` encoding and synchronization, static runtime preparation, and publication of every partially created runtime resource into its cleanup owner. This scope is not a Port lifecycle and does not admit application work. A concurrent host or technical closure may latch while the scope is active, but cleanup cannot begin until the scope returns and its complete partial-resource set is visible to the Engine.
+
+Successful `RunStarted` synchronization establishes that a run exists. Encoding or synchronization failure before the Engine observes that success returns a typed run-start error rather than `RunOutcome`; a complete trailing `RunStarted` record may still exist and is interpreted using Section 16.3.
 
 Port Command sinks must be available before the Ready turn begins. Autonomous external or model activity is forbidden before the Ready turn commits. A Ready Command may cause a simulated endpoint to stage a response, but that candidate remains ineligible for selection until Ready commits. Live workers remain behind the ordinary-activity gate and therefore cannot process Ready Commands until release.
 
 `Ready` means only that the graph, audit journal, Engine, and static runtime boundaries can begin the run protocol. It does not mean connected, authenticated, subscribed, reconciled, or safe to trade.
 
-If static runtime preparation fails before the Engine enters `Running`, the Engine accepts no `Ready` input, transitions from `Starting` to `Closing(StartupFailed)`, cleans up prepared resources, attempts terminal startup-failure records, and returns startup failure if cleanup reaches a return boundary. Failure of terminal audit is reported as secondary and cannot turn failed startup into success.
+If static runtime preparation fails before the Engine enters `Running`, the Engine accepts no `Ready` input and requests `Closing(StartupFailed, StartupFailed)`. If that transition wins, it cleans up prepared resources, attempts terminal startup-failure records, and returns startup failure if cleanup reaches a return boundary. If authoritative host stop or another closing reason already won, preparation failure is secondary. Failure of terminal audit is secondary and cannot turn failed startup into success.
 
-Successful preparation atomically transitions `Starting -> Running` before the Engine requests Ready acceptance admission. Technical Port or audit failure after that transition is fatal even if `Ready` has not committed. A concurrent startup failure and preparation completion follow whichever phase transition wins; Ready acceptance cannot begin from `Starting` or after closure.
+Successful preparation may atomically transition `Starting -> Running` only after the startup scope has published all resource ownership and only if `Starting` still owns the phase. Technical Port or audit failure after that transition is fatal even if `Ready` has not committed. A concurrent startup failure, authoritative host stop, and preparation completion follow whichever phase transition wins; losing preparation still returns through the startup scope and supplies its partial resources to cleanup. Ready acceptance cannot begin from `Starting` or after closure.
 
 After the Ready turn commits, the Engine admits ordinary-activity release through the global run gate. If application shutdown, host stop, or fatal closure has already won, release does not occur. If the Ready turn legally invokes `ctx.shutdown()`, ordinary Port activity never opens.
 
@@ -424,17 +429,20 @@ The algorithm bounds consecutive selections from one source but not wall-clock l
 
 For one selected candidate, the Engine:
 
-1. Validates source and protocol membership.
+1. Takes the candidate from its capability-bound typed source, which already establishes logical source and protocol membership.
 2. Obtains one acceptance admission from the global run gate.
-3. Assigns the next Event index.
-4. Freezes acceptance time and establishes the Event index as the turn's causal root.
-5. Appends the complete `InputAccepted` record.
-6. Synchronizes the audit journal.
-7. Commits acceptance only if the Engine observes synchronization success.
-8. Releases the acceptance admission.
-9. Dispatches no callback unless synchronization succeeded and the gate grants callback admission.
+3. Checks that the next Event index exists without wrapping or reuse.
+4. Freezes acceptance time and prepares the complete encoded `InputAccepted` record under the configured record bound.
+5. Assigns the Event index and establishes it as the turn's causal root.
+6. Appends the complete record to the reserved in-memory turn buffer.
+7. Synchronizes the audit journal.
+8. Commits acceptance only if the Engine observes synchronization success.
+9. Releases the acceptance admission.
+10. Dispatches no callback unless synchronization succeeded and the gate grants callback admission.
 
 Successful synchronization is the acceptance commit. Selection and queue removal are private preparation, not separate semantic commits.
+
+If the next Event index is unavailable or the complete `InputAccepted` encoding exceeds its configured record bound, fatal closure occurs without assigning the index, appending `InputAccepted`, accepting the candidate, or restoring it to its source queue. Failure to encode a mandatory record for any other reason follows the same preacceptance result.
 
 If the Engine observes synchronization failure, the candidate does not commit as an accepted input in the live run, no callback receives it, and the run fails. The candidate is not restored or retried. After crash, a complete trailing `InputAccepted` may exist despite the failed or unobserved result; its offline interpretation is synchronization-indeterminate until a later record proves the Engine proceeded beyond that boundary.
 
@@ -462,8 +470,8 @@ After acceptance commits, an ordinary turn proceeds:
 4. Release callback admission and continue through matching Reducers in stable registration order.
 5. Obtain callback admission before each Component invocation.
 6. Append `ComponentStarted` and invoke the Component.
-7. At each `ctx.message()` call, stage the Message in the turn-local FIFO and append `MessageProduced` immediately in production order.
-8. At each `ctx.command()` call, stage the Port Command turn-locally and append `PortCommandProduced` immediately in global production order.
+7. At each `ctx.message()` call, check the next action ordinal and all Message, FIFO, encoding, and reserved-audit bounds, then atomically stage the Message and append `MessageProduced` to the in-memory turn buffer in production order.
+8. At each `ctx.command()` call, check the next action and Command ordinals and all Command, encoding, and reserved-audit bounds, then atomically stage the Port Command and append `PortCommandProduced` to the in-memory turn buffer in global production order.
 9. Append `ComponentCompleted` only after normal return, release callback admission, and continue through matching Components in stable registration order.
 10. Obtain Message-dispatch admission, remove the next Message, release that admission, and repeat Reducer-then-Component dispatch subject to fresh callback admissions.
 11. Reach quiescence only when the Message FIFO is empty and no callback is active.
@@ -474,6 +482,8 @@ After acceptance commits, an ordinary turn proceeds:
 16. Only then select another input.
 
 Callback admission, not the machine instruction entering user code, is the callback-start linearization point. Closure may occur after admission while that callback executes. On return, the Engine observes closure, releases the admission, and suppresses all remaining callbacks, Messages, and turn-local Commands. Production records from the active callback remain truthful records of uncommitted work; no `TurnComputed` is created for that incomplete ordinary turn.
+
+Callback-start, callback-completion, and other fixed-shape control records use capacity reserved before acceptance. Their append to the Engine-owned in-memory turn buffer has no expected resource or storage failure path after admission. An impossible buffer-accounting failure or panic is an internal fatal invariant violation. Storage write and synchronization failure remain possible only where the audit protocol explicitly performs storage operations.
 
 Callback admission completes on both normal return and unwind. Completion audit records exist only for normal return. An unwind completes the admission as terminal failure, establishes or reports fatal closure according to the current phase, and permits terminal draining to continue without invoking later work.
 
@@ -486,10 +496,10 @@ Finite bounds are mandatory for at least:
 - Callback invocations per turn.
 - Messages per turn.
 - Port Commands per turn.
-- Encoded bytes per input, Message, and Port Command.
+- Encoded audit bytes per input, Message, and Port Command record.
 - Semantic action records and encoded audit bytes per turn.
 
-Exceeding a bound establishes fatal state, publishes no uncommitted output, and produces a typed fatal cause where possible.
+Exceeding a bound establishes fatal state and produces a typed fatal cause where possible. The operation that exceeds its bound does not stage an output or consume an ordinal. Earlier turn-local Messages may already have executed and earlier deterministic outputs may remain recorded as uncommitted work, but no Port Command from the incomplete turn is handed off and the turn's state is unusable.
 
 ## 13. Derived-State Consistency
 
@@ -524,7 +534,9 @@ for each Port Command in production order:
     acquire one handoff admission from the global run gate
     append PortCommandHandoffStarted
     perform one endpoint transfer attempt
-    record the transfer result
+    classify the transfer result
+    if the attempt is unsuccessful, establish its fatal cause
+    append PortCommandHandoffResult
     complete the admission as success or terminal failure
 ```
 
@@ -538,7 +550,7 @@ Every bound handoff operation must define one exact local transfer linearization
 - **Not handed off:** the Command definitely did not cross.
 - **Indeterminate:** Kavod cannot establish whether the Command crossed.
 
-After admission, failure to append `PortCommandHandoffStarted` requests fatal closure before transfer. After the attempt, the Engine appends `PortCommandHandoffResult` with `HandedOff`, `NotHandedOff`, or `Indeterminate`. Failure to append that result record does not undo or resolve the transfer; it requests fatal closure while retaining the known in-memory certainty. Failure before transfer admission means no transfer began. Panic or boundary failure spanning the transfer point is indeterminate unless the concrete boundary can prove one side.
+After admission, an impossible failure to append the reserved `PortCommandHandoffStarted` control record establishes fatal closure before transfer. After the attempt, the Engine first classifies the boundary result as `HandedOff`, `NotHandedOff`, or `Indeterminate`. An unsuccessful endpoint result atomically establishes the primary fatal cause while retaining the current handoff admission, before the Engine appends `PortCommandHandoffResult`. A later result-record or audit failure is secondary to that already-established endpoint failure. If the endpoint transfer itself succeeded and only result recording fails, the audit failure is primary and does not undo the known in-memory `HandedOff` certainty. Failure before transfer admission means no transfer began. Panic or boundary failure spanning the transfer point is indeterminate unless the concrete boundary can prove one side.
 
 If the global gate denies admission because host stop or fatal closure already won, no transfer begins and publication ends under that existing closing reason. Gate denial does not replace an authoritative host stop with a new fatal cause.
 
@@ -554,7 +566,7 @@ There is no:
 
 ### 14.2 Failure
 
-Mailbox full, disconnected receiver, unavailable static boundary, simulated model failure, handoff-record failure, indeterminate transfer, or any other unsuccessful admitted attempt requests Engine-global fatal closure. If host stop or another closing reason already won, the handoff failure is secondary and cannot replace that primary reason.
+Mailbox full, disconnected receiver, unavailable static boundary, simulated model failure, indeterminate transfer, or any other unsuccessful admitted endpoint attempt establishes Engine-global fatal closure before result recording. A handoff-record failure with no earlier endpoint failure establishes fatal audit closure. If host stop or another closing reason already won, the handoff or audit failure is secondary and cannot replace that initial closure reason.
 
 On the first failure:
 
@@ -626,13 +638,15 @@ When the requesting callback returns normally, one atomic gate transition choose
 
 This turn is intentionally complete by the shutdown rule even though it does not reach ordinary Message quiescence or full callback fan-out.
 
-If the callback panics after requesting shutdown, fatal failure wins. If required audit or cleanup fails after application shutdown begins, the private run phase is promoted from application closing to fatal; it never returns to running.
+If the callback panics after requesting shutdown, fatal failure wins over the provisional completion request unless an earlier authoritative closure already won. If required audit or cleanup fails after application shutdown wins, the initial closure reason remains application shutdown and the effective terminal status is promoted to fatal; the phase never returns to running.
 
 ## 16. Audit Journal And Optional Observability
 
 ### 16.1 Mandatory Journal
 
 Every run has exactly one mandatory Engine-owned append-only audit journal. It records every Kernel-visible semantic action using one fixed record set. There are no `Off`, `Debug`, `Trace`, sampling, or best-effort modes for this journal.
+
+In this document, **append** means adding a complete encoded record to the Engine-owned bounded in-memory audit buffer in journal sequence order. It is distinct from a storage write and from synchronization. Variable payload records are encoded and checked against the configured maximum record size before the corresponding acceptance or deterministic production becomes established. Fixed-shape control records use capacity reserved before the turn or terminal path begins. Once those checks and reservations succeed, an append has no expected capacity or storage failure path; an impossible append failure is an internal fatal invariant violation. Storage may receive buffered records before a named synchronization point, but only Engine-observed synchronization has the durability meaning defined in Section 16.3.
 
 The initial record set includes:
 
@@ -658,19 +672,18 @@ Exact names and binary representation are deferred. The semantic distinctions ar
 
 Before static runtime startup, `RunStarted` must synchronize sufficient information to identify the run's complete deterministic starting point:
 
-- Exact executable and application build fingerprint.
+- Strong content hashes of the actual executable and application build inputs; a source-control revision alone is insufficient.
 - Frozen graph, callback order, source order, and Port bindings.
-- Initial canonical `AppState`.
-- Initial Component-private state.
+- Strong content identities of the initial canonical `AppState` and initial Component-private state.
 - Determinism-affecting application, Engine, and Environment configuration.
-- Queue, mailbox, turn, scheduler, payload, and audit bounds.
+- Queue, mailbox, turn, scheduler, encoded-record, journal, and identifier bounds.
 - Audit schema, location, and durability contract.
 
-For simulation, provenance also includes initial model and source state, source-corpus identity, initial virtual time, initial scheduled work, and every explicit deterministic seed or choice input.
+For simulation, provenance also includes strong content identities of initial model state, source state, and source corpus; initial virtual time and scheduled work; the configured completion policy; and every explicit deterministic seed or choice input.
 
-The audit storage contract must state which failures successful synchronization covers, including its assumptions about process and kernel crashes, host power loss, filesystem and device behavior, volatile caches, file data and length, file and directory metadata, namespace operations, segments, manifests, and content-addressed artifacts. Every claim of durability in this document is relative to that declared contract.
+The audit storage contract must state which failures successful synchronization covers, including its assumptions about process and kernel crashes, host power loss, filesystem and device behavior, volatile caches, file data and length, file and directory metadata, namespace operations, segments, and manifests. Every claim of durability in this document is relative to that declared contract.
 
-Large starting values may be embedded or referenced by immutable content-addressed artifacts. Referenced artifacts must be finitely bounded, content-verified, synchronized, durably published, and covered by retention and capacity policy before `RunStarted` may reference them. The journal and referenced artifacts together must uniquely identify the initial deterministic state. This requirement does not grant snapshot restoration or replay authority.
+Starting values may be embedded when they fit the configured record bounds, but the MVP provenance requirement is content identity rather than retained artifact availability. Strong content hashes must cover the exact bytes and schema needed to distinguish the executable, state, configuration, model, and source corpus that began the run. Kavod does not retain those inputs, promise that they remain obtainable, reconstruct them from a source-control revision, or grant restoration or replay authority. Integrity mechanisms have a documented residual collision probability and are evidence, not proof against arbitrary corruption.
 
 ### 16.3 Three Turn Durability Boundaries
 
@@ -694,13 +707,17 @@ A journal inspector cannot infer the Engine's observation of a trailing synchron
 
 | Last valid persisted record after failure | Truthful forensic interpretation |
 |---|---|
+| Trailing `RunStarted` | The Engine encoded the run provenance; whether it observed run-start synchronization and established a run is indeterminate unless a later ordinary record proves progression |
 | No `InputAccepted` for a candidate | No acceptance commit occurred within the declared storage fault model |
 | Trailing `InputAccepted` | The Engine appended the candidate; synchronization success and acceptance are indeterminate unless a later execution record proves dispatch |
 | Trailing `TurnComputed` | Computation reached the boundary and intended Commands were recorded; synchronization success and any handoff remain indeterminate unless later handoff evidence exists |
-| Trailing `PortCommandHandoffResult` | The Engine observed the recorded local transfer certainty before appending it; later transfer and turn-commit status remain unknown |
+| Trailing `PortCommandHandoffStarted` | The Engine observed `TurnComputed` synchronization and admitted that Command attempt; whether the Command crossed its local boundary is indeterminate |
+| Trailing `PortCommandHandoffResult` | The Engine observed the recorded local transfer certainty before appending it; later Command handoffs and turn-commit status remain unknown |
 | Trailing `TurnCommitted` | Every local handoff succeeded before append; whether the Engine observed this record's synchronization and advanced its committed frontier is indeterminate |
+| Trailing `RunClosing` | Closure and the explicitly captured frontiers and initial reason were known before append; the record proves no unrecorded ordinary synchronization and does not prove its own synchronization |
+| Trailing `RunTerminated` | The explicitly recorded effective status, frontiers, cleanup result, and bounded failures were known before append; the record does not prove its own synchronization or that a `RunOutcome` returned |
 
-A later-phase record proves that the Engine observed the prerequisite earlier synchronization because the protocol forbids that later phase otherwise. A pre-handoff record cannot prove handoff. A post-handoff record cannot eliminate the crash window between transfer and append or synchronization. Absence of `TurnCommitted` therefore does not prove that no Command crossed a Port boundary. Application business identity and external reconciliation resolve that ambiguity.
+Later ordinary-phase evidence may prove that the Engine observed a prerequisite synchronization because admission to that ordinary phase requires the observation. Callback execution evidence may prove prior `InputAccepted` synchronization; handoff-start evidence may prove prior `TurnComputed` synchronization; and ordinary execution of a later input may prove prior `TurnCommitted` synchronization. After fatal, authoritative-host-stop, or startup-failure closure, audit is best effort. Terminal records prove only their explicitly captured frontiers and facts, never ordinary prerequisite synchronization by presence alone. A pre-handoff record cannot prove handoff. A post-handoff record cannot eliminate the crash window between transfer and append or synchronization. Absence of `TurnCommitted` therefore does not prove that no Command crossed a Port boundary. Application business identity and external reconciliation resolve that ambiguity.
 
 ### 16.4 Framing And Bounds
 
@@ -709,13 +726,14 @@ The journal must use versioned framing, run and segment binding, complete-record
 Finite configured limits are mandatory for:
 
 - One encoded record.
-- One encoded input, Message, and Port Command.
 - Semantic records and bytes per turn.
 - In-memory staging and writer buffering.
 - Total journal storage or preallocated segments.
 - Reserved terminal evidence.
 
-Before `RunStarted`, the audit facility must reserve bounded capacity for run provenance, referenced artifacts, startup failure, and terminal evidence. Before accepting another input, it must provide a preallocated maximum-sized turn buffer and confirm capacity for the inclusive worst case: `InputAccepted`, framing overhead, every permitted action record, `TurnComputed`, every handoff-start and handoff-result record, `TurnCommitted`, segment metadata, and protected terminal headroom. Post-computation records must be size-validated or pre-encoded before the first handoff. Terminal records and secondary-failure representations must themselves have fixed maximum sizes.
+The audit configuration has distinct maximum encoded-record and total-journal sizes. Before `RunStarted`, the audit facility must reserve bounded byte and audit-sequence capacity for run provenance, startup failure, and terminal evidence. Before accepting another input, it must provide a preallocated maximum-sized turn buffer and confirm capacity for the inclusive worst case: `InputAccepted`, framing overhead, every permitted fixed-shape action record, the configured maximum encoded payload records, `TurnComputed`, every handoff-start and handoff-result record, `TurnCommitted`, segment metadata, and protected terminal headroom. Post-computation records must be size-validated or pre-encoded before the first handoff. Terminal records have fixed maximum sizes.
+
+Terminal reporting retains at most a configured finite number of secondary failures, defaulting to eight. It preserves the first failures in Engine observation order and sets a bounded `additional_failures_omitted` indicator if more are observed. The initial closure reason and any outcome-promotion cause have separately reserved representation and do not consume this secondary-failure allowance.
 
 Capacity exhaustion before acceptance establishes fatal state without accepting the candidate. Unexpected write or synchronization failure remains possible and fatal.
 
@@ -723,11 +741,13 @@ Journal rotation, segmentation, preallocation technique, checksums, and synchron
 
 ### 16.5 Failure
 
-Audit encoding, write, capacity, corruption, or synchronization failure while the run is `Running`, or while application or simulation completion still requires terminal audit, establishes or promotes to fatal state. Audit failure after startup failure, authoritative host stop, or an existing fatal closure is secondary because it cannot replace an authority boundary that already occurred. A failed synchronization never rolls back application mutation or a Command handoff that already occurred.
+Audit encoding, write, capacity, corruption, or synchronization failure while the run is `Running`, or while application or simulation completion still requires terminal audit, establishes or promotes to fatal state. Audit failure after startup failure, authoritative host stop, or an existing fatal closure is secondary because it cannot replace an authority boundary that already occurred. A failed synchronization never rolls back application mutation or a Command handoff that already occurred. Fatal establishment prevents later application admission but does not guarantee later durable evidence; it does not make facts already observed by the Engine false.
 
 Authority closure happens before attempting its `RunClosing` audit record. For fatal, startup-failure, and authoritative-host-stop paths, `RunClosing`, `RunTerminated`, and final synchronization are best effort because the journal, runtime, or process may itself be failing.
 
-`RunTerminated` records the closure reason, last known frontiers, cleanup result, and secondary failures known before the record was appended. It does not claim that its own synchronization succeeded. Application and simulation completion require the Engine to observe successful terminal synchronization; failure promotes the effective outcome to fatal audit failure. Startup failure, authoritative host stop, and fatal closure retain their primary category and report terminal-audit failure as secondary because closure already occurred independently of the journal.
+`RunTerminated` records the initial closure reason, effective terminal status, any promotion cause, last known frontiers, cleanup result, the bounded secondary-failure prefix, and whether additional failures were omitted. It does not claim that its own synchronization succeeded. Application and simulation completion require the Engine to observe successful terminal synchronization; failure promotes the effective outcome to fatal audit failure while preserving the initial closure reason. Startup failure, authoritative host stop, and fatal closure retain their effective category and report terminal-audit failure as secondary because closure already occurred independently of the journal.
+
+If terminal coordination reaches a `RunOutcome` return boundary after fatal establishment, the outcome includes the available bounded in-memory audit suffix with an explicit unsynchronized status and an explicit completeness indicator. This suffix is evidence available to the caller, not journal durability. Missing or omitted handoff evidence never means `NotHandedOff`; certainty may be reported only when the Engine retained it. No `RunOutcome`, suffix, or complete terminal evidence is guaranteed if the callback, handoff, cleanup, runtime, or process fails to reach a return boundary.
 
 ### 16.6 Optional Observability
 
@@ -749,23 +769,23 @@ The embedding host has three distinct controls:
 - An authoritative stop that bypasses application policy.
 - External process termination for hard preemption.
 
-An authoritative stop atomically transitions the private run phase from `Starting` or `Running` to `Closing(HostStop)` and closes the global run gate. It admits no later operation, performs no implicit business cancel, flatten, or reconciliation, and suppresses unfinished turn output at the next callback boundary.
+An authoritative stop atomically transitions the private run phase from `Starting` or `Running` to `Closing(HostStop, HostStopped)` and closes the global run gate. It admits no later operation, performs no implicit business cancel, flatten, or reconciliation, and suppresses unfinished turn output at the next callback boundary.
 
-An acceptance, callback, Message dispatch, synchronization, handoff, or startup-release operation admitted before closure may reach its defined boundary. Closure prevents the next operation from starting. The Engine waits for admitted operations and the active callback boundary to drain, snapshots terminal frontiers, attempts `RunClosing`, directs Environment cleanup, and then attempts `RunTerminated` with cleanup and secondary-failure status. Host and runtime threads never clean up resources concurrently with admitted Engine operations.
+An acceptance, callback, Message dispatch, synchronization, handoff, or startup-release operation admitted before closure may reach its defined boundary. A startup operation scope already active in `Starting` may return and publish its partial-resource set. Closure prevents the next operation from starting. The Engine waits for the startup scope, admitted operations, and the active callback boundary to drain, snapshots terminal frontiers, attempts `RunClosing`, directs Environment cleanup, and then attempts `RunTerminated` with cleanup and bounded secondary-failure status. Host and runtime threads never clean up resources concurrently with startup preparation or admitted Engine operations.
 
 ### 17.2 Run Phase And Precedence
 
 The Engine maintains one small private run phase:
 
 ```text
-Constructing -> Starting -> Running -> Closing(reason) -> Terminated
+Constructing -> Starting -> Running -> Closing(initial_reason, effective_status) -> Terminated
                     |                       ^
                     +-----------------------+
 ```
 
-This run-wide state machine is not application-visible and does not recreate per-Port lifecycle. `Starting` may close as startup failure, authoritative host stop, or fatal audit failure before runtime preparation completes. Successful preparation is the only transition to `Running`. While `Running`, the first successful gate transition chooses application shutdown, simulation completion, host stop, or fatal as the closing reason. Later reports are secondary unless the following explicit promotion rule applies:
+This run-wide state machine is not application-visible and does not recreate per-Port lifecycle. `Starting` may close as startup failure, authoritative host stop, or fatal audit failure before runtime preparation completes; its startup scope must still return before cleanup. Successful preparation is the only transition to `Running`. While `Running`, the first successful gate transition chooses application shutdown, simulation completion, host stop, or fatal as the immutable initial closure reason. The effective terminal status initially matches that reason. Later reports are secondary unless the following explicit promotion rule applies:
 
-| Closing reason | Later required audit or cleanup failure |
+| Initial closure reason | Later required audit or cleanup failure |
 |---|---|
 | Application or simulation completion | Promote effective outcome to `Fatal` on required audit failure, cleanup failure, or unexpected technical runtime failure before successful termination |
 | Startup failure | Retain `StartupFailed`; attach secondary failures |
@@ -774,7 +794,7 @@ This run-wide state machine is not application-visible and does not recreate per
 
 The run phase never returns to `Running`.
 
-When the Engine observes the winning transition it appends one `RunClosing` with the primary reason and current frontiers. Application shutdown synchronizes this record with its terminal `TurnComputed`. Simulation completion synchronizes it before cleanup. Startup failure, host stop, and fatal paths attempt it best effort after authority is already closed.
+When the Engine observes the winning transition it appends one `RunClosing` with the immutable initial reason, current effective status, and current frontiers. Application shutdown synchronizes this record with its terminal `TurnComputed`. Simulation completion synchronizes it before cleanup. Startup failure, host stop, and fatal paths attempt it best effort after authority is already closed. A later promotion changes only the effective status and records its cause in `RunTerminated`, available in-memory terminal evidence, and `RunOutcome`; it does not rewrite the initial reason or append a second `RunClosing`.
 
 ### 17.3 Fatal Causes
 
@@ -786,7 +806,7 @@ Fatal causes include:
 - Staging queue overflow or corruption.
 - Port Command mailbox full, disconnect, or failed handoff.
 - Audit capacity, encoding, write, corruption, or synchronization failure.
-- Configured turn, callback, Message, Command, payload, audit, or simulation limit exhaustion.
+- Configured turn, callback, Message, Command, encoded-audit, journal, identifier, or simulation limit exhaustion.
 - Simulation causality violation such as scheduling into the past.
 - Cleanup failure following requested normal completion.
 - Any Environment failure that makes ordering, authority, or boundary accounting untrustworthy.
@@ -795,13 +815,13 @@ Expected external conditions remain typed Port Events when the Port implementati
 
 ### 17.4 Fatal Establishment
 
-Fatal state is monotonic and first-failure-wins while the run is active. The winning atomic closure stores a bounded cause token and wakes the Engine. Every runtime worker and transitive child is supervised. During incomplete `Starting`, a technical Port failure requests `Closing(StartupFailed)`. During `Running`, it requests fatal closure. During application or simulation completion, an unexpected exit before the Environment issued that owner a stop request promotes the outcome to fatal. During startup failure, host stop, or existing fatal closure, such an exit is secondary. An exit after its cleanup stop request is expected. Only the Engine sequences detailed audit, frontier snapshots, and terminal reporting.
+Fatal state is monotonic and first-failure-wins while the run is active. The winning atomic closure stores a bounded cause token and wakes the Engine. Every runtime worker and transitive child is supervised. During incomplete `Starting`, a technical Port failure requests `Closing(StartupFailed, StartupFailed)`. During `Running`, it requests fatal closure. During application or simulation completion, an unexpected exit before the Environment issued that owner a stop request preserves the initial completion reason and promotes the effective status to fatal. During startup failure, host stop, or existing fatal closure, such an exit is secondary. An exit after its cleanup stop request is expected. Only the Engine sequences detailed audit, frontier snapshots, and terminal reporting.
 
 After fatal establishment:
 
 - No later acceptance operation, callback, Message dispatch, or Port Command handoff begins.
 - An active synchronous callback cannot be forcibly preempted.
-- When it returns or unwinds, remaining callbacks, Messages, and staged outputs are suppressed.
+- When it returns or unwinds, remaining callbacks, Messages, and turn-local application outputs are suppressed. Port candidates or simulation actions successfully staged before closure remain staged but are never accepted or selected.
 - `TurnComputed` and `TurnCommitted` are not fabricated for an incomplete ordinary turn.
 - In-memory application and model state is not reusable.
 - Cleanup, child cancellation, joining, and final audit are best effort.
@@ -873,9 +893,9 @@ Which live candidate wins an availability race is not deterministic. During the 
 
 ### 19.3 Simulation Environment
 
-A simulated model is a deterministic external-world state machine held by the Simulation Environment. The MVP Simulation Environment runs the scheduler, models, Kernel, Reducers, and Components on one thread with no overlapping callback. A model must:
+A simulated model is a deterministic external-world state machine held by the Simulation Environment. The MVP Simulation Environment runs the scheduler, models, Kernel, Reducers, and Components on one thread with no overlapping callback. Each simulated Port has one bounded scheduled-event queue configured by the Simulation Environment, analogous to its live Port's bounded staging queue. A model must:
 
-- Produce the same transitions and staged outputs for the same model state, input, virtual time, configuration, and explicit deterministic seed or choice inputs recorded in run provenance.
+- Produce the same transitions and staging calls for the same model state, input, virtual time, configuration, and explicit deterministic seed or choice inputs recorded in run provenance.
 - Run synchronously with no overlapping model, Reducer, or Component callback.
 - Use only Environment-supplied virtual time.
 - Consume Port Commands only through static bound endpoints.
@@ -886,7 +906,7 @@ A simulated model is a deterministic external-world state machine held by the Si
 
 Model state represents the simulated external world and is not `AppState`.
 
-Simulation handoff invokes the addressed model endpoint synchronously in global Command production order. One model callback must return and commit its staged outputs before the next Command handoff begins. Staged model outputs become later candidate actions and never recursively enter the Kernel.
+Simulation handoff invokes the addressed model endpoint synchronously in global Command production order. One model callback must return before the next Command handoff begins. A model `wake_at` or equivalent staging call immediately inserts one immutable action into the addressed Port's bounded scheduled-event queue, just as a live Port stages one candidate into its bounded queue. Successful insertion receives the next checked schedule ordinal. Queue full, scheduling into the past, or schedule-ordinal exhaustion establishes fatal closure and the attempted action is not staged. No later staging call succeeds after closure, including one made before the active model callback returns. Successfully staged actions become later candidates and never recursively enter the Kernel. If a staging failure occurs during a simulated Command handoff, that Command remains `HandedOff` because model entry was its transfer point, while the staging failure is the primary technical endpoint cause.
 
 Future actions are ordered by:
 
@@ -894,15 +914,15 @@ Future actions are ordered by:
 (virtual_time, schedule_ordinal)
 ```
 
-At equal virtual time, earlier committed actions precede later committed actions. Zero-latency output receives a later same-time ordinal rather than recursive execution or invented time.
+At equal virtual time, earlier successfully staged actions precede later successfully staged actions. Zero-latency output receives a later same-time ordinal rather than recursive execution or invented time.
 
 After the Ready turn, the Simulation Environment executes one fixed loop:
 
 1. Obtain simulation-action admission from the global run gate and pop the minimum `(virtual_time, schedule_ordinal)` action.
 2. Advance virtual time to that action's time.
-3. If it is a model wake or source action, run that callback once, commit its staged actions in production order only after normal return, and complete simulation-action admission on normal return or unwind. Unwind completes the admission as terminal failure and commits no staged actions.
+3. If it is a model wake or source action, run that callback once and complete simulation-action admission on normal return or unwind. Each staging call during the callback has already inserted its action or established fatal closure. Unwind completes the admission as terminal failure; actions successfully staged before unwind remain staged but are abandoned because closure prevents their selection.
 4. If it is a Port Event or Engine Event delivery, convert it to one candidate, release simulation-action admission, and execute its complete acceptance, turn, audit, and Command-handoff protocol before selecting another scheduled action.
-5. Commands delivered during that turn may stage later actions, including same-time actions with larger ordinals, but never reenter the Kernel.
+5. Commands delivered during that turn may stage later actions immediately, including same-time actions with larger ordinals, but never reenter the Kernel.
 6. A closure request may wait for an admitted model callback, but it prevents admission of the next scheduled action. On panic, causality violation, bound exhaustion, or closure, select no later action.
 
 A cooperative host request in simulation stages one `ShutdownRequested` action at current virtual time with the next schedule ordinal. Repeated requests remain idempotent as in live mode.
@@ -917,9 +937,9 @@ wake for next occurrence
 -> arrange the next occurrence
 ```
 
-Future records must not influence earlier state, output, latency, or effect decisions. Scheduling into the past is fatal. Finite total-action and same-time-action bounds are mandatory.
+Future records must not influence earlier state, output, latency, or effect decisions. Scheduling into the past is fatal. Finite per-Port queue, total-action, and same-time-action bounds are mandatory. Each failed insertion is fatal and stages no action; earlier successful insertions remain staged but cannot execute after closure.
 
-Detailed source exhaustion, `run_until`, horizon, pending-work, and simulation-completion eligibility policy is deferred to `SimulationEnvironment` configuration. The common terminal boundary is not deferred: completion may be selected only between committed turns and scheduled actions, closes the global run gate, runs required cleanup, and attempts `RunTerminated`. Required terminal audit or cleanup failure promotes simulation completion to fatal. Environment-selected technical completion returns a terminal `RunOutcome`; it is not an Engine Event.
+The concrete source-exhaustion, `run_until`, horizon, and completion policy is immutable `SimulationEnvironment` configuration and part of run provenance. Every policy must define its complete deterministic inputs, whether pending scheduled actions inhibit completion, and whether otherwise-pending work is abandoned when completion wins. The policy is evaluated only between committed turns and scheduled actions and deterministically chooses either completion or the next scheduled action before requesting authority. For the next-action branch, the selected action requests simulation-action admission. For the completion branch, the Environment atomically requests `Running -> Closing(SimulationCompletion, SimulationCompleted)` rather than an operation admission. The chosen request may race concurrent host or fatal closure, but completion and the next action do not race each other. If the selected action obtains admission, it reaches its defined boundary before eligibility is reconsidered; if the completion transition wins, no later action begins. Completion runs required cleanup and attempts `RunTerminated`. Required terminal audit or cleanup failure preserves simulation completion as the initial reason but promotes the effective status to fatal. Environment-selected completion returns a terminal `RunOutcome`; it is not an Engine Event. Exact policy names and Rust configuration syntax are deferred.
 
 ## 20. Determinism Boundary
 
@@ -967,20 +987,21 @@ Successful Engine observation of `RunStarted` synchronization establishes that a
 | Application completed | Authorized `ctx.shutdown()` committed, cleanup completed, and normal terminal audit synchronized |
 | Startup failed | A run journal existed but static runtime preparation failed before `Ready` acceptance |
 | Host stopped | Authoritative host closure ended the run; cleanup and ambiguity are reported |
-| Simulation completed | The configured Simulation Environment completion policy ended the run |
+| Simulation completed | The configured Simulation Environment completion policy ended the run, required cleanup completed, and terminal audit synchronized |
 | Fatal | A technical failure, invariant violation, limit, audit failure, handoff failure, or cleanup failure poisoned the run |
 
 Available outcomes must report at least:
 
 - Run identity.
-- Primary terminal cause.
+- Immutable initial closure reason.
+- Effective terminal status and any promotion cause.
 - Last Event index whose `InputAccepted` synchronization the Engine observed succeed.
 - Last Event index whose `TurnComputed` synchronization the Engine observed succeed.
 - Last Event index whose `TurnCommitted` synchronization the Engine observed succeed.
 - In-flight phase when termination interrupted a turn.
-- Confirmed local handoff prefix, current ordinal certainty, cutoff reason, and unattempted suffix when handoff terminated.
-- Audit status, including whether a terminal record synchronized.
-- Cleanup status and available secondary failures.
+- Available local handoff evidence for any computed but uncommitted turn, its completeness, current ordinal certainty when known, cutoff reason, and known unattempted suffix. Missing evidence is unknown, never implicitly `NotHandedOff`.
+- Audit status, including whether a terminal record synchronized and any available bounded in-memory audit suffix explicitly marked unsynchronized and complete or incomplete.
+- Cleanup status, the bounded secondary-failure prefix, and whether additional failures were omitted.
 
 Build or validation failure, or failure before the Engine observes successful `RunStarted` synchronization, may remain a construction or run-start error rather than `RunOutcome`. A trailing complete `RunStarted` record may exist despite that error.
 
@@ -993,9 +1014,9 @@ Configuration is separated by owner:
 | Configuration | Owner |
 |---|---|
 | Domain data, Components, initial `AppState`, initial private state | Application |
-| Turn, payload, and deterministic Kernel bounds | Engine |
+| Turn and deterministic Kernel bounds | Engine |
 | Static Port bindings, queue and mailbox capacities, private runtime mechanics | Environment |
-| Models, virtual scheduling, action bounds, future completion policy | Simulation Environment |
+| Models, per-Port scheduled-event capacities, virtual scheduling, action bounds, and completion policy | Simulation Environment |
 | Journal location, capacity, record bounds, storage contract | Audit journal |
 | Filters and exporters | Optional observability |
 
@@ -1093,7 +1114,7 @@ This example is non-normative and does not settle ownership types, closure shape
 28. Commands are considered in global production order and attempted at most once until the first denied, failed, or indeterminate ordinal.
 29. Commands are not grouped by destination.
 30. The first mailbox-full, disconnected, unavailable, or failed handoff establishes fatal state.
-31. Terminal publication reports a confirmed handoff prefix, explicit current-ordinal certainty, and an unattempted suffix.
+31. Returned terminal publication reports available handoff evidence and its completeness; known evidence distinguishes a confirmed prefix, explicit current-ordinal certainty, and an unattempted suffix, while missing evidence remains unknown.
 32. No failed or ambiguous Command is retried or returned as an application Event.
 33. Handoff racing fatal or authoritative closure has one winner under the global run gate.
 34. Failure synchronizing `TurnCommitted` after handoff is fatal and does not roll back handoff.
@@ -1116,21 +1137,34 @@ This example is non-normative and does not settle ownership types, closure shape
 45. Simulation uses the same Application and Kernel semantics as live for an identical accepted sequence.
 46. Model callbacks never recursively enter the Kernel.
 47. Equal virtual time is ordered by schedule ordinal.
-48. Existing same-time actions precede newly committed same-time actions.
-49. One simulated Command callback commits staged outputs before the next Command handoff.
+48. Existing same-time actions precede newly staged same-time actions.
+49. One simulated Command callback returns before the next Command handoff; each successful staging call inserts immediately without recursive Kernel entry.
 50. Future source records cannot alter an earlier execution prefix.
 51. Scheduling into the past and model panic are Engine-fatal.
 52. A trailing valid commit-point record is not mistaken for Engine-observed synchronization success without later causal evidence.
 53. Callback admission racing closure has one winner; an admitted callback may finish but no later callback is admitted.
-54. Terminal frontier snapshots wait for every admitted operation and active callback boundary to drain.
+54. Terminal frontier snapshots wait for the startup scope, every admitted operation, and the active callback boundary to drain.
 55. Ready Command responses in simulation may stage behind the closed eligibility gate and cannot execute before Ready commits.
-56. A boundary failure after known transfer reports the current Command handed off; an indeterminate transfer reports ambiguity.
-57. Application and simulation completion promote to fatal on required terminal failure, while startup failure and host stop retain their primary category with secondary status.
-58. Simulation follows the fixed action loop and records every initial model, source, corpus, time, schedule, and deterministic seed input in provenance.
+56. When terminal evidence is available, a boundary failure after known transfer identifies the current Command as handed off and an indeterminate transfer identifies ambiguity.
+57. Application and simulation completion preserve their initial closure reason but promote the effective status to fatal on required terminal failure, while startup failure and host stop retain their effective category with secondary status.
+58. Simulation follows the fixed action loop, records strong content identities for its initial model, source, and corpus, and records exact initial time, schedule, completion policy, and deterministic seed inputs in provenance.
 59. Port Event dispatch distinguishes identical payload types emitted by different logical Ports.
-60. `RunStarted` references only bounded artifacts durably published under the declared storage contract.
-61. Closure waits for admitted operations and the active callback boundary before cleanup touches runtime resources.
+60. `RunStarted` records actual executable and deterministic-input content identities without claiming artifact retention, reconstruction, or replay.
+61. Closure waits for the startup scope, admitted operations, and the active callback boundary before cleanup touches runtime resources.
 62. A hung in-process cleanup produces no false `RunOutcome`; bounded termination requires a process boundary.
+
+### 23.7 Exhaustion, Startup, Evidence, And Completion
+
+63. Event, action, Command, audit-sequence, and simulation schedule identifiers never wrap or reuse; exhaustion fails before the requiring operation commits and is fatal after run start.
+64. An oversized `RunStarted` is a run-start error, an oversized `InputAccepted` does not accept its candidate, and an oversized Message or Command record fatally terminates its already-accepted turn before handoff.
+65. A host stop or startup failure racing active preparation waits for the startup scope to return and publish all partial resources before cleanup.
+66. A failed endpoint result establishes the primary fatal cause before result recording; a later result-record failure is secondary.
+67. Terminal records prove only their explicitly captured frontiers and never prove ordinary prerequisite synchronization by their presence alone.
+68. A simulated per-Port scheduled-event queue rejects an overflowing insertion as fatal, stages no replacement action, and selects no staged action after closure.
+69. Every simulation completion policy deterministically defines whether pending work inhibits completion, chooses completion or the next action before requesting authority, and defines what happens to pending work when completion wins; completion uses the closing transition rather than an operation admission.
+70. A returned fatal outcome labels its available in-memory audit suffix unsynchronized, reports whether that evidence is complete, and never treats missing handoff evidence as `NotHandedOff`.
+71. Terminal reporting preserves at most its configured secondary-failure maximum, defaults that maximum to eight, and truthfully indicates omitted additional failures.
+72. Application or simulation completion preserves its initial closure reason when terminal failure promotes the effective status to `Fatal`.
 
 ## 24. Required Failure Traces
 
@@ -1140,7 +1174,7 @@ Before public Rust interfaces are frozen, tests and design review must walk thro
 
 ```text
 candidate selected
--> InputAccepted append or synchronization fails
+-> InputAccepted encoding or synchronization fails
 -> Engine does not commit acceptance or dispatch the candidate
 -> a trailing complete record may nevertheless persist with indeterminate synchronization acknowledgement
 -> no callback runs
@@ -1176,10 +1210,12 @@ callbacks reach ordinary quiescence
 TurnComputed lists C1, C2, C3
 -> C1 handoff succeeds
 -> C2 handoff fails
+-> C2 is classified as HandedOff, NotHandedOff, or Indeterminate at its local boundary
 -> C3 is never attempted
 -> no TurnCommitted
 -> C1 may have external effect
--> business reconciliation uses C1's business identity
+-> reconciliation covers C1 and also C2 whenever C2 is HandedOff or Indeterminate
+-> business reconciliation uses each affected Command's application-owned business identity
 ```
 
 ### 24.5 Commit Audit Failure
@@ -1190,7 +1226,8 @@ TurnComputed synchronized
 -> TurnCommitted synchronization fails
 -> handoffs are not rolled back
 -> durable journal may end at TurnComputed
--> fatal outcome reports known local handoff if terminal coordination reaches a return boundary
+-> if terminal coordination reaches a return boundary, the fatal outcome attaches available bounded in-memory evidence as unsynchronized and marks its completeness
+-> absent evidence is unknown and never means that a Command was not handed off
 ```
 
 ### 24.6 Legal Application Shutdown
@@ -1245,10 +1282,11 @@ static runtimes are prepared behind ordinary-activity gate
 
 ```text
 host requests authoritative stop
--> any acceptance or handoff permit already acquired may finish
+-> any startup scope, acceptance, callback, Message dispatch, synchronization, simulation action, handoff, or startup-release operation already active or admitted may reach its defined boundary
 -> global gate prevents the next operation
 -> active callback output is suppressed at return
 -> staged but unaccepted candidates are abandoned
+-> accepted, computed, and committed frontiers include only synchronization success the Engine observed
 -> cleanup and terminal audit are attempted
 -> RunOutcome::HostStopped if admitted operations and cleanup reach a return boundary
 ```
@@ -1261,6 +1299,51 @@ source wakes for occurrence N
 -> stages public Event N
 -> schedules N+1 afterward
 -> Command caused by Event N cannot observe N+1 early
+```
+
+### 24.12 Endpoint Failure Plus Audit Failure
+
+```text
+Command handoff admission succeeds
+-> endpoint returns a definite or indeterminate unsuccessful result
+-> that endpoint result establishes the primary fatal cause while admission remains held
+-> an impossible PortCommandHandoffResult append failure or later audit synchronization failure occurs
+-> audit failure is secondary
+-> known in-memory Command certainty is retained when terminal coordination reaches a return boundary
+```
+
+### 24.13 Host Stop During Startup Preparation
+
+```text
+RunStarted synchronization succeeds
+-> static runtime preparation creates partial resources inside the startup scope
+-> authoritative host stop wins Starting -> Closing(HostStop, HostStopped)
+-> preparation cannot enter Running
+-> startup scope returns and publishes every partial resource
+-> cleanup begins only afterward
+-> HostStopped returns only if cleanup reaches a reportable boundary
+```
+
+### 24.14 Simulation Queue Overflow
+
+```text
+model callback calls wake_at for Port P
+-> P's bounded scheduled-event queue is full
+-> no action or schedule ordinal is staged for that call
+-> fatal closure wins
+-> actions staged by earlier successful calls remain queued but are never selected
+-> no later simulation action, callback, input, or Command handoff begins
+```
+
+### 24.15 Terminal Forensic Boundary
+
+```text
+ordinary synchronization fails or its result is unobserved
+-> fatal, host-stop, or startup-failure closure already has authority
+-> best-effort RunClosing or RunTerminated persists
+-> inspector accepts only the frontiers explicitly captured by that terminal record
+-> terminal-record presence does not prove the earlier ordinary synchronization
+-> trailing RunTerminated does not prove its own synchronization or a returned RunOutcome
 ```
 
 ## 25. Migration From V5
@@ -1291,14 +1374,14 @@ The following do not block this semantic model:
 - Exact Rust protocol aggregation, registration, derive, and builder syntax.
 - Registry erasure and storage layout.
 - Queue, mailbox, synchronization primitive, and global-gate implementation.
-- Exact numeric defaults for capacities and limits.
+- Exact numeric defaults for capacities and limits other than the settled secondary-failure default.
 - Audit binary encoding, checksum, file segmentation, preallocation, rotation, and group-commit optimization.
 - Concrete Port thread, task, process, or third-party runtime mechanics.
 - Exact `RunOutcome`, build-error, and fatal-cause Rust enums.
 - Exact identity representation and user-facing audit inspection tools.
 - State validation and provenance-encoding APIs.
 - Optional logging facade and metrics/exporter choices.
-- Detailed simulation exhaustion, `run_until`, horizon, retained-work, and completion policies.
+- Concrete simulation exhaustion, `run_until`, horizon, retained-work, and completion policy choices that implement the common contract in Section 19.3.
 - Future weighted input selection, replay, snapshots, recovery, and DST.
 
 Any implementation must preserve the semantic boundaries in this document. API convenience must not expose runtime authority, weaken graph authorization, introduce silent loss, claim false durability, imply external effect, or add in-run recovery through a side channel.
@@ -1318,7 +1401,7 @@ Before public Rust interfaces are frozen, review must confirm:
 9. **Port gate:** Static startup, ordinary-activity gating, global failure, and cleanup require no hidden lifecycle protocol.
 10. **Environment gate:** Live and simulation preserve application semantics without claiming physical parity.
 11. **Outcome gate:** Every in-process terminal path maps to one truthful `RunOutcome`, while external process destruction makes no false claim.
-12. **MVP gate:** No required interface presupposes restart, replay, restoration, outbox behavior, dynamic placement, detailed simulation completion, or speculative future policy.
+12. **MVP gate:** No required interface presupposes restart, replay, restoration, outbox behavior, dynamic placement, a concrete simulation completion policy, or speculative future policy.
 
 ## 28. Readiness Statement
 
