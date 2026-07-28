@@ -18,8 +18,8 @@ Kavod's engineering approach is informed by NASA's Power of Ten, TigerBeetle's T
 |---|---|
 | Correctness before convenience | No feature is added without semantics that can be enforced and tested |
 | Explicit execution | One Event, one handler invocation, and one turn at a time |
-| Finite Core resources | Every Kavod-owned non-stack object has a configured maximum |
-| No steady-state Core allocation | Kavod allocates and validates all Core storage before `RunStarted` |
+| Finite Core resources | Every Core-managed container, item count, byte buffer, and identifier domain has a configured maximum |
+| No steady-state Core allocation | Kavod allocates and validates all Core-managed backing storage before `RunStarted` |
 | Bounded local work | Core code uses no recursion or unbounded per-turn loop |
 | Checked arithmetic | Counts, lengths, capacities, and identities never wrap or silently saturate |
 | Explicit failure | Representable runtime failures establish Fatal |
@@ -36,6 +36,7 @@ freeze Application and Port Slots
 -> process Ready
 -> accept and sync one Event
 -> invoke on_event
+-> preflight Command-inbox capacity when Commands exist
 -> sync complete Command intent when Commands exist
 -> insert Commands into Port inboxes
 -> sync TurnCompleted
@@ -61,9 +62,11 @@ An accepted Event envelope contains:
 
 Event index is the sole accepted-Event order. Logical time is deterministic input visible to the handler; domain time remains ordinary payload data.
 
-Kavod's deterministic claim is:
+Kavod's deterministic claim has two layers:
 
-> For the same executable build, frozen Application, initial State, deterministic configuration, accepted Event envelopes, and application-provided audit encoding behavior, every failure-free completed prefix produces the same handler calls, State transitions, Outcomes, ordered Commands, requested State bytes, and completed-turn frontier.
+> For the same executable build, frozen Application, initial State, deterministic configuration, and accepted Event envelopes, application execution produces the same handler calls, State transitions, Outcomes, ordered Command intent, and State-encoding requests.
+
+> Given those same inputs plus the same ordered Core-visible boundary observations and operation results, Core execution produces the same audit records, Command handoffs, completed-turn frontier, and Engine exit. Application-provided audit encoders are part of the deterministic Application behavior assumed by both claims.
 
 | Rule | Consequence |
 |---|---|
@@ -74,7 +77,7 @@ Kavod's deterministic claim is:
 | Commands are deferred until handler return | Application code cannot perform Port IO |
 | Environment mode is hidden | Live and simulation execute the same application decisions |
 
-The accepted live Event sequence is an input to determinism. Kavod does not claim that nominally identical live conditions produce the same sequence.
+The accepted live Event sequence and Core-visible Environment results are inputs to determinism. Kavod contains no hidden source of nondeterminism, but does not claim that nominally identical live conditions produce the same Event sequence, inbox availability, AuditWriter results, Environment failures, or host interrupts.
 
 Application code and application-provided encoders must not make behavior depend on hidden wall-clock reads, unrecorded entropy, IO, environment variables, process-global mutable State, concurrent task ordering, pointer identity, unstable collection iteration, Environment mode, or AuditWriter mode.
 
@@ -142,6 +145,8 @@ Each Slot has:
 - One bounded FIFO Event inbox.
 - One bounded FIFO Command inbox.
 
+The Core is the sole producer for each Command inbox, and the bound Port is its sole consumer. The Core accounts for its complete current-turn batch; concurrent Port consumption can only increase available Command capacity.
+
 The Slot, not candidate-supplied metadata, establishes authoritative Event source and Command destination.
 
 A Port may offer only its Contract Event type. Kavod applies the Slot's frozen deterministic injection into the closed AppEvent type before acceptance. Conversion failure establishes Fatal and invokes no handler.
@@ -150,7 +155,8 @@ A Port may offer only its Contract Event type. Kavod applies the Slot's frozen d
 |---|---|
 | Capacity is fixed before `RunStarted` | Inbox insertion never grows Core storage |
 | Insertion is all-or-none | A value is inserted exactly once or not inserted |
-| Full insertion establishes Fatal | Kavod never silently drops accepted pressure |
+| Full Event insertion establishes Fatal | Kavod never silently drops offered pressure |
+| Insufficient Command capacity establishes Fatal during preflight | No current-turn Command is inserted for a predictably full destination |
 | FIFO is preserved per Slot | Successful insertion order is stable |
 | Kavod never overwrites or coalesces | Domain-aware batching must happen before an Event is offered |
 
@@ -158,7 +164,7 @@ Command handoff has one Core meaning:
 
 > A Command is handed off when it is successfully inserted into its destination Slot's Command inbox.
 
-An insertion either succeeds or establishes Fatal. Commands are attempted once in successful staging order. Earlier successful insertions remain real; after the first failed insertion, no later current-turn Command is attempted.
+Commands are attempted once in successful staging order. Successful capacity preflight makes a full result impossible; any representable Command-inbox insertion failure establishes Fatal. Earlier successful insertions remain real; after the first failed insertion, no later current-turn Command is attempted.
 
 Successful insertion proves neither Port processing nor external effect. It does not prove network transmission, remote receipt, execution, persistence across process failure, or exactly-once behavior.
 
@@ -168,7 +174,7 @@ If the process ends before Command-insertion evidence synchronizes, an offline o
 
 ## 5. Bounded Core Storage
 
-> Every Kavod-owned object requiring non-stack storage has a finite configured maximum allocated and validated before `RunStarted`.
+> Every backing allocation and growable container managed by Core has a finite configured maximum allocated and validated before `RunStarted`.
 
 This includes, at minimum:
 
@@ -179,7 +185,7 @@ This includes, at minimum:
 - Reserved Fatal and `FatalSyncFailed` storage.
 - Core counters and identifier domains.
 
-After `RunStarted`, Core code does not allocate heap storage or grow existing storage. Fatal handling and Engine exit use the same preallocated storage.
+After `RunStarted`, Core code does not request heap allocation or grow Core-managed storage. Fatal handling and Engine exit use the same preallocated storage.
 
 All capacity arithmetic is checked before allocation and use. Construction validates that worst-case turn records, inbox entries, framing, and terminal reserve are mutually compatible. Identifiers never wrap, silently saturate, or reuse a prior value within one run.
 
@@ -187,7 +193,7 @@ Exhaustion establishes Fatal before partial insertion of one inbox item or audit
 
 Terminal reserve includes bytes and audit-sequence values for Fatal and FatalSyncFailed. Fatal uses a fixed bounded fallback record if detailed cause encoding fails. FatalSyncFailed records a fixed Core failure classification; the concrete AuditWriter error is returned separately in EngineExit.
 
-This guarantee applies only to Kavod-owned Core storage. AppState, transitive payload object graphs, application encoders, Ports, the Environment, and custom AuditWriters remain outside it.
+Core stores a bounded number of typed values in preallocated inline storage sized for their concrete Rust types. AppState and Event, Command, and Fatal Reason values may contain pointers or handles to transitive allocations. Core may temporarily own or move those values, but their transitive allocations remain application- or Port-managed and outside this guarantee. Application code, encoders, Ports, the Environment, custom AuditWriters, and their allocation behavior also remain outside it.
 
 Core code uses no recursion. Every Core-owned loop within a turn has a configured bound. A run continues until Stop, Fatal, or finite identifier exhaustion; application code, Ports, encoders, and AuditWriters may still block or fail to return.
 
@@ -343,6 +349,8 @@ inspect Outcome
 -> encode final State if requested
 -> reserve all remaining turn audit bytes and audit-sequence values
 -> if Commands exist:
+     count required capacity per destination Slot
+     verify every destination Command inbox has sufficient capacity
      append CommandsPrepared with complete ordered intent
      synchronize the complete pending AuditLog
      insert each Command into its destination inbox in ordinal order
@@ -353,9 +361,9 @@ inspect Outcome
 -> Continue to the next Event or return Stopped with AppState
 ```
 
-CommandsPrepared synchronization failure inserts no current-turn Command.
+Command-capacity preflight failure establishes Fatal before CommandsPrepared is appended and inserts no current-turn Command. CommandsPrepared synchronization failure also inserts no current-turn Command.
 
-Command-inbox insertion failure establishes Fatal. Earlier insertions remain accepted and their CommandAccepted records remain pending for Fatal synchronization. Later Commands are not attempted.
+Because the Core is the sole producer, successful capacity preflight guarantees that its complete batch fits; concurrent Port consumption can only create more space. A full result during subsequent insertion is an invariant violation and panics. Any other Command-inbox insertion failure establishes Fatal. Earlier insertions remain accepted and their CommandAccepted records remain pending for Fatal synchronization. Later Commands are not attempted.
 
 Before the first Command insertion, Kavod has reserved every required CommandAccepted, optional StateEncoded, and TurnCompleted record. After insertion begins, those local appends have no expected capacity or identifier failure path.
 
@@ -369,8 +377,9 @@ Stop only proves that the Application completed an output-free turn and requeste
 |---|---|
 | Before EventAccepted sync | Handler is not invoked |
 | During handler through explicit Fatal or checked Core failure | Staged Commands are not inserted |
+| During Command-capacity preflight | No current-turn Command is inserted |
 | Before CommandsPrepared sync | No current-turn Command is inserted |
-| During Command insertion | Earlier insertions remain accepted; later Commands are skipped |
+| During representable Command-inbox insertion failure | Earlier insertions remain accepted; later Commands are skipped |
 | During TurnCompleted sync | Inserted Commands remain accepted; successful turn completion is not established |
 
 Every failure in this table establishes Fatal and follows Section 9.
