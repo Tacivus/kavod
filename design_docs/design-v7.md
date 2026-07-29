@@ -8,7 +8,7 @@
 
 ## 1. Engineering Framework And Thesis
 
-Kavod is a deterministic application Core. It accepts one ordered Event, invokes one synchronous application transition, records the resulting State and Command evidence, inserts Commands into typed Port inboxes, and only then proceeds to the next Event.
+Kavod is a deterministic application Core. It accepts one ordered Event, invokes one synchronous application transition, records Event, Command, and turn evidence, inserts Commands into typed Port inboxes, and only then proceeds to the next Event.
 
 The same frozen Application runs in live and simulation. The Environment changes how Events arrive and how Ports process Commands; it does not change application code or Core turn semantics.
 
@@ -32,14 +32,14 @@ The complete Core flow is:
 ```text
 freeze Application and Port Slots
 -> allocate bounded Core storage
--> encode initial State and sync RunStarted
+-> submit Sync(RunStarted)
 -> process Ready
--> accept and sync one Event
+-> accept one Event and submit Sync(EventAccepted)
 -> invoke on_event
 -> preflight Command-inbox capacity when Commands exist
--> sync complete Command intent when Commands exist
+-> submit Sync(CommandsPrepared) when Commands exist
 -> insert Commands into Port inboxes
--> sync TurnCompleted
+-> submit Sync(TurnCompleted)
 -> process the next Event, return Stopped, or return Fatal
 ```
 
@@ -51,7 +51,7 @@ Rust syntax in this document is illustrative. Concrete APIs, traits, derives, ma
 
 One Engine owns one run and its Application State. Only the Engine's Core may pass that State to application code, and at most one `on_event` invocation is active.
 
-One accepted Event creates one turn. A turn runs synchronously to a synchronized completion boundary or establishes Fatal. Internal application helper calls are ordinary Rust program flow; Kavod does not register, schedule, or audit components, reducers, callbacks, or internal messages.
+One accepted Event creates one turn. A turn runs synchronously to completion or establishes Fatal. Internal application helper calls are ordinary Rust program flow; Kavod does not register, schedule, or audit components, reducers, callbacks, or internal messages.
 
 An accepted Event envelope contains:
 
@@ -64,7 +64,7 @@ Event index is the sole accepted-Event order. Logical time is deterministic inpu
 
 Kavod's deterministic claim has two layers:
 
-> For the same executable build, frozen Application, initial State, deterministic configuration, and accepted Event envelopes, application execution produces the same handler calls, State transitions, Outcomes, ordered Command intent, and State-encoding requests.
+> For the same executable build, frozen Application, initial State, deterministic configuration, and accepted Event envelopes, application execution produces the same handler calls, State transitions, Outcomes, and ordered Command intent.
 
 > Given those same inputs plus the same ordered Core-visible boundary observations and operation results, Core execution produces the same audit records, Command handoffs, completed-turn frontier, and Engine exit. Application-provided audit encoders are part of the deterministic Application behavior assumed by both claims.
 
@@ -92,7 +92,7 @@ An Application supplies:
 - One synchronous `on_event` handler.
 - One application Fatal Reason protocol.
 - One ordered static set of Port Slots.
-- Deterministic Event, Command, State, and Fatal Reason audit encoders. Event and Command encodings must represent their complete logical values; State encoding has application-defined evidentiary meaning.
+- Deterministic Event, Command, and Fatal Reason audit encoders. Event and Command encodings must represent their complete logical values.
 - Finite Core capacity configuration.
 - Immutable deterministic configuration.
 
@@ -112,7 +112,7 @@ enum Outcome<F> {
 }
 ```
 
-The handler may mutate complete State, inspect the current Event envelope, stage typed Commands, request final-State audit encoding, and return one Outcome.
+The handler may mutate complete State, inspect the current Event envelope, stage typed Commands, and return one Outcome.
 
 The handler receives no Engine, Environment, AuditWriter, Port implementation, external IO, wall-clock, entropy, or concurrency authority.
 
@@ -180,8 +180,8 @@ This includes, at minimum:
 
 - Port Slot Event and Command inboxes.
 - Turn-local Command storage.
-- Encoded Event, Command, State, and Fatal Reason storage.
-- Pending AuditLog storage.
+- Encoded Event, Command, and Fatal Reason storage.
+- Audit ingress, pending encoded storage, and worker control storage.
 - Reserved Fatal and `FatalSyncFailed` storage.
 - Core counters and identifier domains.
 
@@ -197,97 +197,36 @@ Core stores a bounded number of typed values in preallocated inline storage size
 
 Core code uses no recursion. Every Core-owned loop within a turn has a configured bound. A run continues until Stop, Fatal, or finite identifier exhaustion; application code, Ports, encoders, and AuditWriters may still block or fail to return.
 
-## 6. Audit And State Evidence
+## 6. AuditLog
 
-### 6.1 AuditLog And AuditWriter
+The AuditLog is one globally ordered stream of mandatory evidence. It is not State, recovery authority, or a Command outbox.
 
-The AuditLog is one ordered queue of complete framed records retained by the Engine until synchronization succeeds.
+Core and Port infrastructure submit complete bounded records to one bounded multi-producer queue. Application code has no AuditLog access. Successful queue insertion establishes audit order; concurrent submissions may appear in either order.
 
-Kavod owns record order, framing, sequence numbers, integrity protection, pending capacity, and synchronization triggers. A configured AuditWriter receives the queued framed bytes and implements one declared synchronization contract.
+One AuditWorker processes accepted records in order and owns sequence assignment, framing, integrity protection, pending storage, and the AuditWriter. All AuditLog storage and terminal reserve are allocated before `RunStarted`.
 
-A successful synchronization:
+Every record type has one fixed synchronization policy, conceptually:
 
-```text
-covers the complete pending AuditLog queue through the trigger record
--> advances the Engine-observed synchronized frontier
--> clears the pending queue
+```rust
+enum AuditRecord<T> {
+    Sync(T),
+    NoSync(T),
+}
 ```
 
-Appending a record is not synchronization. A writer may physically persist bytes even when synchronization returns failure. Failure means only that Kavod did not observe success.
+`Sync(T)` appends `T` and then synchronizes the complete pending prefix through it. `NoSync(T)` appends `T` without synchronizing. The worker performs no automatic, periodic, or capacity-triggered synchronization.
 
-A custom AuditWriter is trusted infrastructure. Application code cannot observe writer mode or synchronization status.
+For example, RunStarted, EventAccepted, CommandsPrepared, and TurnCompleted synchronize; CommandAccepted and Port observations do not. Fatal uses the reserved terminal path. New record types follow the same rules.
 
-The AuditWriter contract must permit Kavod to synchronize a retained pending queue again after a failed synchronization without duplicating or reordering logical records. Exact storage mechanics remain an AuditWriter concern.
+Submission never blocks. A full or disconnected queue establishes Fatal. Encoding, framing, pending-capacity, writer, or synchronization failure also establishes Fatal. Records are never silently dropped, overwritten, or sampled, and producers never retry failed submissions.
 
-### 6.2 Records And Sync Triggers
+Normal execution does not wait for the AuditWorker. Synchronization does not authorize Core execution, and abrupt process destruction may lose an unsynchronized suffix.
 
-The semantic record set is:
+Pending records are retained until Kavod observes synchronization success. The AuditWriter must permit the same prefix to be submitted again without duplicating or reordering logical records. A writer may physically persist bytes even when synchronization reports failure; failure means only that Kavod did not observe success.
 
-| Record | Contents | Triggers synchronization |
-|---|---|---|
-| RunStarted | Run identity, frozen provenance, and initial State bytes | Yes |
-| EventAccepted | Complete Event envelope | Yes |
-| CommandsPrepared | Complete ordered current-turn Command intent | Yes |
-| CommandAccepted | One successful Command-inbox insertion | No |
-| StateEncoded | Requested final-State bytes | No |
-| TurnCompleted | Event index and Continue or Stop outcome | Yes |
-| Fatal | First Fatal cause and available current-turn progress | Yes, final attempt |
-| FatalSyncFailed | Error from failed final Fatal synchronization | No; returned in memory |
+A first-wins Fatal latch and terminal audit reserve exist outside ordinary queue capacity. Stop and Fatal close ordinary submission, use the reserve to submit Sync(TurnCompleted with Stop) or Sync(Fatal), wait for the worker to finish the accepted prefix and terminal synchronization, and join the worker before returning EngineExit.
 
-Exact binary encoding is undecided. Every record has a checked monotonic audit sequence and enough framing to recover record boundaries from one contiguous byte stream.
-
-The exhaustive synchronization policy is:
-
-| Trigger | Engine-observed success authorizes |
-|---|---|
-| RunStarted | Ready acceptance |
-| EventAccepted | `on_event` invocation |
-| CommandsPrepared | First current-turn Command insertion |
-| TurnCompleted | Next Event or successful Stop exit |
-| Fatal | Nothing; this is the one final synchronization attempt |
-
-Everything appended since the previous successful synchronization is included in the next trigger's synchronization.
-
-Authorization belongs to the specific synchronization attempt for its trigger. If that attempt fails, a later successful Fatal synchronization may preserve the bytes but never retroactively accepts the Event, authorizes Command insertion, completes the turn, or establishes a State checkpoint.
-
-### 6.3 State Evidence
-
-The Application supplies an audit encoder for State. Kavod does not define its format. It may be JSON, Arrow IPC, custom binary data, a digest, a projection, or another bounded representation.
-
-Kavod guarantees only that the encoder is invoked at the defined boundary and that successful TurnCompleted synchronization includes the exact bytes appended as StateEncoded. If the turn becomes Fatal before StateEncoded is appended, pre-encoded bytes are discarded. Kavod does not claim retained State bytes are complete, reversible, canonical, truthful, stable across builds, or sufficient to reconstruct State.
-
-Initial State encoding is mandatory and included in RunStarted.
-
-`ctx.sync_state()` requests one final-State encoding for the current turn:
-
-- It is idempotent within the turn.
-- It performs no immediate encoding or IO.
-- It captures State after normal handler return, including mutations after the call.
-- Encoding occurs before any current-turn Command insertion.
-- StateEncoded is appended only after every current-turn Command insertion succeeds.
-- StateEncoded becomes authoritative checkpoint evidence only with successful TurnCompleted synchronization.
-
-State encoding failure or bound exhaustion establishes Fatal before Command insertion.
-
-State evidence grants no replay, restoration, or continuation authority.
-
-### 6.4 Unsynchronized Fatal Evidence
-
-If final Fatal synchronization fails, Kavod appends FatalSyncFailed locally and returns the entire pending AuditLog queue without another AuditWriter call.
-
-The returned AuditBuffer is one bounded contiguous sequence of the exact complete framed bytes pending after the last Engine-observed successful synchronization. It contains:
-
-```text
-records already pending
--> Fatal
--> FatalSyncFailed
-```
-
-FatalSyncFailed was appended after the failed synchronization attempt and was not offered in another attempt.
-
-The AuditBuffer is not the complete run journal and is not a retry instruction. Some or all records offered during the failed synchronization may already exist in the writer.
-
-The concrete AuditBuffer type is undecided. Its backing storage is allocated before RunStarted and moved out of the consumed Engine without new Core allocation.
+If final Fatal synchronization fails, the worker appends FatalSyncFailed without another writer call and returns the bounded pending AuditBuffer and synchronization error. The buffer is not a complete journal or retry instruction; some or all of its records may already exist in the writer.
 
 ## 7. Startup And Ready
 
@@ -296,9 +235,7 @@ Engine construction validates the frozen Application, Port Slots, bindings, enco
 The startup sequence is:
 
 ```text
-encode initial State
--> append RunStarted
--> synchronize the complete pending AuditLog
+submit Sync(RunStarted)
 -> process Ready as Event index zero
 -> permit Port Event acceptance
 ```
@@ -309,7 +246,7 @@ No Port Event is accepted before the Ready turn completes. An Event caused by a 
 
 Ready means that Kavod can begin execution. It does not mean connected, authenticated, subscribed, reconciled, armed, or safe to trade.
 
-After construction succeeds, initial State encoding or RunStarted synchronization failure establishes Fatal. Ready is not invoked.
+RunStarted encoding or submission failure establishes Fatal and Ready is not invoked. Later AuditWorker failure follows the ordinary asynchronous Fatal path.
 
 ## 8. Event And Turn Processing
 
@@ -323,20 +260,19 @@ One selected Event follows this path:
 remove one Event from its Slot inbox
 -> inject it into AppEvent
 -> assign Event index and logical time
--> append EventAccepted
--> synchronize the complete pending AuditLog
+-> submit Sync(EventAccepted)
 -> invoke on_event once
 ```
 
-Event index is checked and never reused. Source Slot comes from the inbox, not the payload.
+Event index is checked and never reused. Source Slot comes from the inbox, not the payload. Successful EventAccepted submission establishes acceptance.
 
-Conversion, encoding, capacity, or EventAccepted synchronization failure establishes Fatal and invokes no handler. An accepted Event is never retried.
+Conversion, encoding, capacity, or EventAccepted submission failure establishes Fatal and invokes no handler. An accepted Event is never retried.
 
 The policy for selecting among nonempty Slot inboxes and the production of logical time belong to the Environment design and remain undecided.
 
 ### 8.2 Canonical Turn
 
-After EventAccepted synchronization, the Engine invokes `on_event` once.
+After successful EventAccepted submission, the Engine invokes `on_event` once without waiting for audit synchronization.
 
 Command staging during the handler writes immutable Commands and their complete bounded audit encodings into turn-local Core storage. It performs no Port insertion or IO. Each successfully staged Command receives the next checked turn-local ordinal. Encoding or staging failure establishes Fatal and no handler output is processed after return.
 
@@ -346,41 +282,34 @@ After normal handler return:
 inspect Outcome
 -> if Fatal(reason): establish Fatal
 -> if Stop with Commands: establish Fatal
--> encode final State if requested
--> reserve all remaining turn audit bytes and audit-sequence values
 -> if Commands exist:
      count required capacity per destination Slot
      verify every destination Command inbox has sufficient capacity
-     append CommandsPrepared with complete ordered intent
-     synchronize the complete pending AuditLog
+     submit Sync(CommandsPrepared) with complete ordered intent
      insert each Command into its destination inbox in ordinal order
-     append CommandAccepted after each success
--> append StateEncoded if requested
--> append TurnCompleted with Continue or Stop
--> synchronize the complete pending AuditLog
--> Continue to the next Event or return Stopped with AppState
+     submit NoSync(CommandAccepted) after each success
+-> if Continue: submit Sync(TurnCompleted with Continue) and admit the next Event
+-> if Stop: begin terminal finalization with Sync(TurnCompleted with Stop)
 ```
 
-Command-capacity preflight failure establishes Fatal before CommandsPrepared is appended and inserts no current-turn Command. CommandsPrepared synchronization failure also inserts no current-turn Command.
+Command-capacity preflight or CommandsPrepared submission failure establishes Fatal and inserts no current-turn Command.
 
-Because the Core is the sole producer, successful capacity preflight guarantees that its complete batch fits; concurrent Port consumption can only create more space. A full result during subsequent insertion is an invariant violation and panics. Any other Command-inbox insertion failure establishes Fatal. Earlier insertions remain accepted and their CommandAccepted records remain pending for Fatal synchronization. Later Commands are not attempted.
+Because the Core is the sole producer, successful capacity preflight guarantees that its complete batch fits; concurrent Port consumption can only create more space. A full result during subsequent insertion is an invariant violation and panics. Any other Command-inbox insertion or CommandAccepted submission failure establishes Fatal. Earlier insertions remain accepted; later Commands are not attempted.
 
-Before the first Command insertion, Kavod has reserved every required CommandAccepted, optional StateEncoded, and TurnCompleted record. After insertion begins, those local appends have no expected capacity or identifier failure path.
+TurnCompleted is submitted only after every current-turn Command insertion and CommandAccepted submission succeeds. Continue may admit a later Event after successful TurnCompleted submission without waiting for audit synchronization.
 
-TurnCompleted is appended only after every current-turn Command insertion succeeds. No later Event begins before the Engine observes TurnCompleted synchronization success.
-
-TurnCompleted with Stop is the final successful-run record. No additional successful terminal record or synchronization is performed.
+TurnCompleted with Stop is the final successful-run record. Stop then waits for AuditWorker terminal finalization.
 
 Stop only proves that the Application completed an output-free turn and requested exit. Processing of Commands accepted in earlier turns is an Application protocol obligation. Kavod does not inspect Command inbox emptiness or infer external quiescence.
 
 | Failure point | Result |
 |---|---|
-| Before EventAccepted sync | Handler is not invoked |
+| Before EventAccepted submission | Handler is not invoked |
 | During handler through explicit Fatal or checked Core failure | Staged Commands are not inserted |
 | During Command-capacity preflight | No current-turn Command is inserted |
-| Before CommandsPrepared sync | No current-turn Command is inserted |
-| During representable Command-inbox insertion failure | Earlier insertions remain accepted; later Commands are skipped |
-| During TurnCompleted sync | Inserted Commands remain accepted; successful turn completion is not established |
+| Before CommandsPrepared submission | No current-turn Command is inserted |
+| During Command insertion or CommandAccepted submission | Earlier insertions remain accepted; later Commands are skipped |
+| During TurnCompleted submission | Inserted Commands remain accepted; turn completion is not established |
 
 Every failure in this table establishes Fatal and follows Section 9.
 
@@ -415,7 +344,7 @@ enum FatalAudit<E> {
 
 Exact Rust representation is undecided. The semantics are not:
 
-- Stopped returns State after synchronized TurnCompleted with Stop.
+- Stopped returns State after the AuditWorker synchronizes TurnCompleted with Stop and terminates.
 - Fatal returns the first Fatal cause observed by Kavod and the State owned when execution stopped.
 - The Fatal cause retains its concrete application or Core error value where available; its exact sum type is undecided.
 - State is returned directly without a wrapper or validity classification.
@@ -424,17 +353,19 @@ Exact Rust representation is undecided. The semantics are not:
 
 ### 9.2 Fatal Sequence
 
-Once Fatal is observed, normal Engine execution ends. Kavod begins no subsequent Event acceptance, handler invocation, State encoding, Command preparation, Command insertion, or TurnCompleted operation.
+Once Fatal is observed, normal Engine execution ends. Kavod begins no subsequent Event acceptance, handler invocation, Command preparation, Command insertion, or TurnCompleted operation.
 
-Kavod cannot preempt an executing `on_event`. If Fatal is reported while application code runs, Fatal processing begins when control returns to Kavod. That handler's staged Commands and State-sync request are not processed.
+Kavod cannot preempt an executing `on_event`. If Fatal is reported while application code runs, Fatal processing begins when control returns to Kavod. That handler's staged Commands are not processed.
 
 The Fatal sequence is:
 
 ```text
 retain the first Fatal cause
+-> close ordinary audit submission
 -> suppress Commands not already inserted into Port inboxes
--> append Fatal to the pending AuditLog
--> call AuditWriter synchronization exactly once
+-> signal reserved Sync(Fatal) to the AuditWorker
+-> wait for the final synchronization attempt
+-> join the AuditWorker
 ```
 
 If synchronization succeeds:
@@ -465,7 +396,7 @@ append FatalSyncFailed to the pending AuditLog
 
 Fatal and FatalSyncFailed byte capacity and audit-sequence values are reserved before RunStarted and cannot be consumed by ordinary records.
 
-If an ordinary required synchronization failure establishes Fatal, Kavod retains that pending queue, appends Fatal, and uses the one final Fatal synchronization attempt described above.
+If ordinary writer synchronization failure establishes Fatal, the AuditWorker retains the pending prefix and uses the one final Fatal synchronization attempt described above.
 
 An authoritative host interrupt observed by Kavod establishes Fatal(HostInterrupt). Graceful external shutdown requests and simulation-ending requests must arrive through a declared Port as ordinary Events; the Application decides whether to return Stop.
 
