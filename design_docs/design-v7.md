@@ -22,7 +22,7 @@ Kavod's engineering approach is informed by NASA's Power of Ten, TigerBeetle's T
 | No steady-state Core allocation | Kavod allocates and validates all Core-managed backing storage before `RunStarted` |
 | Bounded local work | Core code uses no recursion or unbounded per-turn loop |
 | Checked arithmetic | Counts, lengths, capacities, and identities never wrap or silently saturate |
-| Explicit failure | Runtime failures that prevent safe continuation report Fatal |
+| Explicit failure | Runtime failures that prevent safe continuation submit Fatal reports; only the Engine establishes Fatal |
 | Assertions mean bugs | Panic is uncaught and outside Kavod semantics |
 | Defensive boundaries | Validate Core capacity and encoding before each irreversible Core action whenever knowable |
 | Evidence-driven engineering | Every bound and failure boundary must support direct and fault-injection testing |
@@ -51,7 +51,7 @@ Rust syntax in this document is illustrative. Concrete APIs, traits, derives, ma
 
 One Engine owns one run and its Application State. Only the Engine's Core may pass that State to application code, and at most one `on_event` invocation is active.
 
-One accepted Event creates one turn. A turn runs synchronously to completion or the Engine establishes Fatal at a checkpoint. Internal application helper calls are ordinary Rust program flow; Kavod does not register, schedule, or audit components, reducers, callbacks, or internal messages.
+One accepted Event creates one turn. A turn runs synchronously to completion or the Engine establishes Fatal at a semantic boundary. Internal application helper calls are ordinary Rust program flow; Kavod does not register, schedule, or audit components, reducers, callbacks, or internal messages.
 
 An accepted Event envelope contains:
 
@@ -120,7 +120,7 @@ The handler receives no Engine, Environment, AuditWriter, Port implementation, e
 |---|---|
 | Continue | Complete this turn and admit a later Event |
 | Stop | Complete this turn and return a successful Engine exit |
-| Fatal(reason) | Report an Application Fatal Reason and end normal execution at the post-handler checkpoint |
+| Fatal(reason) | Report an Application Fatal Reason and end normal execution at the post-handler boundary |
 
 Continue and Stop process the current turn identically. Continue admits a later Event; Stop does not.
 
@@ -218,7 +218,9 @@ enum AuditRecord<T> {
 
 For example, RunStarted, EventAccepted, CommandsPrepared, and TurnCompleted synchronize; CommandAccepted and Port observations do not. Fatal uses the reserved terminal path. New record types follow the same rules.
 
-Submission never blocks. Before Fatal finalization, a full or disconnected queue reports Fatal. Encoding, framing, pending-capacity, writer, or synchronization failure does the same. Final Fatal synchronization failure follows Section 9 instead of reporting another Fatal. Records are never silently dropped, overwritten, or sampled, and producers never retry failed submissions.
+Submission never blocks. Before Fatal finalization, a producer that observes a full or disconnected queue submits an Audit Fatal report. Encoding, framing, pending-capacity, writer, or synchronization failure does the same. These reports follow the single rule in Section 9; they do not establish Fatal. Final Fatal synchronization failure follows Section 9's finalization rule instead of reporting another Fatal. Records are never silently dropped, overwritten, or sampled, and producers never retry failed submissions.
+
+An AuditWorker that reports failure retains its pending state and terminal reserve for Engine-directed Fatal finalization.
 
 Normal execution does not wait for the AuditWorker. Synchronization does not authorize Core execution, and abrupt process destruction may lose an unsynchronized suffix.
 
@@ -246,7 +248,7 @@ No Port Event is accepted before the Ready turn completes. An Event caused by a 
 
 Ready means that Kavod can begin execution. It does not mean connected, authenticated, subscribed, reconciled, armed, or safe to trade.
 
-RunStarted encoding or submission failure reports Fatal and Ready is not invoked. Later AuditWorker failure follows the ordinary Fatal-reporting path.
+RunStarted encoding or submission failure reports Fatal and Ready is not invoked. After RunStarted reaches its success or failure boundary, the Engine processes Fatal reports before admitting Ready. Later AuditWorker failure follows the same reporting path.
 
 ## 8. Event And Turn Processing
 
@@ -267,6 +269,8 @@ remove one Event from its Slot inbox
 Event index is checked and never reused. Source Slot comes from the inbox, not the payload. Successful EventAccepted submission establishes acceptance.
 
 Conversion, encoding, capacity, or EventAccepted submission failure reports Fatal and invokes no handler. An accepted Event is never retried.
+
+Before removing the Event, the Engine processes Fatal reports at a semantic boundary. An empty boundary admits the complete Event action above. No boundary occurs between successful acceptance and handler invocation; a later report is processed after the handler returns.
 
 The policy for selecting among nonempty Slot inboxes and the production of logical time belong to the Environment design and remain undecided.
 
@@ -293,9 +297,11 @@ inspect Outcome
 -> if Stop: begin terminal finalization
 ```
 
+This flow elides the Section 9 boundaries before Command preparation, each Command insertion and evidence action, TurnCompleted, the next Event, and Stop terminal synchronization.
+
 Command-capacity preflight or CommandsPrepared submission failure reports Fatal and inserts no current-turn Command.
 
-Because the Core is the sole producer, successful capacity preflight guarantees that its complete batch fits; concurrent Port consumption can only create more space. A full result during subsequent insertion is an invariant violation and panics. Any other Command-inbox insertion or CommandAccepted submission failure reports Fatal. Earlier insertions remain accepted; later Commands are not attempted.
+Because the Core is the sole producer, successful capacity preflight guarantees that its complete batch fits; concurrent Port consumption can only create more space. A full result during subsequent insertion is an invariant violation and panics. Any other Command-inbox insertion or CommandAccepted submission failure reports Fatal. A successfully inserted Command remains handed off even if its CommandAccepted submission fails; later Commands are not attempted.
 
 TurnCompleted is submitted only after every current-turn Command insertion and CommandAccepted submission succeeds. Continue may admit a later Event after successful TurnCompleted submission without waiting for audit synchronization.
 
@@ -309,10 +315,10 @@ Stop proves only that the Application completed its current turn and requested e
 | During handler through explicit Fatal or checked Core failure | Staged Commands are not inserted |
 | During Command-capacity preflight | No current-turn Command is inserted |
 | Before CommandsPrepared submission | No current-turn Command is inserted |
-| During Command insertion or CommandAccepted submission | Earlier insertions remain accepted; later Commands are skipped |
+| During one Command insertion or CommandAccepted submission | Successfully inserted Commands remain handed off; later Commands are skipped |
 | During TurnCompleted submission | Inserted Commands remain accepted; turn completion is not established |
 
-Every failure in this table reports Fatal and follows Section 9.
+Every reportable failure in this table submits a report and follows Section 9. A synchronous Core failure ends the current action at its defined failure boundary; no later normal Core action begins before the next semantic boundary. Invariant failures panic under Section 1.
 
 ## 9. Fatal And Engine Exit
 
@@ -320,27 +326,36 @@ Fatal is the permanent failure disposition of a started run. There is one Fatal 
 
 ### 9.1 Reporting And Establishment
 
-All Fatal sources submit bounded reports to one bounded Fatal inbox. Successful insertion establishes report order. The first report is the primary cause and wakes the Engine. Later reports are retained as secondary causes up to the configured capacity. Exhaustion sets `secondary_truncated`; it does not block or create another Fatal.
+> Reporters latch; boundaries decide; admitted work finishes.
 
-Only the Engine establishes Fatal. It checks the Fatal inbox before:
+All Fatal sources, including Engine code, Context operations, Ports, the Environment, the AuditWorker, and the host, submit bounded reports to one run-scoped Fatal inbox. Reporting never establishes Fatal, starts finalization, or preempts an admitted Core action. Successful insertion establishes report order. The first report is the primary cause. Later reports are retained as secondary causes up to the configured capacity. A full-inbox report commits only `secondary_truncated` and follows the same closure ordering; it does not block or create another Fatal.
 
-- Event acceptance.
-- Handler invocation.
-- Processing a returned Outcome.
-- `CommandsPrepared`.
-- Each Command handoff.
-- `TurnCompleted`.
-- Returning Stopped.
+Only the Engine establishes Fatal. Before beginning each Core action, it processes the Fatal inbox at a semantic boundary. The boundary atomically does exactly one of two things:
 
-At a checkpoint that observes a report, the Engine atomically closes the Fatal inbox and freezes its contents. A concurrent report either commits before closure or observes that Fatal is already established. The primary cause determines the Engine outcome; secondary causes are diagnostic only.
+- If a report has committed, close the inbox, freeze its contents, and establish Fatal. The next action does not begin.
+- If no report has committed, admit exactly one following Core action. Admission of the final Stopped action atomically closes the inbox as Stopped.
 
-A report arriving after a checkpoint takes effect at the next checkpoint. An operation admitted by the previous checkpoint may reach its ordinary result boundary. Fatal reporting cannot preempt `on_event`.
+A report committed after admission is processed at the next boundary. The admitted action reaches its defined success or failure boundary before another action is admitted. If Engine code detects a failure, it submits a report and begins no later normal action before that boundary. An idle Engine processes committed reports before waiting again or admitting an Event; how it is made runnable is an Environment mechanism with no Fatal authority.
 
-Before returning Stopped, the Engine closes the Fatal inbox even when it is empty. A concurrent report either commits first and causes Fatal or observes that the run has Stopped.
+These boundaries admit:
+
+- RunStarted submission.
+- Event acceptance and, if acceptance succeeds, one handler invocation through normal return, including processing its Outcome and submitting any Application Fatal report.
+- Current-turn Command preparation through CommandsPrepared submission.
+- One Command insertion and, if insertion succeeds, its CommandAccepted submission.
+- TurnCompleted submission.
+- Stop terminal synchronization before the final Stopped boundary.
+- Final Stopped commitment and EngineExit.
+
+After normal handler return, `Outcome::Fatal` submits its Application report before the post-handler boundary. Reports already committed retain their earlier order. No staged output is processed when that boundary establishes Fatal.
+
+At a boundary that establishes Fatal, a concurrent report either commits before closure or observes that Fatal is already established. The primary cause determines the Engine outcome; secondary causes are diagnostic only.
+
+Before returning Stopped, the Engine processes one final semantic boundary. A concurrent report either commits first and causes Fatal or loses to final Stopped admission and observes that the run has Stopped.
 
 Once Fatal is established:
 
-- No later normal Core operation begins.
+- No later normal Core action begins.
 - Commands not yet admitted for handoff are discarded.
 - Accepted Events, handed-off Commands, submitted audit records, and State mutations remain real.
 - Kavod performs no rollback, retry, or continuation.
@@ -362,7 +377,7 @@ close ordinary audit submission
 
 Reserved storage and fallback encoding make construction of the terminal Fatal record infallible. A violation of that guarantee is an invariant failure and panics.
 
-If synchronization succeeds, `audit` is `Synced`. If it fails, the worker appends `FatalSyncFailed` to the pending in-memory buffer without another writer call and returns:
+Writer or synchronization failure during Fatal finalization follows the terminal failure path below and submits no report. If final synchronization succeeds, `audit` is `Synced`. If it fails, the worker appends `FatalSyncFailed` to the pending in-memory buffer without another writer call and returns:
 
 ```rust
 FatalAudit::Unsynchronized {
@@ -373,7 +388,7 @@ FatalAudit::Unsynchronized {
 
 The pending buffer contains records whose synchronization Kavod has not observed, including the terminal Fatal record and `FatalSyncFailed`. It is not necessarily the complete run AuditLog, and some or all of it may already exist in the writer.
 
-Finalization failure never replaces the primary cause or begins another Fatal sequence. Failure while finalizing Stop reports Fatal and follows this section. Stopped is returned only after TurnCompleted with Stop synchronizes successfully and the AuditWorker terminates.
+Finalization failure never replaces the primary cause or begins another Fatal sequence. Failure while preparing Stop submits a Fatal report and is processed at the next semantic boundary. Stopped is established only after TurnCompleted with Stop synchronizes successfully and all reportable Stop work completes. The AuditWorker remains available for Fatal finalization until that boundary, then terminates and joins before EngineExit.
 
 An authoritative host interrupt reports Fatal(HostInterrupt). Graceful external shutdown requests and simulation-ending requests must arrive through a declared Port as ordinary Events; the Application decides whether to return Stop.
 
