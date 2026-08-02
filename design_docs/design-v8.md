@@ -185,19 +185,36 @@ trait Environment {
 
 `Engine<A, E>` requires equal Application and Environment Event and Command types.
 
-`start` is transactional. Success publishes a running Environment and returns Ready's logical time. Failure leaves no run-scoped activity live.
+The legal lifecycle is:
 
-`next_event` waits until it returns one authoritative Event with its logical time, or one Error. It owns selection, waiting, wakeups, dequeue, source injection, and time capture. The Engine validates the time, assigns the next Event index, and constructs the EventEnvelope.
+```text
+Unstarted --start Err--------------------------> StartFailed
+Unstarted --start Ok---------------------------> Running
+Running   --next_event Ok / command_batch Ok---> Running
+Running   --stop Ok----------------------------> Stopped
+Running   --fallible operation Err-------------> Failed
+Running or Failed --abort----------------------> Aborted
+```
 
-`command_batch` is nonblocking. It consumes and attempts Commands once in batch order, stopping at the first failure. `Ok` means every Command reached its destination inbox. Its Error identifies the exact successfully inserted prefix; that prefix remains handed off, and the failed Command and suffix are discarded without handoff.
+The Engine invokes one Environment method at a time. `start`, `stop`, and `abort` are each attempted at most once. `StartFailed`, `Stopped`, and `Aborted` are safe to drop. After `Failed`, only `abort` is valid. Other call sequences are invariant bugs.
 
-`stop` performs aggregate graceful shutdown. Success quiesces all Environment activity and failure production before returning.
+Every successful operation result, each Command handoff, and the first runtime Environment failure has one commitment point in one Environment order. A committed result is irrevocable. A failure committed before the active operation's result makes that operation return the Error; a failure committed afterward is returned by the next fallible Environment operation. Thus a successfully returned Event is not revoked by a later Environment failure and reaches its handler after successful Engine acceptance, while a failure that wins first preempts undelivered Events.
 
-`abort` initiates immediate infrastructure termination without invoking application code or waiting for graceful cleanup. It returns when the Engine may safely drop the Environment and is valid after any successful `start`, including partial `stop`.
+While Running, the Environment retains its first runtime failure, closes future Event delivery and Command handoff, and wakes a blocked `next_event`. Later failures do not replace it.
 
-Every Environment operation preserves its configured bounds. Runtime resource exhaustion and asynchronous Port failure are represented by Environment errors. Successfully offered Events and inserted Commands are never silently overwritten, coalesced, or duplicated.
+`start` is transactional. `Ok(time)` publishes Running and freezes Ready's logical time. `Err` leaves no run-scoped activity live.
 
-A live Environment may use concurrency. A simulated Environment must produce deterministic results from deterministic configuration and prior Command batches. Neither may invoke the application handler.
+`next_event` owns waiting, selection, source authority, and time capture. It waits until it returns one authoritative `(Event, LogicalTime)` result or one Error. The pair commits atomically. Successful `start` and `next_event` times form a nondecreasing sequence. The Engine validates the time, assigns the next Event index, and constructs the EventEnvelope.
+
+`command_batch` consumes a nonempty batch and attempts Commands at most once in order, stopping at the first failure without waiting for future capacity or processing. Each successful handoff commits before the next attempt. `Ok` commits with the final handoff and means the complete batch reached its destination inboxes. Its Error identifies the exact proper prefix handed off before the failure; the failed Command and suffix are discarded without handoff. A previously committed failure produces an empty prefix.
+
+`stop` closes Event delivery and Command handoff, resolves private graceful shutdown, and quiesces all Environment activity and failure production. A pending failure makes it return `Err`; `Ok` establishes Stopped. The Environment owns shutdown disposition of handed-off Commands.
+
+`abort` closes Engine-facing interfaces and initiates private termination. It invokes no application code and returns when the Environment is safe to drop; any continuing cleanup is Environment-owned and cannot use Engine-facing interfaces.
+
+Every Environment operation preserves its configured bounds. Runtime resource exhaustion and asynchronous Port failure are Environment errors. Successfully offered Events and handed-off Commands are never silently overwritten, coalesced, or duplicated.
+
+A live Environment may use concurrency. A simulated Environment produces deterministic results from frozen configuration and prior call history; normal simulation completion is an application-defined External Event. Neither Environment mode may invoke the application handler.
 
 ## 6. Audit
 
@@ -386,8 +403,6 @@ stop normal execution
 
 Finalization failure does not replace the primary cause. No normal or graceful action begins after Fatal. EngineExit returns the current State; State mutations, consumed Events, inserted Command prefixes, and accepted audit records remain real.
 
-`EngineExit::Stopped` is returned only after successful Environment stop and successful `TurnCompleted(Stop)` submission.
-
 ## 8. Bounds And Failure Boundary
 
 Engine configuration bounds at least:
@@ -400,11 +415,11 @@ Engine configuration bounds at least:
 
 Each Environment separately bounds its queues, work units, clocks, counters, errors, and mode-specific resources.
 
-Every configured bound has one accounting owner and is validated before run-scoped activity. Encoded and pending byte bounds include framing overhead. All capacity and identity arithmetic is checked before use. Exhaustion establishes Fatal before corrupting one item, record, or identity. Every Kavod-owned active loop has a configured iteration bound; blocking waits are not active loops.
+Every configured bound has one accounting owner and is validated before run-scoped activity. Encoded and pending byte bounds include framing overhead. All capacity and identity arithmetic is checked before use. Exhaustion is detected by its accounting owner before corrupting one item, record, or identity. Every Kavod-owned active loop has a configured iteration bound; blocking waits are not active loops.
 
 Bounds apply to the resource named by configuration. Values with transitive owned memory remain governed by their owning Application, Environment, or AuditWriter.
 
-Kavod semantics advance only when called application, Environment, and AuditWriter operations return. Panic and process termination end the Engine semantic model.
+Engine control flow advances only when the active application, Environment, or AuditWriter call returns. Panic and process termination end the Engine semantic model.
 
 ## 9. Verification Obligations
 
@@ -420,4 +435,4 @@ Tests must establish:
 - Audit ordering, synchronization, pending retention, and failed finalization.
 - Every configured resource and identifier boundary.
 - Equal Application behavior under equal timed Event and Environment-result traces across live and simulated Environments.
-- Every required operation failure before and after its irreversible boundary.
+- Failure behavior on both sides of every operation-result commitment point.
