@@ -755,4 +755,4 @@ Kavod enforces its invariants; everything below is trusted — upheld by a named
 | `BOUND-SIZING`: `max_record_bytes` fits the largest stageable batch | Deployment configuration | Config review; construction proves only the fallback `Fatal` record |
 | Transitive memory bounds of owned values (§1.6) | Value owner | Owner-defined |
 
-Kavod-side verification conventions: every invariant ID maps to at least one test named for it; Journal and sink failures are exercised through memory sinks and failing writers (§7.2); and the determinism contract (§1.3) is checked by running one conformance trace suite against both Environments and comparing every Core-owned discriminant.
+Kavod-side verification conventions: Journal and sink failures are exercised through memory sinks and failing writers (§7.2); and the determinism contract (§1.3) is checked by running one conformance trace suite against both Environments and comparing every Core-owned discriminant.
