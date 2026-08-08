@@ -459,30 +459,3 @@ Every Kavod-owned configuration bound — `EngineConfig`'s fields and Environmen
 | `BOUND-BLOCKING` | Blocking waits are not active loops and imply no elapsed-time bound; work inside user-defined code — handlers, Ports, serializers, writers, callbacks, destructors — is outside Kavod's accounting and trusted to be bounded. |
 | `BOUND-INDEX` | `max_turns` may equal `u64::MAX`; the pre-acquisition turn check makes `EventIndex` overflow unreachable, so overflow is an invariant panic, not an Engine outcome. |
 
-## 9. Verification
-
-Three rules generate the test plan from this document:
-
-1. **Every invariant ID has at least one test that cites it**, exercised at ordinary and boundary values — excepting `PANIC-ENGINE` and `PANIC-ABORT`, which define unsupported behavior rather than testable guarantees.
-2. **Every commitment point is tested on both sides**: failure injected immediately before must leave nothing committed; failure injected immediately after must leave the commitment real and un-rolled-back.
-3. **Every bound is tested below, at, and above its limit**, and every fallible boundary — Journal encode, bound, write, zero-progress, `Interrupted`, flush; every Environment operation; every Port callback — gets direct fault injection.
-
-Obligations not derivable from a single invariant:
-
-- `ports!` expansion equals the hand-written sums in Rust variants and serialized bytes.
-- Per-Slot routing selects the semantically correct destination (the compiler cannot check this).
-- Repeated equal traces: within one Environment type, equal Journal bytes and typed `EngineExit`s; across modes, equal record sequences and Core-owned exit discriminants (Section 1.2).
-- Exact Journal record sequences for startup, `Continue`, `Stop`, and every Fatal boundary in Section 6's tables, including the `Fatal` fallback encoding path.
-- Construction failure occurs before State creation and invokes no Application or Environment method.
-- Live race linearizations: Event availability against first failure; Port completion against the transition out of Running.
-
-## Appendix A. Deltas from v9
-
-| v9 | v10 |
-|---|---|
-| Engineering thesis as influence table plus scattered principles | Eight axioms as the explicit derivation base; section invariants restricted to non-derivable facts |
-| `Display` bounds on `FatalReason`, Environment and Port Errors; bounded Fatal message buffer, `max_fatal_message_bytes`, UTF-8 truncation, escaping-fits-envelope construction proof, `fmt::Error` fallback | `Serialize` bounds; structured `Fatal { cause }` record; one-tier fallback to the cause's variant name; `RecordBoundTooSmall` construction check; no `Display` requirement anywhere |
-| Journal owns the `Record` enum and Engine record types | Journal is a policy-free bounded JSONL writer with generic `commit<R: Serialize>`; the Engine owns the record schema |
-| `FatalKind`, `NormalizedExit`, `FatalClass`, `JournalFailureKind`, `CoreFailureKind` enums | Derived: the `Fatal` record's fallback uses the `FatalCause` variant name; cross-mode equality is stated over Core-owned discriminants in prose |
-| `JournalFailure` variants embedding record kind per shape | `JournalFailure { record: RecordKind, error: JournalError }`: the Journal reports mechanism, the Engine adds record context |
-| Invariant catalog (Section 9) duplicating section tables; verification matrix restating invariants | Three generative verification rules plus only non-derivable obligations |
