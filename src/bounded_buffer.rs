@@ -19,34 +19,67 @@ impl<T> BoundedBuffer<T> {
     }
 
     pub(crate) fn capacity(&self) -> usize {
-        self.assert_valid_len();
         self.buf.len()
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.assert_valid_len();
         self.len
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.assert_valid_len();
         self.len == 0
     }
 
     /// Pushes `value` when space remains.
     ///
-    /// Returns `None` when the buffer consumed `value`, or returns `Some(value)`
+    /// Returns `Ok(())` when the buffer consumed `value`, or returns `Err(value)`
     /// unchanged when the buffer is full.
-    pub(crate) fn push(&mut self, value: T) -> Option<T> {
+    pub(crate) fn push(&mut self, value: T) -> Result<(), T> {
         self.assert_valid_len();
 
         if self.len == self.buf.len() {
-            return Some(value);
+            return Err(value);
         }
 
         self.buf[self.len].write(value);
         self.len += 1;
+        Ok(())
+    }
+
+    /// Pushes values from `iter` until the buffer is full.
+    ///
+    /// Returns `None` when every value from `iter` was pushed, or `Some`
+    /// holding the values that did not fit, in order, when the buffer filled
+    /// up first — starting with the value that was rejected and continuing
+    /// with whatever `iter` had left. As with `push`, a value that does not
+    /// fit is handed back to the caller rather than dropped.
+    pub(crate) fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Option<Vec<T>> {
+        let mut iter = iter.into_iter();
+
+        for value in iter.by_ref() {
+            if let Err(value) = self.push(value) {
+                let mut leftover = vec![value];
+                leftover.extend(iter);
+                return Some(leftover);
+            }
+        }
+
         None
+    }
+
+    /// Removes and returns the most recently pushed value, if any.
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.assert_valid_len();
+
+        if self.len == 0 {
+            return None;
+        }
+
+        self.len -= 1;
+
+        // `buf[len]` was initialized by `push` and is now excluded from the
+        // initialized prefix `0..len`, so reading it out here cannot double-drop.
+        Some(unsafe { self.buf[self.len].assume_init_read() })
     }
 
     pub(crate) fn clear(&mut self) {
@@ -65,11 +98,7 @@ impl<T> BoundedBuffer<T> {
     }
 
     pub(crate) fn as_slice(&self) -> &[T] {
-        self.assert_valid_len();
-
-        // `push` initializes exactly the prefix `0..len`; `clear` and Drop
-        // remove elements only from that initialized prefix.
-        unsafe { slice::from_raw_parts(self.buf.as_ptr().cast::<T>(), self.len) }
+        self
     }
 
     fn assert_valid_len(&self) {
@@ -88,8 +117,6 @@ impl<T> Drop for BoundedBuffer<T> {
 
 impl<T> fmt::Debug for BoundedBuffer<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.assert_valid_len();
-
         formatter
             .debug_struct("BoundedBuffer")
             .field("capacity", &self.buf.len())
@@ -98,29 +125,81 @@ impl<T> fmt::Debug for BoundedBuffer<T> {
     }
 }
 
+impl<T> core::ops::Deref for BoundedBuffer<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.assert_valid_len();
+
+        // `push` initializes exactly the prefix `0..len`; `clear` and Drop
+        // remove elements only from that initialized prefix.
+        unsafe { slice::from_raw_parts(self.buf.as_ptr().cast::<T>(), self.len) }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a BoundedBuffer<T> {
+    type Item = &'a T;
+    type IntoIter = slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// A consuming iterator over a [`BoundedBuffer`], yielding elements in the
+/// reverse of push order (LIFO) — the same order as repeated
+/// [`BoundedBuffer::pop`] calls.
+pub(crate) struct IntoIter<T> {
+    buffer: BoundedBuffer<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.buffer.pop()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.buffer.len(), Some(self.buffer.len()))
+    }
+}
+
+impl<T> ExactSizeIterator for IntoIter<T> {}
+
+impl<T> IntoIterator for BoundedBuffer<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    /// Consumes the buffer, yielding elements in the reverse of push order (LIFO).
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { buffer: self }
+    }
+}
+
 impl std::io::Write for BoundedBuffer<u8> {
+    /// Writes as many leading bytes of `bytes` as remaining capacity allows.
+    ///
+    /// Per the `Write::write` contract, it is not an error for fewer bytes to
+    /// be written than requested; this returns `Ok(0)` once the buffer is
+    /// full rather than erroring. Callers that need all-or-nothing behavior
+    /// should use `write_all`, whose default implementation turns a `write`
+    /// that makes no progress into a `WriteZero` error.
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.assert_valid_len();
 
+        // `remaining` bounds `written` above, so `end` cannot exceed
+        // `self.buf.len()` and cannot overflow.
         let remaining = self.buf.len() - self.len;
-        if bytes.len() > remaining {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "bounded buffer capacity exceeded",
-            ));
-        }
-
-        let end = self
-            .len
-            .checked_add(bytes.len())
-            .expect("bounded buffer length overflow");
+        let written = bytes.len().min(remaining);
+        let end = self.len + written;
 
         for (slot, byte) in self.buf[self.len..end].iter_mut().zip(bytes) {
             slot.write(*byte);
         }
 
         self.len = end;
-        Ok(bytes.len())
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -140,6 +219,14 @@ mod tests {
 
     use super::*;
 
+    /// Invariant: `BoundedBuffer<T>` is `Send`/`Sync` whenever `T` is; this compiles or it doesn't.
+    #[allow(dead_code)]
+    fn assert_send_sync<T: Send + Sync>() {
+        fn is_send_sync<U: Send + Sync>() {}
+        is_send_sync::<BoundedBuffer<T>>();
+    }
+
+    #[derive(Debug)]
     struct DropProbe {
         drops: Rc<Cell<usize>>,
     }
@@ -193,6 +280,25 @@ mod tests {
 
             assert!(panic.is_err());
         }
+
+        /// Invariant: The overflow check also applies to multi-byte element types, not
+        /// just the `usize::MAX`/`u8` edge case.
+        #[test]
+        fn new_rejects_capacity_that_overflows_layout_for_a_multi_byte_element() {
+            let panic = catch_unwind(|| BoundedBuffer::<u64>::new(usize::MAX / 4));
+
+            assert!(panic.is_err());
+        }
+
+        /// Invariant: Zero-sized elements never overflow the allocation layout, so even the
+        /// largest capacity succeeds.
+        #[test]
+        fn new_accepts_maximum_capacity_for_zero_sized_elements() {
+            let buffer = BoundedBuffer::<()>::new(usize::MAX);
+
+            assert_eq!(buffer.capacity(), usize::MAX);
+            assert_eq!(buffer.len(), 0);
+        }
     }
 
     mod bounded_buffer_push_capacity_and_order {
@@ -203,9 +309,9 @@ mod tests {
         fn push_preserves_non_copy_value_order() {
             let mut buffer = BoundedBuffer::new(3);
 
-            assert!(buffer.push(String::from("first")).is_none());
-            assert!(buffer.push(String::from("second")).is_none());
-            assert!(buffer.push(String::from("third")).is_none());
+            assert!(buffer.push(String::from("first")).is_ok());
+            assert!(buffer.push(String::from("second")).is_ok());
+            assert!(buffer.push(String::from("third")).is_ok());
 
             let expected = [
                 String::from("first"),
@@ -224,14 +330,14 @@ mod tests {
                 let mut buffer = BoundedBuffer::new(capacity);
 
                 for value in 0..capacity {
-                    assert_eq!(buffer.push(value), None);
+                    assert_eq!(buffer.push(value), Ok(()));
                 }
 
                 assert_eq!(buffer.len(), capacity);
                 for (actual, expected) in buffer.as_slice().iter().zip(0..capacity) {
                     assert_eq!(*actual, expected);
                 }
-                assert_eq!(buffer.push(capacity), Some(capacity));
+                assert_eq!(buffer.push(capacity), Err(capacity));
                 for (actual, expected) in buffer.as_slice().iter().zip(0..capacity) {
                     assert_eq!(*actual, expected);
                 }
@@ -244,9 +350,154 @@ mod tests {
             let mut buffer = BoundedBuffer::new(0);
             let value = String::from("not consumed");
 
-            assert_eq!(buffer.push(value), Some(String::from("not consumed")));
+            assert_eq!(buffer.push(value), Err(String::from("not consumed")));
             assert_eq!(buffer.len(), 0);
             assert!(buffer.is_empty());
+        }
+    }
+
+    mod bounded_buffer_extend {
+        use super::*;
+
+        /// Invariant: When every value fits, `extend` consumes all of `iter`
+        /// and reports no leftover.
+        #[test]
+        fn extend_appends_every_value_when_it_all_fits() {
+            let mut buffer = BoundedBuffer::new(5);
+
+            let leftover = buffer.extend([1, 2, 3]);
+
+            assert_eq!(leftover, None);
+            assert_eq!(buffer.as_slice(), &[1, 2, 3]);
+        }
+
+        /// Invariant: When the buffer fills up partway through, `extend`
+        /// pushes what fits and hands back every value that did not, in
+        /// order, rather than dropping any of them.
+        #[test]
+        fn extend_returns_leftover_values_in_order_once_full() {
+            let mut buffer = BoundedBuffer::new(2);
+
+            let leftover = buffer.extend([1, 2, 3, 4, 5]);
+
+            assert_eq!(buffer.as_slice(), &[1, 2]);
+            assert_eq!(leftover, Some(vec![3, 4, 5]));
+        }
+
+        /// Invariant: Extending an already-full buffer returns every value
+        /// from `iter` as leftover without mutating the buffer.
+        #[test]
+        fn extend_on_full_buffer_returns_the_entire_iterator() {
+            let mut buffer = BoundedBuffer::new(1);
+            buffer.push(1).unwrap();
+
+            let leftover = buffer.extend([2, 3, 4]);
+
+            assert_eq!(buffer.as_slice(), &[1]);
+            assert_eq!(leftover, Some(vec![2, 3, 4]));
+        }
+
+        /// Invariant: Extending with an empty iterator is a no-op that
+        /// reports no leftover.
+        #[test]
+        fn extend_with_empty_iterator_is_a_no_op() {
+            let mut buffer = BoundedBuffer::<u8>::new(3);
+
+            let leftover = buffer.extend(Vec::new());
+
+            assert_eq!(leftover, None);
+            assert!(buffer.is_empty());
+        }
+
+        /// Invariant: A value that does not fit is handed back to the caller
+        /// through the leftover list rather than dropped, just as `push`
+        /// hands back a rejected value.
+        #[test]
+        fn extend_never_drops_values_that_do_not_fit() {
+            let drops = Rc::new(Cell::new(0));
+            let mut buffer = BoundedBuffer::new(1);
+
+            let leftover = buffer
+                .extend([drop_probe(&drops), drop_probe(&drops)])
+                .unwrap();
+            assert_eq!(drops.get(), 0);
+            assert_eq!(leftover.len(), 1);
+
+            drop(leftover);
+            assert_eq!(drops.get(), 1);
+        }
+    }
+
+    mod bounded_buffer_pop {
+        use super::*;
+
+        /// Invariant: `pop` removes values in the reverse of push order (LIFO).
+        #[test]
+        fn pop_returns_values_in_reverse_push_order() {
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+            buffer.push(3).unwrap();
+
+            assert_eq!(buffer.pop(), Some(3));
+            assert_eq!(buffer.pop(), Some(2));
+            assert_eq!(buffer.pop(), Some(1));
+            assert_eq!(buffer.pop(), None);
+            assert_eq!(buffer.len(), 0);
+        }
+
+        /// Invariant: Popping an empty buffer returns `None` and never panics.
+        #[test]
+        fn pop_on_empty_buffer_returns_none() {
+            let mut buffer = BoundedBuffer::<u8>::new(2);
+
+            assert_eq!(buffer.pop(), None);
+            assert_eq!(buffer.pop(), None);
+        }
+
+        /// Invariant: A slot freed by `pop` is reusable by a subsequent `push`.
+        #[test]
+        fn push_after_pop_reuses_the_freed_slot() {
+            let mut buffer = BoundedBuffer::new(2);
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+
+            assert_eq!(buffer.pop(), Some(2));
+            assert_eq!(buffer.push(3), Ok(()));
+            assert_eq!(buffer.push(4), Err(4));
+            assert_eq!(buffer.as_slice(), &[1, 3]);
+        }
+
+        /// Invariant: `pop` transfers ownership out exactly once; the buffer never drops a
+        /// popped value on its own destruction.
+        #[test]
+        fn pop_transfers_ownership_without_a_later_double_drop() {
+            let drops = Rc::new(Cell::new(0));
+
+            {
+                let mut buffer = BoundedBuffer::new(2);
+                buffer.push(drop_probe(&drops)).unwrap();
+                buffer.push(drop_probe(&drops)).unwrap();
+
+                let popped = buffer.pop().unwrap();
+                assert_eq!(drops.get(), 0);
+
+                drop(popped);
+                assert_eq!(drops.get(), 1);
+            }
+
+            assert_eq!(drops.get(), 2);
+        }
+
+        /// Invariant: `pop` operates on the same cursor as the `Write` impl, so it can remove
+        /// the most recently written byte.
+        #[test]
+        fn pop_removes_the_most_recently_written_byte() {
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.write_all(b"ab").unwrap();
+
+            assert_eq!(buffer.pop(), Some(b'b'));
+            assert_eq!(buffer.as_slice(), b"a");
         }
     }
 
@@ -293,7 +544,7 @@ mod tests {
             {
                 let mut buffer = BoundedBuffer::new(3);
                 for _ in 0..3 {
-                    assert!(buffer.push(drop_probe(&drops)).is_none());
+                    assert!(buffer.push(drop_probe(&drops)).is_ok());
                 }
 
                 buffer.clear();
@@ -313,8 +564,8 @@ mod tests {
 
             {
                 let mut buffer = BoundedBuffer::new(3);
-                assert!(buffer.push(drop_probe(&drops)).is_none());
-                assert!(buffer.push(drop_probe(&drops)).is_none());
+                assert!(buffer.push(drop_probe(&drops)).is_ok());
+                assert!(buffer.push(drop_probe(&drops)).is_ok());
             }
 
             assert_eq!(drops.get(), 2);
@@ -326,10 +577,8 @@ mod tests {
             let drops = Rc::new(Cell::new(0));
             let mut buffer = BoundedBuffer::new(1);
 
-            assert!(buffer.push(drop_probe(&drops)).is_none());
-            let rejected = buffer
-                .push(drop_probe(&drops))
-                .expect("full buffer must return its rejected value");
+            assert!(buffer.push(drop_probe(&drops)).is_ok());
+            let rejected = buffer.push(drop_probe(&drops)).unwrap_err();
             assert_eq!(drops.get(), 0);
 
             drop(rejected);
@@ -369,7 +618,7 @@ mod tests {
                         panic_on_drop: false,
                         has_panicked: Rc::clone(&has_panicked),
                     })
-                    .is_none()
+                    .is_ok()
             );
             assert!(
                 buffer
@@ -378,7 +627,7 @@ mod tests {
                         panic_on_drop: true,
                         has_panicked: Rc::clone(&has_panicked),
                     })
-                    .is_none()
+                    .is_ok()
             );
 
             let panic = catch_unwind(AssertUnwindSafe(|| buffer.clear()));
@@ -390,6 +639,37 @@ mod tests {
             buffer.clear();
             assert_eq!(drops.get(), 2);
         }
+
+        /// Invariant: Zero-sized elements are still dropped by `pop` and `clear`,
+        /// exactly once, even though they occupy no storage.
+        #[test]
+        fn zero_sized_element_with_drop_is_dropped_exactly_once() {
+            thread_local! {
+                static DROPS: Cell<usize> = const { Cell::new(0) };
+            }
+
+            #[derive(Debug)]
+            struct ZstDropProbe;
+
+            impl Drop for ZstDropProbe {
+                fn drop(&mut self) {
+                    DROPS.with(|drops| drops.set(drops.get() + 1));
+                }
+            }
+
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.push(ZstDropProbe).unwrap();
+            buffer.push(ZstDropProbe).unwrap();
+            buffer.push(ZstDropProbe).unwrap();
+
+            let popped = buffer.pop().unwrap();
+            DROPS.with(|drops| assert_eq!(drops.get(), 0));
+            drop(popped);
+            DROPS.with(|drops| assert_eq!(drops.get(), 1));
+
+            buffer.clear();
+            DROPS.with(|drops| assert_eq!(drops.get(), 3));
+        }
     }
 
     mod bounded_buffer_slice_view {
@@ -400,10 +680,10 @@ mod tests {
         fn zero_sized_elements_respect_capacity_and_slice_length() {
             let mut buffer = BoundedBuffer::new(3);
 
-            assert_eq!(buffer.push(()), None);
-            assert_eq!(buffer.push(()), None);
-            assert_eq!(buffer.push(()), None);
-            assert_eq!(buffer.push(()), Some(()));
+            assert_eq!(buffer.push(()), Ok(()));
+            assert_eq!(buffer.push(()), Ok(()));
+            assert_eq!(buffer.push(()), Ok(()));
+            assert_eq!(buffer.push(()), Err(()));
             assert_eq!(buffer.as_slice(), &[(), (), ()]);
         }
 
@@ -414,7 +694,7 @@ mod tests {
             struct Aligned(u8);
 
             let mut buffer = BoundedBuffer::new(2);
-            assert!(buffer.push(Aligned(7)).is_none());
+            assert!(buffer.push(Aligned(7)).is_ok());
 
             let values = buffer.as_slice();
             assert_eq!(values[0].0, 7);
@@ -437,28 +717,70 @@ mod tests {
             assert_eq!(buffer.as_slice(), b"abcde");
         }
 
-        /// Invariant: An oversized write fails atomically with WriteZero and preserves prior data.
+        /// Invariant: A write beyond remaining capacity writes only what fits and reports the
+        /// partial count, per the `Write::write` contract.
         #[test]
-        fn oversized_write_returns_write_zero_without_partial_append() {
+        fn write_beyond_remaining_capacity_writes_only_what_fits() {
             let mut buffer = BoundedBuffer::new(5);
             buffer.write_all(b"ab").unwrap();
 
-            let error = buffer.write(b"cdef").unwrap_err();
+            let written = buffer.write(b"cdef").unwrap();
 
-            assert_eq!(error.kind(), io::ErrorKind::WriteZero);
-            assert_eq!(buffer.len(), 2);
-            assert_eq!(buffer.as_slice(), b"ab");
+            assert_eq!(written, 3);
+            assert_eq!(buffer.len(), 5);
+            assert_eq!(buffer.as_slice(), b"abcde");
         }
 
-        /// Invariant: A rejected write does not poison later fitting writes.
+        /// Invariant: A partial write consumes only the bytes that fit, and a further write
+        /// against an exhausted buffer reports zero progress rather than erroring.
         #[test]
-        fn rejected_write_leaves_remaining_capacity_usable() {
+        fn partial_write_consumes_only_what_fits_and_reports_remaining_state() {
             let mut buffer = BoundedBuffer::new(3);
             buffer.write_all(b"a").unwrap();
 
-            assert!(buffer.write(b"bcd").is_err());
-            assert_eq!(buffer.write(b"bc").unwrap(), 2);
+            assert_eq!(buffer.write(b"bcd").unwrap(), 2);
             assert_eq!(buffer.as_slice(), b"abc");
+
+            assert_eq!(buffer.write(b"e").unwrap(), 0);
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: `write_all` still fails with `WriteZero` once the buffer can no longer
+        /// make progress, even though the underlying `write` is not itself all-or-nothing; any
+        /// progress made before the failure is not rolled back.
+        #[test]
+        fn write_all_fails_with_write_zero_once_the_buffer_is_full() {
+            let mut buffer = BoundedBuffer::new(3);
+
+            let error = buffer.write_all(b"abcdef").unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: A zero-capacity buffer accepts empty writes and reports zero progress for
+        /// any non-empty write, without erroring.
+        #[test]
+        fn zero_capacity_buffer_write_reports_zero_progress_without_erroring() {
+            let mut buffer = BoundedBuffer::<u8>::new(0);
+
+            assert_eq!(buffer.write(b"").unwrap(), 0);
+            assert_eq!(buffer.write(b"x").unwrap(), 0);
+            assert_eq!(buffer.as_slice(), b"");
+        }
+
+        /// Invariant: `push` and `write` operate on the same cursor and interoperate correctly
+        /// on a `BoundedBuffer<u8>`.
+        #[test]
+        fn push_and_write_interleave_on_the_same_cursor() {
+            let mut buffer = BoundedBuffer::new(4);
+
+            assert_eq!(buffer.push(b'a'), Ok(()));
+            assert_eq!(buffer.write(b"bc").unwrap(), 2);
+            assert_eq!(buffer.push(b'd'), Ok(()));
+            assert_eq!(buffer.push(b'e'), Err(b'e'));
+
+            assert_eq!(buffer.as_slice(), b"abcd");
         }
 
         /// Invariant: Empty writes succeed regardless of remaining capacity and never mutate bytes.
@@ -512,8 +834,7 @@ mod tests {
                 assert_eq!(buffer.write(expected).unwrap(), capacity);
                 assert_eq!(buffer.as_slice(), expected);
 
-                let error = buffer.write(&[255]).unwrap_err();
-                assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+                assert_eq!(buffer.write(&[255]).unwrap(), 0);
                 assert_eq!(buffer.as_slice(), expected);
             }
         }
@@ -532,10 +853,7 @@ mod tests {
                 assert_eq!(buffer.write(suffix).unwrap(), suffix.len());
                 assert_eq!(buffer.as_slice(), expected);
 
-                assert_eq!(
-                    buffer.write(&[255]).unwrap_err().kind(),
-                    io::ErrorKind::WriteZero
-                );
+                assert_eq!(buffer.write(&[255]).unwrap(), 0);
                 assert_eq!(buffer.as_slice(), expected);
             }
         }
@@ -544,23 +862,11 @@ mod tests {
     mod bounded_buffer_internal_invariant_guards {
         use super::*;
 
-        /// Invariant: Every public observer and mutator rejects a cursor beyond storage capacity.
+        /// Invariant: Every entry point that reaches unsafe code rejects a cursor beyond capacity.
         #[test]
-        fn invalid_cursor_panics_at_every_public_entry_point() {
-            assert_invalid_len_panics(|buffer| {
-                let _ = buffer.capacity();
-            });
-            assert_invalid_len_panics(|buffer| {
-                let _ = buffer.len();
-            });
-            assert_invalid_len_panics(|buffer| {
-                let _ = buffer.is_empty();
-            });
+        fn invalid_cursor_panics_at_every_unsafe_entry_point() {
             assert_invalid_len_panics(|buffer| {
                 let _ = buffer.as_slice();
-            });
-            assert_invalid_len_panics(|buffer| {
-                let _ = format!("{buffer:?}");
             });
             assert_invalid_len_panics(|buffer| {
                 let _ = buffer.push(b'y');
@@ -568,7 +874,111 @@ mod tests {
             assert_invalid_len_panics(|buffer| {
                 let _ = buffer.write(b"y");
             });
+            assert_invalid_len_panics(|buffer| {
+                let _ = buffer.pop();
+            });
             assert_invalid_len_panics(|buffer| buffer.clear());
+        }
+
+        /// Invariant: Getters that never touch unsafe code report the corrupted cursor as-is
+        /// instead of paying for a redundant guard.
+        #[test]
+        fn invalid_cursor_does_not_panic_at_plain_getters() {
+            let mut buffer = BoundedBuffer::new(1);
+            buffer.write_all(b"x").unwrap();
+            buffer.len = buffer.buf.len() + 1;
+
+            assert_eq!(buffer.capacity(), 1);
+            assert_eq!(buffer.len(), 2);
+            assert!(!buffer.is_empty());
+            assert_eq!(
+                format!("{buffer:?}"),
+                "BoundedBuffer { capacity: 1, len: 2 }"
+            );
+
+            buffer.len = 1;
+        }
+    }
+
+    mod bounded_buffer_into_iter {
+        use super::*;
+
+        /// Invariant: Consuming iteration yields values in the reverse of push
+        /// order (LIFO), the same order as repeated `pop` calls.
+        #[test]
+        fn into_iter_yields_values_in_reverse_push_order() {
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+            buffer.push(3).unwrap();
+
+            let collected: Vec<_> = buffer.into_iter().collect();
+
+            assert_eq!(collected, vec![3, 2, 1]);
+        }
+
+        /// Invariant: Consuming an empty buffer yields no values.
+        #[test]
+        fn into_iter_on_empty_buffer_yields_nothing() {
+            let buffer = BoundedBuffer::<u8>::new(3);
+
+            let mut iter = buffer.into_iter();
+
+            assert_eq!(iter.next(), None);
+        }
+
+        /// Invariant: The iterator reports an exact remaining count that
+        /// decreases as values are yielded.
+        #[test]
+        fn into_iter_size_hint_matches_remaining_len() {
+            let mut buffer = BoundedBuffer::new(2);
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+
+            let mut iter = buffer.into_iter();
+            assert_eq!(iter.len(), 2);
+
+            iter.next();
+            assert_eq!(iter.len(), 1);
+
+            iter.next();
+            assert_eq!(iter.len(), 0);
+        }
+
+        /// Invariant: Dropping the iterator before it is exhausted still drops
+        /// every remaining element exactly once.
+        #[test]
+        fn dropping_partially_consumed_iter_drops_remaining_elements_once() {
+            let drops = Rc::new(Cell::new(0));
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.push(drop_probe(&drops)).unwrap();
+            buffer.push(drop_probe(&drops)).unwrap();
+            buffer.push(drop_probe(&drops)).unwrap();
+
+            {
+                let mut iter = buffer.into_iter();
+                let first = iter.next().unwrap();
+                assert_eq!(drops.get(), 0);
+                drop(first);
+                assert_eq!(drops.get(), 1);
+            }
+
+            assert_eq!(drops.get(), 3);
+        }
+
+        /// Invariant: A `BoundedBuffer` can be consumed directly by a `for` loop.
+        #[test]
+        fn for_loop_consumes_buffer_by_value() {
+            let mut buffer = BoundedBuffer::new(3);
+            buffer.push('a').unwrap();
+            buffer.push('b').unwrap();
+
+            let mut collected = Vec::new();
+            for value in buffer {
+                collected.push(value);
+            }
+
+            assert_eq!(collected, vec!['b', 'a']);
         }
     }
 
@@ -581,7 +991,7 @@ mod tests {
             struct NotDebug;
 
             let mut buffer = BoundedBuffer::new(3);
-            assert!(buffer.push(NotDebug).is_none());
+            assert!(buffer.push(NotDebug).is_ok());
 
             assert_eq!(
                 format!("{buffer:?}"),
