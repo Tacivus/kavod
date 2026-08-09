@@ -582,9 +582,9 @@ mod tests {
         fn successive_writes_append_in_order() {
             let mut buffer = BoundedBuffer::new(6).unwrap();
 
-            buffer.write(b"ab").unwrap();
-            buffer.write(b"cd").unwrap();
-            buffer.write(b"ef").unwrap();
+            buffer.write_all(b"ab").unwrap();
+            buffer.write_all(b"cd").unwrap();
+            buffer.write_all(b"ef").unwrap();
 
             assert_eq!(buffer.as_slice(), b"abcdef");
         }
@@ -624,8 +624,10 @@ mod tests {
         #[test]
         fn write_macro_formats_into_the_buffer() {
             let mut buffer = BoundedBuffer::new(16).unwrap();
+            let number = 1;
+            let word = "two";
 
-            write!(buffer, "{}-{}", 1, "two").unwrap();
+            write!(buffer, "{number}-{word}").unwrap();
 
             assert_eq!(buffer.as_slice(), b"1-two");
         }

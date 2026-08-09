@@ -114,7 +114,7 @@ pub trait Application {
     type State;
     type Event: Serialize;
     type Command: Serialize;
-    type FatalReason: Serialize;
+    type Fatal: Serialize;
 
     fn initial_state(&self) -> Self::State;
 
@@ -122,16 +122,14 @@ pub trait Application {
         &self,
         state: &mut Self::State,
         ctx: &mut Context<'_, Self::Command>,
-    ) -> Outcome<Self::FatalReason> {
-        Outcome::Continue
-    }
+    ) -> Outcome<Self::Fatal>;
 
     fn on_event(
         &self,
         state: &mut Self::State,
         event: &Self::Event,
         ctx: &mut Context<'_, Self::Command>,
-    ) -> Outcome<Self::FatalReason>;
+    ) -> Outcome<Self::Fatal>;
 }
 
 pub enum Outcome<F> {
@@ -198,14 +196,14 @@ pub trait PortContract {
 /// Kavod-owned uninhabited type for absent directions.
 pub enum Never {}
 
-kavod::ports! {
-    pub enum TradingEvent / TradingCommand {
-        Primary:   MarketData,
-        Secondary: MarketData,
-        Execution: Execution,
-        Timer:     Timer,
+kavod::ports!(
+    pub enum Trading<Event = TradingEvent, Command = TradingCommand> {
+        Primary(MarketData),
+        Secondary(MarketData),
+        Execution(Execution),
+        Timer(Timer),
     }
-}
+);
 ```
 
 ### 3.2 Semantics
@@ -501,6 +499,8 @@ impl<W: std::io::Write> Journal<W> {
 pub enum JournalBuildError {
     /// `max_record_bytes` leaves no room for the reserved newline byte.
     MaxBytesTooLarge,
+    /// The reusable record buffer could not reserve its required storage.
+    AllocationFailed,
 }
 
 pub enum JournalError {
@@ -520,7 +520,7 @@ Terminology: the *sink* is the `W: std::io::Write` value the Journal writes into
 
 Encode requirements on all payloads: `Serialize` implementations are deterministic, side-effect-free, bounded, and nonpanicking (trusted obligations, §10); map iteration order is stable; map keys not representable as JSON strings are `Encode` failures. Non-finite floating-point serialization follows `serde_json` behavior. Lossy serialization is evidence only of the fields it emits. `JRN-FORMAT` requires every record to serialize as a JSON object; a payload that does not is rejected as `NotAnObject`, checked immediately after a successful encode and before the newline is appended, with the same write-nothing, poison-nothing guarantee as `Encode` and `BoundExceeded`.
 
-`max_record_bytes` plus the reserved newline byte must not overflow `usize`; `JournalBuildError::MaxBytesTooLarge` rejects the one construction where it would (`max_record_bytes == usize::MAX`), per A6's ban on silent saturation.
+`max_record_bytes` plus the reserved newline byte must not overflow `usize`; `JournalBuildError::MaxBytesTooLarge` rejects the one construction where it would (`max_record_bytes == usize::MAX`), per A6's ban on silent saturation. Reserving the resulting reusable buffer can also fail, which is reported as `JournalBuildError::AllocationFailed` before constructing a Journal.
 
 Memory sinks (`Vec<u8>` via a user-owned shared handle) make tests and fault injection direct; `std::io::sink()` discards evidence but still pays encoding. Because JSONL bytes alone cannot identify the committed prefix after a sink failure, replay requires a cleanly completed Journal or an externally trusted committed boundary.
 
@@ -536,14 +536,14 @@ Memory sinks (`Vec<u8>` via a user-owned shared handle) make tests and fault inj
 
 ### 7.4 Implementation
 
-The bounded encoder is the reusable buffer behind an internal `std::io::Write` adapter; `serde_json::to_writer` targets that adapter. The adapter and newline append reject a record that cannot fit the configured buffer, reporting `BoundExceeded` before any sink interaction (`JRN-ENCODE`). serde_json surfaces map keys not representable as JSON strings as `Encode` errors.
+The reusable bounded byte buffer implements `std::io::Write`, so `serde_json::to_writer` writes directly into it. A zero-progress write while encoding becomes `WriteZero` through `Write::write_all` and is reported as `BoundExceeded`; other serializer errors remain `Encode`. Appending the newline rejects a record that left no reserved byte, also reporting `BoundExceeded` before any sink interaction (`JRN-ENCODE`). serde_json surfaces map keys not representable as JSON strings as `Encode` errors.
 
-`new` computes `max_record_bytes.checked_add(1)` to size the buffer for the object plus the reserved newline byte; overflow — only at `max_record_bytes == usize::MAX` — is `JournalBuildError::MaxBytesTooLarge` rather than a saturated size (A6).
+`new` computes `max_record_bytes.checked_add(1)` to size the buffer for the object plus the reserved newline byte; overflow — only at `max_record_bytes == usize::MAX` — is `JournalBuildError::MaxBytesTooLarge` rather than a saturated size (A6). A failed buffer reservation is `JournalBuildError::AllocationFailed`.
 
 | Step | `commit` procedure |
 |---|---|
 | 1 | Poisoned → precondition violation: an invariant panic (A8). The Engine never calls a poisoned Journal (§8.4). |
-| 2 | Clear the buffer; encode the record through the bounded adapter. Adapter rejection → `BoundExceeded`; serde failure → `Encode`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
+| 2 | Clear the buffer; encode directly through its `Write` implementation. Its zero-progress `WriteZero` rejection → `BoundExceeded`; other serde failures → `Encode`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
 | 3 | Encoded bytes must start with `{` and end with `}` — otherwise `NotAnObject`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
 | 4 | Append the newline (excluded from the bound, `JRN-FORMAT`). |
 | 5 | Write the buffer with a hand-rolled loop bounded by record length — not `write_all`, because `Interrupted` is not retried (`JRN-POISON`); `Ok(0)` becomes `WriteZero`. First failure → poison, `Sink { operation: Write, .. }`. |
@@ -582,7 +582,7 @@ where
 {
     pub fn new(app: A, env: E, writer: W, config: EngineConfig)
         -> Result<Self, ConstructionError>;
-    pub fn run(self) -> EngineExit<A::State, A::FatalReason, E::Error>;
+    pub fn run(self) -> EngineExit<A::State, A::Fatal, E::Error>;
 }
 
 #[derive(Serialize)]
@@ -668,7 +668,7 @@ impl From<&serde_json::Error> for JsonErrorRecord { /* ... */ }
 
 Both `CommandsPrepared` and `CommandsDispatched` are omitted for an empty batch. These commit points are A5 in action: no handler runs before its acceptance record commits, no handoff precedes `CommandsPrepared`, and no next Event is acquired before `TurnCompleted(Continue)` commits. `CommandsPrepared` plus the typed dispatch position identifies the exact successful prefix even if the `Fatal` record is never written.
 
-The concrete Rust types of the records are Engine-internal (tier 3); their serialized form per this table is normative. Every failure type that can appear in the `Fatal` record is `Serialize`: `Application::FatalReason` and `Environment::Error` by trait bound, `CoreFailure` and `JournalFailure` as Kavod-owned data. Kavod serializes the foreign Errors it owns through owned structured mirrors: `std::io::Error` via `IoErrorRecord` (kind, optional OS code, rendered text), `serde_json::Error` via `JsonErrorRecord` (category, line, column, rendered text) — each mirror's rendered text is exactly the mode-varying content the determinism contract already erases. Kavod requires `Display` nowhere; for user Error types, `Serialize` is strictly more general than `Display` via `DisplayText`. Serialized failure payloads carry the same trusted obligations as all payloads (§7.2).
+The concrete Rust types of the records are Engine-internal (tier 3); their serialized form per this table is normative. Every failure type that can appear in the `Fatal` record is `Serialize`: `Application::Fatal` and `Environment::Error` by trait bound, `CoreFailure` and `JournalFailure` as Kavod-owned data. Kavod serializes the foreign Errors it owns through owned structured mirrors: `std::io::Error` via `IoErrorRecord` (kind, optional OS code, rendered text), `serde_json::Error` via `JsonErrorRecord` (category, line, column, rendered text) — each mirror's rendered text is exactly the mode-varying content the determinism contract already erases. Kavod requires `Display` nowhere; for user Error types, `Serialize` is strictly more general than `Display` via `DisplayText`. Serialized failure payloads carry the same trusted obligations as all payloads (§7.2).
 
 ### 8.3 Invariants
 
