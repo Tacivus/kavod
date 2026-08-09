@@ -1,10 +1,13 @@
-use std::{io::Write, num::NonZeroUsize};
+use std::{io::ErrorKind, num::NonZeroUsize};
 
 use serde::Serialize;
+
+use crate::bounded_buffer::BoundedBuffer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JournalBuildError {
     MaxBytesTooLarge,
+    AllocationFailed,
 }
 
 #[derive(Debug)]
@@ -27,7 +30,7 @@ pub enum SinkOperation {
 #[derive(Debug)]
 pub struct Journal<W: std::io::Write> {
     writer: W,
-    buffer: BoundedBuffer,
+    buffer: BoundedBuffer<u8>,
     is_poisoned: bool,
 }
 
@@ -42,6 +45,8 @@ impl<W: std::io::Write> Journal<W> {
     ///
     /// Returns `Err(JournalBuildError::MaxBytesTooLarge)` if `max_record_bytes`
     /// equals `usize::MAX`, which would leave no room for the reserved `\n` byte.
+    /// Returns `Err(JournalBuildError::AllocationFailed)` if the buffer cannot
+    /// reserve its required storage.
     pub fn new(writer: W, max_record_bytes: NonZeroUsize) -> Result<Self, JournalBuildError> {
         // +1 for the newline character
         let max_bytes = max_record_bytes
@@ -50,7 +55,8 @@ impl<W: std::io::Write> Journal<W> {
 
         Ok(Self {
             writer,
-            buffer: BoundedBuffer::new(max_bytes),
+            buffer: BoundedBuffer::new(max_bytes.get())
+                .map_err(|_| JournalBuildError::AllocationFailed)?,
             is_poisoned: false,
         })
     }
@@ -72,7 +78,7 @@ impl<W: std::io::Write> Journal<W> {
 
         Self::write_record_to_buffer(&mut self.buffer, record)?;
 
-        if let Err(error) = Self::write_to_sink(&mut self.writer, self.buffer.written_bytes()) {
+        if let Err(error) = Self::write_to_sink(&mut self.writer, self.buffer.as_slice()) {
             return Err(self.poison(SinkOperation::Write, error));
         }
 
@@ -85,38 +91,29 @@ impl<W: std::io::Write> Journal<W> {
 
     /// Encodes one JSON object into the reusable fixed-capacity buffer
     fn write_record_to_buffer<R: Serialize>(
-        buff: &mut BoundedBuffer,
+        buffer: &mut BoundedBuffer<u8>,
         record: &R,
     ) -> Result<(), JournalError> {
-        buff.clear();
+        buffer.clear();
 
-        // Write the json
-        let encode_result = serde_json::to_writer(&mut *buff, record);
-        if buff.exceeded {
-            return Err(JournalError::BoundExceeded);
-        }
-        if let Err(error) = encode_result {
+        if let Err(error) = serde_json::to_writer(&mut *buffer, record) {
+            if error.io_error_kind() == Some(ErrorKind::WriteZero) {
+                return Err(JournalError::BoundExceeded);
+            }
+
             return Err(JournalError::Encode(error));
         }
 
         // Ensure the string looks like a json object
-        let encoded = buff.written_bytes();
+        let encoded = buffer.as_slice();
         if !(encoded.starts_with(b"{") && encoded.ends_with(b"}")) {
             return Err(JournalError::NotAnObject);
         }
 
-        // Write the reserved newline byte. `BoundedBuffer::write` cannot fail for
-        // any reason other than the bound check above, but this stays explicit so
-        // a future change to that behavior fails loudly instead of silently
-        // mislabeling itself as `BoundExceeded`.
-        let newline_result = buff.write(b"\n");
-        if buff.exceeded {
-            return Err(JournalError::BoundExceeded);
-        }
-        match newline_result {
-            Err(error) => panic!("memory write failed: {error}"),
-            Ok(len) => assert!(len == 1, "`\n` wrote more than one byte: {len}"),
-        }
+        // Only wya this can fail is if the bounds are exceeded
+        buffer
+            .push(b'\n')
+            .map_err(|_| JournalError::BoundExceeded)?;
 
         Ok(())
     }
@@ -159,68 +156,6 @@ impl<W: std::io::Write> Journal<W> {
     }
 }
 
-#[derive(Debug)]
-struct BoundedBuffer {
-    bytes: Box<[u8]>,
-    len: usize,
-    exceeded: bool,
-}
-
-impl BoundedBuffer {
-    fn new(max_record_bytes: NonZeroUsize) -> Self {
-        Self {
-            bytes: vec![0_u8; max_record_bytes.get()].into_boxed_slice(),
-            len: 0,
-            exceeded: false,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-        self.exceeded = false;
-    }
-
-    fn written_bytes(&self) -> &[u8] {
-        assert!(
-            self.len <= self.bytes.len(),
-            "bounded buffer cursor exceeds its capacity"
-        );
-
-        &self.bytes[..self.len]
-    }
-}
-
-impl std::io::Write for BoundedBuffer {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        assert!(
-            self.len <= self.bytes.len(),
-            "bounded buffer cursor exceeds its capacity"
-        );
-
-        let remaining = self.bytes.len() - self.len;
-
-        if bytes.len() > remaining {
-            self.exceeded = true;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "journal record exceeds configured bound",
-            ));
-        }
-
-        let end = self
-            .len
-            .checked_add(bytes.len())
-            .expect("bounded buffer cursor overflow");
-        self.bytes[self.len..end].copy_from_slice(bytes);
-        self.len = end;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -232,32 +167,15 @@ mod tests {
         rc::Rc,
     };
 
-    use serde::{
-        Serialize, Serializer,
-        ser::{Error as _, SerializeMap},
-    };
+    use serde::Serialize;
 
-    use super::{BoundedBuffer, Journal, JournalBuildError, JournalError, SinkOperation};
+    use super::{Journal, JournalBuildError, JournalError, SinkOperation};
 
     // Setup
 
     #[derive(Serialize)]
     struct ObjectRecord<'a> {
         value: &'a str,
-    }
-
-    /// Writes a partial JSON object before returning a serializer error.
-    struct FailsAfterPartialEncoding;
-
-    impl Serialize for FailsAfterPartialEncoding {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut map = serializer.serialize_map(Some(1))?;
-            map.serialize_entry("partial", "was buffered")?;
-            Err(S::Error::custom("intentional serializer failure"))
-        }
     }
 
     #[derive(Clone, Copy)]
@@ -432,6 +350,18 @@ mod tests {
                 Err(JournalBuildError::MaxBytesTooLarge)
             ));
         }
+
+        /// Invariant: A buffer reservation failure is reported without constructing a Journal.
+        #[test]
+        fn new_reports_buffer_allocation_failure() {
+            let writer = ScriptedWriter::new(Rc::new(RefCell::new(SinkState::default())), [], []);
+            let max_record_bytes = nonzero(isize::MAX as usize);
+
+            assert!(matches!(
+                Journal::new(writer, max_record_bytes),
+                Err(JournalBuildError::AllocationFailed)
+            ));
+        }
     }
 
     mod journal_jsonl_encoding_and_successful_commit_protocol {
@@ -547,11 +477,43 @@ mod tests {
     }
 
     mod journal_record_shape_and_serde_encoding_rejection {
+        use serde::{
+            Serializer,
+            ser::{Error as _, SerializeMap},
+        };
+
         use super::*;
 
         // ========================================================================
         // Journal::commit Record Shape and Serde Encoding Rejection
         // ========================================================================
+
+        /// Writes a partial JSON object before returning a serializer error.
+        struct FailsAfterPartialEncoding;
+
+        impl Serialize for FailsAfterPartialEncoding {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("partial", "was buffered")?;
+                Err(S::Error::custom("intentional serializer failure"))
+            }
+        }
+
+        /// Fills the journal buffer before returning a serializer-defined error.
+        struct FailsAfterExactCapacityEncoding;
+
+        impl Serialize for FailsAfterExactCapacityEncoding {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str("x")?;
+                Err(S::Error::custom("intentional serializer failure"))
+            }
+        }
 
         /// Invariant: Scalar JSON values are not journal records and reach no sink operation.
         #[test]
@@ -588,6 +550,20 @@ mod tests {
             assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
             assert_eq!(state.write_inputs.len(), 1);
             assert_eq!(state.flush_calls, 1);
+        }
+
+        /// Invariant: A serializer error stays an Encode error even if the partial output fills
+        /// the buffer, so only the buffer's WriteZero signal means BoundExceeded.
+        #[test]
+        fn serializer_error_after_filling_buffer_is_not_bound_exceeded() {
+            let (mut journal, state) = journal(2, [], []);
+
+            assert!(matches!(
+                journal.commit(&FailsAfterExactCapacityEncoding),
+                Err(JournalError::Encode(_))
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
         }
 
         /// Invariant: Map keys not representable as JSON strings are Encode failures.
@@ -974,7 +950,7 @@ mod tests {
             let record = ObjectRecord { value: "record" };
             let expected = b"{\"value\":\"record\"}\n";
 
-            let write_actions = std::iter::repeat(WriteAction::Accept(1)).take(expected.len());
+            let write_actions = std::iter::repeat_n(WriteAction::Accept(1), expected.len());
             let (mut journal, state) = journal(128, write_actions, []);
 
             journal.commit(&record).unwrap();
@@ -1068,68 +1044,6 @@ mod tests {
             let state = state.borrow();
             assert_eq!(state.write_inputs.len(), 1);
             assert_eq!(state.flush_calls, 1);
-        }
-    }
-
-    mod bounded_buffer_capacity_and_reset_behavior {
-        use super::*;
-
-        // ========================================================================
-        // BoundedBuffer Internal Capacity and Reset Behavior
-        // ========================================================================
-
-        /// Invariant: A rejected BoundedBuffer write leaves existing bytes unchanged.
-        #[test]
-        fn bounded_buffer_rejects_oversized_write_without_extending() {
-            let mut buffer = BoundedBuffer::new(nonzero(3));
-
-            assert_eq!(buffer.write(b"abc").unwrap(), 3);
-
-            let error = buffer.write(b"d").unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::WriteZero);
-            assert_eq!(buffer.written_bytes(), b"abc");
-            assert!(buffer.exceeded);
-        }
-
-        /// Invariant: Clearing BoundedBuffer resets both cursor and sticky overflow state.
-        #[test]
-        fn bounded_buffer_clear_resets_record_state() {
-            let mut buffer = BoundedBuffer::new(nonzero(3));
-
-            buffer.write(b"abc").unwrap();
-            assert!(buffer.write(b"d").is_err());
-            assert!(buffer.exceeded);
-
-            buffer.clear();
-
-            assert_eq!(buffer.written_bytes(), b"");
-            assert!(!buffer.exceeded);
-
-            buffer.write(b"xy").unwrap();
-            assert_eq!(buffer.written_bytes(), b"xy");
-        }
-
-        /// Invariant: A zero-length write is always accepted, even at full capacity.
-        #[test]
-        fn bounded_buffer_zero_length_write_at_full_capacity_is_accepted() {
-            let mut buffer = BoundedBuffer::new(nonzero(3));
-
-            assert_eq!(buffer.write(b"abc").unwrap(), 3);
-            assert_eq!(buffer.write(b"").unwrap(), 0);
-
-            assert_eq!(buffer.written_bytes(), b"abc");
-            assert!(!buffer.exceeded);
-        }
-
-        /// Invariant: Successive writes without an intervening clear accumulate in order.
-        #[test]
-        fn bounded_buffer_accumulates_across_multiple_writes() {
-            let mut buffer = BoundedBuffer::new(nonzero(5));
-
-            assert_eq!(buffer.write(b"ab").unwrap(), 2);
-            assert_eq!(buffer.write(b"cd").unwrap(), 2);
-
-            assert_eq!(buffer.written_bytes(), b"abcd");
         }
     }
 }
