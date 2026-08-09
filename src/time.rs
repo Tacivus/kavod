@@ -1,5 +1,9 @@
 use serde::Serialize;
 
+/// An Environment-stamped logical time, measured in nanoseconds since Unix epoch.
+///
+/// The Environment owns the timestamp origin and assigns timestamps to accepted
+/// turns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Timestamp(u64);
@@ -9,16 +13,23 @@ impl Timestamp {
         Timestamp(ts)
     }
 
+    /// Returns a timestamp advanced by `elapsed`, or `None` if the duration
+    /// cannot be represented in nanoseconds or the result would overflow.
     pub fn checked_add(self, elapsed: std::time::Duration) -> Option<Self> {
         let nanos = u64::try_from(elapsed.as_nanos()).ok()?;
         self.0.checked_add(nanos).map(Timestamp)
     }
 
+    /// Returns this timestamp's nanosecond count.
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
 }
 
+/// The ordinal number of an accepted turn.
+///
+/// The start turn has index zero; each accepted external event has the next
+/// consecutive index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct EventIndex(u64);
@@ -26,6 +37,7 @@ pub struct EventIndex(u64);
 impl EventIndex {
     pub(crate) const START: Self = EventIndex(0);
 
+    /// Returns this accepted turn's ordinal number.
     pub const fn as_u64(self) -> u64 {
         self.0
     }
