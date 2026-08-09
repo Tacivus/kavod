@@ -52,7 +52,7 @@ Everything else in this document is a consequence of eight axioms:
 
 ### 1.3 Determinism
 
-Same inputs, same run. Within one concrete Environment type, the same build, frozen Application, initial State, configuration, and trace — every accepted `(Event, LogicalTime)`, every Environment result, every Journal-sink result — reproduce the same handler calls, State transitions, ordered Command intent, Journal bytes, and typed `EngineExit`.
+Same inputs, same run. Within one concrete Environment type, the same build, frozen Application, initial State, configuration, and trace — every accepted `(Event, Timestamp)`, every Environment result, every Journal-sink result — reproduce the same handler calls, State transitions, ordered Command intent, Journal bytes, and typed `EngineExit`.
 
 Across live and simulated Environments the guarantee is the same with concrete Error values erased: equal abstract traces produce equal handler calls, State transitions, Command intent, and record sequence, and exits equal in every Core-owned discriminant (`FatalCause` variant, `EnvironmentOperation` with dispatch position, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreFailure` variant). Mode-specific Error content may differ.
 
@@ -101,7 +101,14 @@ The Application is a pure transition function over its State, driven by the Engi
 pub struct EventIndex(/* u64, private */);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct LogicalTime(/* u64 nanoseconds, private */);
+pub struct Timestamp(/* u64 nanoseconds, private */);
+
+impl Timestamp {
+    /// Returns a timestamp advanced by `elapsed`, or `None` if the duration
+    /// cannot be represented in nanoseconds or the result would overflow.
+    pub fn checked_add(self, elapsed: std::time::Duration) -> Option<Self>;
+    pub fn as_nanos(&self) -> u64;
+}
 
 pub trait Application {
     type State;
@@ -137,7 +144,7 @@ impl<'a, C> Context<'a, C> {
     /// The current accepted turn.
     pub fn index(&self) -> EventIndex;
     /// The current turn's accepted logical time (the start time at index 0).
-    pub fn logical_time(&self) -> LogicalTime;
+    pub fn logical_time(&self) -> Timestamp;
     /// Exact Commands the batch can still store; zero once the overflow
     /// marker is set.
     pub fn remaining(&self) -> usize;
@@ -148,7 +155,7 @@ impl<'a, C> Context<'a, C> {
 
 ### 2.2 Semantics
 
-`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `LogicalTime` is an opaque nanosecond count with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
+`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `Timestamp` is an opaque nanosecond count with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
 
 During a handler, `Context` is the single authority for the current turn's index and logical time (A1) — including the accepted start time at index 0, so no synthetic "ready" Event exists; the `EventAccepted` record evidences the same facts (§8.2). That staged Commands are never dropped, coalesced, duplicated, or reordered follows from A3; that State mutations survive a later failure follows from A3 as well.
 
@@ -174,7 +181,7 @@ During a handler, `Context` is the single authority for the current turn's index
 | 2 | Buffer full → set the marker, store nothing; the turn result's first check picks it up (§8.4). |
 | 3 | Otherwise append in call order (`APP-EMIT`). |
 
-`remaining()` is capacity minus length, or 0 when the marker is set. The newtypes' arithmetic (index increment, time comparison) lives in the Engine and is checked per A6.
+`remaining()` is capacity minus length, or 0 when the marker is set. `Timestamp::checked_add` lets a SimPort schedule a future wakeup from an Environment-supplied time; conversion and addition are checked per A6. Event-index increment and the Engine's validation of timestamp order remain Engine-owned and checked per A6.
 
 ## 3. Ports, Contracts, and Slots
 
@@ -254,8 +261,8 @@ pub trait Environment {
     type Command;
     type Error: Serialize;
 
-    fn start(&mut self) -> Result<LogicalTime, Self::Error>;
-    fn next_event(&mut self) -> Result<(Self::Event, LogicalTime), Self::Error>;
+    fn start(&mut self) -> Result<Timestamp, Self::Error>;
+    fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error>;
     fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error>;
     fn shutdown(self, mode: ShutdownMode) -> Result<(), Self::Error>;
 }
@@ -273,7 +280,7 @@ Commitment points (A3 applies on both sides of each):
 | Operation | Commitment point | `Err` before commitment | After commitment |
 |---|---|---|---|
 | `start` | Successful return: start time frozen, run-scoped machinery live. | No run-scoped activity remains; the Environment is safe to drop. | — |
-| `next_event` | Returning `(Event, LogicalTime)` consumes one candidate. | No candidate was consumed. | The candidate is never retried or revoked; it becomes *accepted* only when `EventAccepted` commits (§8.2). |
+| `next_event` | Returning `(Event, Timestamp)` consumes one candidate. | No candidate was consumed. | The candidate is never retried or revoked; it becomes *accepted* only when `EventAccepted` commits (§8.2). |
 | `dispatch` | Mode-specific handoff point (`LIVE-DISPATCH`, `SIM-DISPATCH`); the attempt never waits for future capacity. | This Command was not handed off; the Engine does not retry it. | Port processing failure cannot revoke the handoff. |
 | `shutdown` | The call itself: it consumes the Environment. | — | Always quiesces and returns safe-to-drop, even on `Err`; an Error never reports failure to quiesce. |
 
@@ -285,7 +292,7 @@ If Engine Fatal finalization begins while a latched Port failure is still unrepo
 |---|---|
 | `ENV-CALLS` | Only the Engine calls the Environment, serially: `start` exactly once, then `next_event` and `dispatch` interleaved one at a time, then `shutdown` at most once. |
 | `ENV-LATCH` | The Environment latches at most its first Port failure. Failure publication is linearized against each operation's commitment: observed before, the operation returns `Err`; observed after, the commitment stands and the latched failure is returned by the next `next_event` or `dispatch` call before that call's own commitment — or by a graceful `shutdown` as its `Err` after quiescing, in preference to Errors from shutdown's own work. |
-| `ENV-TIME` | One Environment authority — the single Event acceptor — stamps `LogicalTime` on `start` and every `next_event`; the Engine validates nondecrease (§8.4). |
+| `ENV-TIME` | One Environment authority — the single Event acceptor — stamps `Timestamp` on `start` and every `next_event`; the Engine validates nondecrease (§8.4). |
 | `ENV-SHUTDOWN` | `Graceful` stops Event delivery, rejects new Commands, and resolves the configured disposition of already-handed-off Commands. `Abort` stops Event delivery and new handoffs and initiates no further externally consequential work. |
 | `ENV-SEPARATION` | The Environment orchestrates Ports but owns no Port domain state and never invokes an Application handler. |
 | `ENV-BOUNDS` | Every operation preserves the Environment's own configured bounds: queues, channels, Port and thread counts, wakeup storage, time domain, shutdown work. |
@@ -362,7 +369,7 @@ One workable mechanism (tier 3 — replaceable wherever §5.3 holds): one bounde
 |---|---|
 | 1 | Wait under `LIVE-SELECT`'s linear order for latch-or-Event. |
 | 2 | Latch chosen → return its `Err` (this call commits nothing, `ENV-LATCH`). |
-| 3 | Event chosen → dequeue one candidate, stamp `LogicalTime` (`LIVE-TIME`, `ENV-TIME`), return it — the dequeue is the consumption commitment (§4.2). |
+| 3 | Event chosen → dequeue one candidate, stamp `Timestamp` (`LIVE-TIME`, `ENV-TIME`), return it — the dequeue is the consumption commitment (§4.2). |
 
 | Step | `dispatch` procedure |
 |---|---|
@@ -404,14 +411,14 @@ pub trait SimPort<C: PortContract> {
 }
 
 impl<C: PortContract> SimCtx<'_, C> {
-    pub fn now(&self) -> LogicalTime;
-    pub fn set_next(&mut self, time: LogicalTime) -> Result<(), SimCtxError>;
+    pub fn now(&self) -> Timestamp;
+    pub fn set_next(&mut self, time: Timestamp) -> Result<(), SimCtxError>;
     pub fn clear_next(&mut self);
 }
 
 pub enum SimCtxError {
     /// `set_next` requires `time >= now`; rejection changes nothing.
-    TimeBeforeNow { now: LogicalTime, requested: LogicalTime },
+    TimeBeforeNow { now: Timestamp, requested: Timestamp },
 }
 ```
 
@@ -436,7 +443,7 @@ Simulated processing is synchronous, so Graceful and Abort coincide and `stop` t
 
 ### 6.4 Implementation
 
-Environment state: `now`, per-Port `Option<LogicalTime>` arm, the round-robin cursor, the failure latch, and a steps-used counter reset at each `next_event` entry.
+Environment state: `now`, per-Port `Option<Timestamp>` arm, the round-robin cursor, the failure latch, and a steps-used counter reset at each `next_event` entry.
 
 | Step | `start` procedure |
 |---|---|
@@ -622,7 +629,7 @@ pub struct JournalFailure {
 }
 
 pub enum CoreFailure {
-    TimeRegression { previous: LogicalTime, offered: LogicalTime },
+    TimeRegression { previous: Timestamp, offered: Timestamp },
     TurnBoundExceeded,
     CommandBoundExceeded,
 }
@@ -739,7 +746,7 @@ One crate, `kavod`, no feature gates — both Environments are std-only. Depende
 ```
 kavod/src/
   lib.rs         #![forbid(unsafe_code)]; public re-exports
-  time.rs        EventIndex, LogicalTime
+  time.rs        EventIndex, Timestamp
   application.rs Application, Outcome, Context
   port.rs        PortContract, Never, ports!
   environment.rs Environment, ShutdownMode
