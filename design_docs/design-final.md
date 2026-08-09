@@ -550,7 +550,7 @@ pub struct EngineConfig {
 
 pub enum ConstructionError {
     CommandStorage(TryReserveError),
-    JournalRecordStorage(TryReserveError),
+    JournalBuild(JournalBuildError),
     /// The largest fallback Fatal record cannot fit max_record_bytes.
     RecordBoundTooSmall,
 }
@@ -658,7 +658,7 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | `FAIL-FINALIZE` | Fatal finalization runs exactly once, in order: stop normal execution → if the Environment was started and not consumed, `shutdown(Abort)` → if the Journal is unpoisoned, attempt the `Fatal` record → return `EngineExit::Fatal`. No handler, dispatch, Event acquisition, or graceful action begins after Fatal (A2, A4). |
 | `FAIL-SECONDARY` | An Abort Error becomes `shutdown_error`; a `Fatal`-record Error becomes `journal_error`, which therefore always concerns the `Fatal` record and needs no `RecordKind`. Neither replaces the primary cause (A4). |
 | `FAIL-INDEX` | The `Fatal` record's `index` is `Some(i)` exactly when `i` is the current accepted turn established by a committed `RunStarted` or `EventAccepted`, and `None` before start acceptance. A consumed candidate whose acceptance record failed never becomes current. |
-| `FAIL-RECORD` | The `Fatal` record is `Fatal { schema_version, index, cause }` with the cause serialized structurally. If encoding fails (`Encode` or `BoundExceeded` — no sink bytes were written), the Engine falls back once to the same record with the cause reduced to its variant name, which construction proved fits `max_record_bytes`; a fallback `Encode` failure is therefore a Kavod invariant panic (A8). At most one sink write-and-flush is attempted, and `journal_error` is the first Error observed during the attempt, even if the fallback subsequently commits. |
+| `FAIL-RECORD` | The `Fatal` record is `Fatal { schema_version, index, cause }` with the cause serialized structurally. If encoding or format validation fails (`Encode`, `NotAnObject`, or `BoundExceeded` — no sink bytes were written), the Engine falls back once to the same record with the cause reduced to its variant name, which construction proved fits `max_record_bytes`; a fallback encode or format failure is therefore a Kavod invariant panic (A8). At most one sink write-and-flush is attempted, and `journal_error` is the first Error observed during the attempt, even if the fallback subsequently commits. |
 | `BOUND-SIZING` | `max_record_bytes` must accommodate the largest batch the Application can stage under `max_commands_per_turn`; this sizing is a trusted configuration obligation, not a construction proof. |
 | `BOUND-INDEX` | `max_turns` may equal `u64::MAX`; the pre-acquisition turn check makes `EventIndex` overflow unreachable, so overflow is an invariant panic, not an Engine outcome. |
 
@@ -669,7 +669,7 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | Step | Action | On failure |
 |---|---|---|
 | 1 | `try_reserve` the complete Command batch for `max_commands_per_turn`. | `CommandStorage`. |
-| 2 | Construct the Journal, reserving its encode buffer for `max_record_bytes`. | `JournalRecordStorage`. |
+| 2 | Construct the Journal from `max_record_bytes`. | `JournalBuild`. |
 | 3 | Encode the maximal fallback `Fatal` record — `index: Some(u64::MAX)`, the longest `FatalCause` variant name — and check it fits `max_record_bytes` (backs `FAIL-RECORD`'s panic claim). | `RecordBoundTooSmall`. |
 
 **Startup:**
@@ -718,7 +718,7 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | 3 | Journal unpoisoned → attempt the `Fatal` record per the procedure below; first observed Error → `journal_error`. | Skipped entirely if the primary failure poisoned the Journal (§1.4). |
 | 4 | Return `EngineExit::Fatal { state, cause, shutdown_error, journal_error }`. | State always exists here — it is created before any fallible run step. |
 
-**`Fatal` record attempt** (`FAIL-RECORD` mechanics): encode the full structural record; on `Encode`/`BoundExceeded` (nothing reached the sink), encode the fallback with the cause reduced to its variant name — a fallback encode failure is an invariant panic (A8); construction step 3 proved it fits. Then make at most one sink write-and-flush attempt with whichever record encoded. `journal_error` is the first Error observed across the whole attempt, even if the fallback subsequently commits.
+**`Fatal` record attempt** (`FAIL-RECORD` mechanics): encode the full structural record; on `Encode`, `NotAnObject`, or `BoundExceeded` (nothing reached the sink), encode the fallback with the cause reduced to its variant name — a fallback encode or format failure is an invariant panic (A8); construction step 3 proved it fits. Then make at most one sink write-and-flush attempt with whichever record encoded. `journal_error` is the first Error observed across the whole attempt, even if the fallback subsequently commits.
 
 ## 9. Crate layout
 
