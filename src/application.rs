@@ -18,7 +18,7 @@ pub trait Application {
     type State;
     type Event: Serialize;
     type Command: Serialize;
-    type Fatal: Serialize;
+    type Fatal;
 
     fn initial_state(&self) -> Self::State;
 

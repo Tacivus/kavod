@@ -18,8 +18,8 @@ Kavod Core is written under `#![forbid(unsafe_code)]`. Kavod is informed by NASA
 
 | ID | Location | Subject |
 |---|---|---|
-| OPEN-1 | §5 | Live Environment construction and wiring: builder, Slot binding, `LiveCtx` final signatures, Error-sum composition, graceful disposition configuration |
-| OPEN-2 | §6 | Simulated Environment construction and wiring: builder, Slot binding, `SimConfig`, Error-sum composition, fixed-input replay wiring |
+| OPEN-1 | §5 | Live Environment construction and wiring: builder, Slot binding, `LiveCtx` final signatures, Fatal-sum composition, graceful disposition configuration |
+| OPEN-2 | §6 | Simulated Environment construction and wiring: builder, Slot binding, `SimConfig`, Fatal-sum composition, fixed-input replay wiring |
 
 ## 1. Principles
 
@@ -34,7 +34,7 @@ Everything else in this document is a consequence of eight axioms:
 | A1 | Single authority | Every fact has exactly one owner and one representation. |
 | A2 | Serial turns | One Event, one handler call, one Command batch at a time; a turn completes or the run becomes Fatal before the next Event is requested. |
 | A3 | One commitment point | Every effectful operation has exactly one commitment point. Failure before it means nothing happened; after it, nothing is retried, revoked, or rolled back. |
-| A4 | First failure wins | The first failure the Engine observes is the primary Fatal cause. Everything after is best-effort cleanup whose Errors are secondary and never replace it. |
+| A4 | First failure wins | The first failure the Engine observes is the primary Fatal cause. Everything after is best-effort cleanup whose Errors are discarded and can never replace it. |
 | A5 | Evidence precedes effect | The Journal records intent before the irreversible action it evidences. |
 | A6 | Bounded everything | Every Kavod-managed container, buffer, count, identifier, and active loop has one accounting owner and a bound checked before use. Arithmetic on counts, capacities, times, and identities is checked and never wraps or silently saturates. |
 | A7 | Typed inside, rendered at the edge | Failures remain typed values while Kavod owns them. Text and bytes exist only at the serialization boundary. |
@@ -54,15 +54,15 @@ Everything else in this document is a consequence of eight axioms:
 
 Same inputs, same run. Within one concrete Environment type, the same build, frozen Application, initial State, configuration, and trace — every accepted `(Event, Timestamp)`, every Environment result, every Journal-sink result — reproduce the same handler calls, State transitions, ordered Command intent, Journal bytes, and typed `EngineExit`.
 
-Across live and simulated Environments the guarantee is the same with concrete Error values erased: equal abstract traces produce equal handler calls, State transitions, Command intent, and record sequence, and exits equal in every Core-owned discriminant (`FatalCause` variant, `EnvironmentOperation` with dispatch position, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreFailure` variant). Mode-specific Error content may differ.
+Across live and simulated Environments the guarantee is the same with concrete failure values erased: equal abstract traces produce equal handler calls, State transitions, Command intent, and Journal bytes — no failure value is ever serialized, so nothing mode-varying reaches the Journal — and exits equal in every Core-owned discriminant (`FatalCause` variant, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreFatal` including its payloads). Mode-specific failure content may differ only inside `EngineExit`.
 
 Concurrent live sources may race; the accepted trace records the resolution, and the Core is deterministic conditional on it. Hidden authority is forbidden to Application code and serialization alike: no clocks, entropy, IO, environment variables, process globals, concurrency order, pointer identity, unstable iteration, or Environment-mode dependence.
 
 ### 1.4 Failure philosophy
 
-`EngineExit` is the truth; the Journal is evidence. The typed primary cause always reaches `EngineExit`; the `Fatal` record is best-effort forensics.
+`EngineExit` is the truth; the Journal is evidence. The typed primary cause always reaches `EngineExit`, and it is the run's only failure output: after the first failure the Engine performs best-effort cleanup whose Errors are discarded, writes nothing further to the Journal, and serializes no failure value anywhere — failures leave the Core only as typed values (A7).
 
-Consequences of A3/A4 stated once, so no subsystem section restates them: State mutations, consumed candidates, Port mutations, handed-off prefixes, external effects, and committed records all remain real — Fatal performs no rollback — and a Journal poisoned by the primary failure receives no `Fatal` attempt at all, leaving that typed failure as the primary cause.
+Consequences of A3/A4 stated once, so no subsystem section restates them: State mutations, consumed candidates, Port mutations, handed-off prefixes, external effects, and committed records all remain real — Fatal performs no rollback.
 
 ### 1.5 Panics
 
@@ -78,7 +78,7 @@ Every Kavod-owned configuration bound — `EngineConfig`'s fields and Environmen
 
 | Owner | Bounds and storage | Exhaustion |
 |---|---|---|
-| Engine | External turns, per-turn Commands, record bytes | Core Fatal, Journal Fatal, or pre-run `ConstructionError` |
+| Engine | External turns, per-turn Commands, record bytes | Core Fatal, Journal Fatal, or pre-run `BuildError` |
 | Live Environment | Event queue, per-Port Command inboxes, failure latch, time domain, shutdown work | Typed Environment Error |
 | Simulated Environment | One wakeup arm per Port, equal-time cursor, time domain, `max_steps_per_event` | Typed Environment Error |
 
@@ -114,7 +114,7 @@ pub trait Application {
     type State;
     type Event: Serialize;
     type Command: Serialize;
-    type Fatal: Serialize;
+    type Fatal;
 
     fn initial_state(&self) -> Self::State;
 
@@ -171,7 +171,7 @@ During a handler, `Context` is the single authority for the current turn's index
 
 ### 2.4 Implementation
 
-`Context` wraps Engine-owned batch storage: one fixed-capacity buffer of `max_commands_per_turn` Commands, allocated once at construction (§8.4, `ConstructionError::CommandStorage`) and reused every turn, plus one overflow marker cleared at each handler invocation. The buffer is never grown, so nothing in the turn loop allocates. Whether it is a capacity-reserved `Vec` (a push below reserved capacity does not allocate) or a fixed slab is tier 3.
+`Context` wraps Engine-owned batch storage: one fixed-capacity buffer of `max_commands_per_turn` Commands, allocated once at construction (§8.4, `BuildError::CommandBuffer`) and reused every turn, plus one overflow marker cleared at each handler invocation. The buffer is never grown, so nothing in the turn loop allocates. Whether it is a capacity-reserved `Vec` (a push below reserved capacity does not allocate) or a fixed slab is tier 3.
 
 | Step | `emit` procedure |
 |---|---|
@@ -257,7 +257,7 @@ The Environment is the Core's single boundary to the outside: it owns waiting, E
 pub trait Environment {
     type Event;
     type Command;
-    type Error: Serialize;
+    type Error;
 
     fn start(&mut self) -> Result<Timestamp, Self::Error>;
     fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error>;
@@ -282,7 +282,7 @@ Commitment points (A3 applies on both sides of each):
 | `dispatch` | Mode-specific handoff point (`LIVE-DISPATCH`, `SIM-DISPATCH`); the attempt never waits for future capacity. | This Command was not handed off; the Engine does not retry it. | Port processing failure cannot revoke the handoff. |
 | `shutdown` | The call itself: it consumes the Environment. | — | Always quiesces and returns safe-to-drop, even on `Err`; an Error never reports failure to quiesce. |
 
-If Engine Fatal finalization begins while a latched Port failure is still unreported, Abort discards it: only an Error produced by Abort's own cleanup becomes `shutdown_error` (§8.4).
+If Engine Fatal finalization begins while a latched Port failure is still unreported, Abort discards it, as it discards every Error of Abort's own cleanup: the primary cause is the only failure the run reports (§1.4).
 
 ### 4.3 Invariants
 
@@ -436,7 +436,7 @@ Simulated processing is synchronous, so Graceful and Abort coincide and `stop` t
 | `SIM-WAKEUP` | Each Port has at most one revocable wakeup arm, modifiable only through its own `SimCtx`: `set_next` requires `time >= now` — violation is the `SimCtxError` rejection, which changes nothing — and is last-call-wins; `clear_next` disarms. An arm is not an Event. |
 | `SIM-SELECT` | `next_event` checks the failure latch, then selects the armed Port with the lowest time — equal times by round-robin in frozen Slot order, the cursor advancing past the selected Port after every selected `step`, including one returning `None` — advances `now`, clears the arm, and calls `step`. Only `step(Some)` creates the returned candidate; `step(None)` continues selection; `step(Err)` returns that failure. |
 | `SIM-STEPS` | Every `step` call, including one returning `Some`, consumes one unit of the configured `max_steps_per_event`; the budget is fresh for each `next_event` invocation, and `start`, `on_command`, and `stop` calls consume none of it. The check occurs before selecting, advancing time, or clearing an arm for work that would exceed it; exhaustion is an Environment Error under `NextEvent`. |
-| `SIM-COMPLETION` | No armed Port is the `SimQuiescent` Environment Error, and every Environment Error is Fatal. Normal completion is an application-defined terminal Event whose handler returns `Stop`; fixed-input replay wiring therefore accepts a constructor for that Event. |
+| `SIM-COMPLETION` | No armed Port is the `SimQuiescent` Environment Error. Normal completion is an application-defined terminal Event whose handler returns `Stop`; fixed-input replay wiring therefore accepts a constructor for that Event. |
 | `SIM-SHUTDOWN` | `shutdown` calls every Port's `stop` in frozen Slot order, continues past an Error, returning the first subject to `ENV-LATCH` precedence. |
 
 ### 6.4 Implementation
@@ -516,7 +516,7 @@ pub enum SinkOperation { Write, Flush }
 
 ### 7.2 Semantics
 
-Terminology: the *sink* is the `W: std::io::Write` value the Journal writes into — a file, an in-memory `Vec<u8>`, a socket; the Journal neither knows nor cares which. *Poisoned* is the Journal's permanent post-sink-failure state: after one failed write or flush, the sink's tail is unknowable (`JRN-COMMIT`), so appending more bytes could only corrupt evidence, and the Journal refuses. `is_poisoned` exists for the Engine's Fatal-finalization decision (§8.4).
+Terminology: the *sink* is the `W: std::io::Write` value the Journal writes into — a file, an in-memory `Vec<u8>`, a socket; the Journal neither knows nor cares which. *Poisoned* is the Journal's permanent post-sink-failure state: after one failed write or flush, the sink's tail is unknowable (`JRN-COMMIT`), so appending more bytes could only corrupt evidence, and the Journal refuses. `is_poisoned` lets a direct Journal consumer check `commit`'s precondition (§7.4); the Engine never needs it — after any commit failure the run is Fatal and the Engine never writes again (`FAIL-FINALIZE`).
 
 Encode requirements on all payloads: `Serialize` implementations are deterministic, side-effect-free, bounded, and nonpanicking (trusted obligations, §10); map iteration order is stable; map keys not representable as JSON strings are `Encode` failures. Non-finite floating-point serialization follows `serde_json` behavior. Lossy serialization is evidence only of the fields it emits. `JRN-FORMAT` requires every record to serialize as a JSON object; a payload that does not is rejected as `NotAnObject`, checked immediately after a successful encode and before the newline is appended, with the same write-nothing, poison-nothing guarantee as `Encode` and `BoundExceeded`.
 
@@ -542,7 +542,7 @@ The reusable bounded byte buffer implements `std::io::Write`, so `serde_json::to
 
 | Step | `commit` procedure |
 |---|---|
-| 1 | Poisoned → precondition violation: an invariant panic (A8). The Engine never calls a poisoned Journal (§8.4). |
+| 1 | Poisoned → precondition violation: an invariant panic (A8). The Engine never calls a poisoned Journal (`FAIL-FINALIZE`). |
 | 2 | Clear the buffer; encode directly through its `Write` implementation. Its zero-progress `WriteZero` rejection → `BoundExceeded`; other serde failures → `Encode`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
 | 3 | Encoded bytes must start with `{` and end with `}` — otherwise `NotAnObject`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
 | 4 | Append the newline (excluded from the bound, `JRN-FORMAT`). |
@@ -558,20 +558,15 @@ The Engine owns the run: it drives startup, the turn protocol, the record protoc
 ### 8.1 Public API
 
 ```rust
-/// Identifies the record schema of one build.
-pub const SCHEMA_VERSION: u32 = 1;
-
 pub struct EngineConfig {
-    pub max_turns: NonZeroU64,
+    pub max_turns: NonZeroUsize,
     pub max_commands_per_turn: NonZeroUsize,
     pub max_record_bytes: NonZeroUsize,
 }
 
-pub enum ConstructionError {
-    CommandStorage(TryReserveError),
-    JournalBuild(JournalBuildError),
-    /// The largest fallback Fatal record cannot fit max_record_bytes.
-    RecordBoundTooSmall,
+pub enum BuildError {
+    CommandBuffer(TryReserveError),
+    Journal(JournalBuildError),
 }
 
 impl<A, E, W> Engine<A, E, W>
@@ -580,12 +575,11 @@ where
     E: Environment<Event = A::Event, Command = A::Command>,
     W: std::io::Write,
 {
-    pub fn new(app: A, env: E, writer: W, config: EngineConfig)
-        -> Result<Self, ConstructionError>;
+    pub fn new(config: EngineConfig, app: A, env: E, writer: W)
+        -> Result<Self, BuildError>;
     pub fn run(self) -> EngineExit<A::State, A::Fatal, E::Error>;
 }
 
-#[derive(Serialize)]
 pub enum RecordKind {
     RunStarted,
     EventAccepted,
@@ -593,24 +587,18 @@ pub enum RecordKind {
     CommandsDispatched,
     StopRequested,
     TurnCompleted,
-    Fatal,
 }
 
 pub enum EngineExit<S, AF, EE> {
     Stopped { state: S },
-    Fatal {
-        state: S,
-        cause: FatalCause<AF, EE>,
-        shutdown_error: Option<EE>,
-        journal_error: Option<JournalError>,
-    },
+    Fatal { state: S, cause: FatalCause<AF, EE> },
 }
 
 pub enum FatalCause<AF, EE> {
     Application(AF),
-    Environment { error: EE, operation: EnvironmentOperation },
-    Journal(JournalFailure),
-    Core(CoreFailure),
+    Environment(EnvironmentFatal<EE>),
+    Journal(JournalFatal),
+    Core(CoreFatal),
 }
 
 pub enum EnvironmentOperation {
@@ -623,38 +611,26 @@ pub enum EnvironmentOperation {
     ShutdownGraceful,
 }
 
-pub struct JournalFailure {
-    pub record: RecordKind,
+pub struct EnvironmentFatal<EE> {
+    pub error: EE,
+    pub operation: EnvironmentOperation,
+}
+
+pub struct JournalFatal {
+    pub record_kind: RecordKind,
     pub error: JournalError,
 }
 
-pub enum CoreFailure {
+pub enum CoreFatal {
     TimeRegression { previous: Timestamp, offered: Timestamp },
     TurnBoundExceeded,
     CommandBoundExceeded,
 }
 ```
 
-Failure-serialization adapters (usable by Applications and wirings for their own Error types):
-
-```rust
-/// Serializes any Display-only type in one line via collect_str.
-pub struct DisplayText<T: std::fmt::Display>(pub T);
-
-/// Owned structured mirror of std::io::Error: kind, optional OS code,
-/// rendered text.
-pub struct IoErrorRecord { /* ... */ }
-impl From<&std::io::Error> for IoErrorRecord { /* ... */ }
-
-/// Owned structured mirror of serde_json::Error: category, line, column,
-/// rendered text.
-pub struct JsonErrorRecord { /* ... */ }
-impl From<&serde_json::Error> for JsonErrorRecord { /* ... */ }
-```
-
 ### 8.2 Semantics: record protocol
 
-`RecordKind` is the closed set of record names below. Records use serde's default externally tagged representation. `RunStarted` and `Fatal` are the only possible first committed records, so every nonempty Journal begins with a versioned record.
+`RecordKind` is the closed set of record names below. Records use serde's default externally tagged representation. `RunStarted` is the only possible first committed record, so every nonempty Journal begins with a versioned record.
 
 | Record | Fields | Committed | Evidences |
 |---|---|---|---|
@@ -664,32 +640,27 @@ impl From<&serde_json::Error> for JsonErrorRecord { /* ... */ }
 | `CommandsDispatched` | `index` | After the last handoff of a nonempty batch. | Every prepared Command was handed off. |
 | `StopRequested` | `index` | After a `Stop` outcome, before graceful shutdown. | The Application requested shutdown. |
 | `TurnCompleted` | `index`, `outcome` (`Continue`/`Stop`) | End of every non-Fatal turn. | The turn's outcome. |
-| `Fatal` | `schema_version`, optional `index`, `cause` | During Fatal finalization, best effort. | The primary cause. |
 
-Both `CommandsPrepared` and `CommandsDispatched` are omitted for an empty batch. These commit points are A5 in action: no handler runs before its acceptance record commits, no handoff precedes `CommandsPrepared`, and no next Event is acquired before `TurnCompleted(Continue)` commits. `CommandsPrepared` plus the typed dispatch position identifies the exact successful prefix even if the `Fatal` record is never written.
+Both `CommandsPrepared` and `CommandsDispatched` are omitted for an empty batch. These commit points are A5 in action: no handler runs before its acceptance record commits, no handoff precedes `CommandsPrepared`, and no next Event is acquired before `TurnCompleted(Continue)` commits. A run's exit is never journaled — a fatal turn's Journal simply ends at its last committed record, and `CommandsPrepared` plus the typed dispatch position in `EngineExit` identifies the exact successful prefix.
 
-The concrete Rust types of the records are Engine-internal (tier 3); their serialized form per this table is normative. Every failure type that can appear in the `Fatal` record is `Serialize`: `Application::Fatal` and `Environment::Error` by trait bound, `CoreFailure` and `JournalFailure` as Kavod-owned data. Kavod serializes the foreign Errors it owns through owned structured mirrors: `std::io::Error` via `IoErrorRecord` (kind, optional OS code, rendered text), `serde_json::Error` via `JsonErrorRecord` (category, line, column, rendered text) — each mirror's rendered text is exactly the mode-varying content the determinism contract already erases. Kavod requires `Display` nowhere; for user Error types, `Serialize` is strictly more general than `Display` via `DisplayText`. Serialized failure payloads carry the same trusted obligations as all payloads (§7.2).
+The concrete Rust types of the records are Engine-internal (tier 3); their serialized form per this table is normative.
 
 ### 8.3 Invariants
 
 | ID | Invariant |
 |---|---|
-| `FAIL-FINALIZE` | Fatal finalization runs exactly once, in order: stop normal execution → if the Environment was started and not consumed, `shutdown(Abort)` → if the Journal is unpoisoned, attempt the `Fatal` record → return `EngineExit::Fatal`. No handler, dispatch, Event acquisition, or graceful action begins after Fatal (A2, A4). |
-| `FAIL-SECONDARY` | An Abort Error becomes `shutdown_error`; a `Fatal`-record Error becomes `journal_error`, which therefore always concerns the `Fatal` record and needs no `RecordKind`. Neither replaces the primary cause (A4). |
-| `FAIL-INDEX` | The `Fatal` record's `index` is `Some(i)` exactly when `i` is the current accepted turn established by a committed `RunStarted` or `EventAccepted`, and `None` before start acceptance. A consumed candidate whose acceptance record failed never becomes current. |
-| `FAIL-RECORD` | The `Fatal` record is `Fatal { schema_version, index, cause }` with the cause serialized structurally. If encoding or format validation fails (`Encode`, `NotAnObject`, or `BoundExceeded` — no sink bytes were written), the Engine falls back once to the same record with the cause reduced to its variant name, which construction proved fits `max_record_bytes`; a fallback encode or format failure is therefore a Kavod invariant panic (A8). At most one sink write-and-flush is attempted, and `journal_error` is the first Error observed during the attempt, even if the fallback subsequently commits. |
+| `FAIL-FINALIZE` | Fatal finalization runs exactly once, in order: stop normal execution → if the Environment was started and not consumed, `shutdown(Abort)`, discarding its `Err` (§1.4) → return `EngineExit::Fatal { state, cause }`. After the primary failure the Engine never writes to the Journal again; no handler, dispatch, Event acquisition, or graceful action begins after Fatal (A2, A4). |
 | `BOUND-SIZING` | `max_record_bytes` must accommodate the largest batch the Application can stage under `max_commands_per_turn`; this sizing is a trusted configuration obligation, not a construction proof. |
 | `BOUND-INDEX` | `max_turns` may equal `u64::MAX`; the pre-acquisition turn check makes `EventIndex` overflow unreachable, so overflow is an invariant panic, not an Engine outcome. |
 
 ### 8.4 Implementation
 
-**Construction** (`Engine::new`) — before State creation, invoking no Application or Environment method; failure is `ConstructionError`, never a runtime Fatal:
+**Construction** (`Engine::new`) — before State creation, invoking no Application or Environment method; failure is `BuildError`, never a runtime Fatal:
 
 | Step | Action | On failure |
 |---|---|---|
-| 1 | `try_reserve` the complete Command batch for `max_commands_per_turn`. | `CommandStorage`. |
-| 2 | Construct the Journal from `max_record_bytes`. | `JournalBuild`. |
-| 3 | Encode the maximal fallback `Fatal` record — `index: Some(u64::MAX)`, the longest `FatalCause` variant name — and check it fits `max_record_bytes` (backs `FAIL-RECORD`'s panic claim). | `RecordBoundTooSmall`. |
+| 1 | `try_reserve` the complete Command batch for `max_commands_per_turn`. | `CommandBuffer`. |
+| 2 | Construct the Journal from `max_record_bytes`. | `Journal`. |
 
 **Startup:**
 
@@ -708,7 +679,7 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | 2 | `Environment::next_event`. | `Environment(NextEvent)` Fatal. |
 | 3 | Validate candidate time `>=` the last accepted time (`ENV-TIME`). | Core Fatal `TimeRegression`; the candidate stays consumed, no handler runs. |
 | 4 | Assign the next checked `EventIndex`. | Overflow is unreachable (`BOUND-INDEX`) and would be an invariant panic. |
-| 5 | Commit `EventAccepted`. | Journal Fatal; the candidate stays consumed but never becomes current (`FAIL-INDEX`). |
+| 5 | Commit `EventAccepted`. | Journal Fatal; the candidate stays consumed but never becomes current. |
 | 6 | The index becomes current; invoke `on_event` exactly once; process the turn result. | — |
 
 `max_turns` counts accepted External Events, excluding the start turn. It exists to bound Event/Command feedback loops, including one advancing the index forever at a single time.
@@ -733,11 +704,8 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | Step | Action | Notes |
 |---|---|---|
 | 1 | Stop normal execution; fix the primary cause (A4). | |
-| 2 | Environment started and not consumed → `shutdown(Abort)`; its `Err` → `shutdown_error` (`FAIL-SECONDARY`). | Skipped after a `start` failure or any consuming shutdown. |
-| 3 | Journal unpoisoned → attempt the `Fatal` record per the procedure below; first observed Error → `journal_error`. | Skipped entirely if the primary failure poisoned the Journal (§1.4). |
-| 4 | Return `EngineExit::Fatal { state, cause, shutdown_error, journal_error }`. | State always exists here — it is created before any fallible run step. |
-
-**`Fatal` record attempt** (`FAIL-RECORD` mechanics): encode the full structural record; on `Encode`, `NotAnObject`, or `BoundExceeded` (nothing reached the sink), encode the fallback with the cause reduced to its variant name — a fallback encode or format failure is an invariant panic (A8); construction step 3 proved it fits. Then make at most one sink write-and-flush attempt with whichever record encoded. `journal_error` is the first Error observed across the whole attempt, even if the fallback subsequently commits.
+| 2 | Environment started and not consumed → `shutdown(Abort)`, discarding its `Err` (§1.4; terminal Port and Environment state flows through user-owned handles, §3.2). | Skipped after a `start` failure or any consuming shutdown. |
+| 3 | Return `EngineExit::Fatal { state, cause }`. | State always exists here — it is created before any fallible run step. The Journal is not touched. |
 
 ## 9. Crate layout
 
@@ -754,7 +722,6 @@ kavod/src/
   sim/           SimPort, SimCtx, simulated Environment (OPEN-2)
   journal.rs     Journal, JournalError
   engine.rs      Engine, EngineConfig, records, EngineExit, FatalCause
-  serialize.rs   DisplayText, IoErrorRecord, JsonErrorRecord
 ```
 
 ## 10. Obligations and verification
@@ -771,7 +738,7 @@ Kavod enforces its invariants; everything below is trusted — upheld by a named
 | `Serialize` impls deterministic, side-effect-free, bounded, nonpanicking; stable map order (§7.2) | Payload authors | Golden-Journal tests |
 | Simulated Port determinism and bounded `step` work (§6.2) | Sim Port author | Repeatability tests |
 | Live Port blocking points observe lifecycle and cooperate with shutdown (`BOUND-BLOCKING`) | Live Port author | Shutdown tests under load |
-| `BOUND-SIZING`: `max_record_bytes` fits the largest stageable batch | Deployment configuration | Config review; construction proves only the fallback `Fatal` record |
+| `BOUND-SIZING`: `max_record_bytes` fits the largest stageable batch | Deployment configuration | Config review; construction proves nothing about record sizes |
 | Transitive memory bounds of owned values (§1.6) | Value owner | Owner-defined |
 
 Kavod-side verification conventions: Journal and sink failures are exercised through memory sinks and failing writers (§7.2); and the determinism contract (§1.3) is checked by running one conformance trace suite against both Environments and comparing every Core-owned discriminant.
