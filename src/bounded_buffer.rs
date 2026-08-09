@@ -1,5 +1,6 @@
 use core::{fmt, ops, slice};
 use std::collections::TryReserveError;
+use std::io;
 
 /// Reusable, fixed-capacity storage for an ordered batch of values.
 pub(crate) struct BoundedBuffer<T> {
@@ -105,6 +106,22 @@ impl<T> ops::Deref for BoundedBuffer<T> {
 
     fn deref(&self) -> &Self::Target {
         self.values.as_slice()
+    }
+}
+
+impl io::Write for BoundedBuffer<u8> {
+    /// Writes as many leading bytes of `buf` as remaining capacity allows.
+    ///
+    /// Returns `Ok(n)` where `n` is the number of bytes accepted, which may be
+    /// fewer than `buf.len()` (including zero) when the buffer is full.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let accepted = buf.len().min(self.remaining_capacity());
+        self.values.extend_from_slice(&buf[..accepted]);
+        Ok(accepted)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -509,6 +526,206 @@ mod tests {
         }
     }
 
+    mod bounded_buffer_io_write {
+        use std::io::Write;
+
+        use super::*;
+
+        /// Invariant: A write that fits within remaining capacity is accepted in full.
+        #[test]
+        fn write_within_capacity_accepts_all_bytes() {
+            let mut buffer = BoundedBuffer::new(5).unwrap();
+
+            let written = buffer.write(b"abc").unwrap();
+
+            assert_eq!(written, 3);
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: A write exceeding remaining capacity is truncated to what fits.
+        #[test]
+        fn write_exceeding_capacity_accepts_only_remaining_capacity() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+
+            let written = buffer.write(b"abcdef").unwrap();
+
+            assert_eq!(written, 3);
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: Writing to a full buffer accepts no bytes and reports zero.
+        #[test]
+        fn write_to_full_buffer_accepts_no_bytes() {
+            let mut buffer = BoundedBuffer::new(2).unwrap();
+            buffer.write_all(b"ab").unwrap();
+
+            let written = buffer.write(b"cd").unwrap();
+
+            assert_eq!(written, 0);
+            assert_eq!(buffer.as_slice(), b"ab");
+        }
+
+        /// Invariant: Writing an empty slice accepts zero bytes without mutating the buffer.
+        #[test]
+        fn write_empty_slice_accepts_no_bytes_and_does_not_mutate() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.write_all(b"a").unwrap();
+
+            let written = buffer.write(b"").unwrap();
+
+            assert_eq!(written, 0);
+            assert_eq!(buffer.as_slice(), b"a");
+        }
+
+        /// Invariant: Successive writes append in call order up to capacity.
+        #[test]
+        fn successive_writes_append_in_order() {
+            let mut buffer = BoundedBuffer::new(6).unwrap();
+
+            buffer.write(b"ab").unwrap();
+            buffer.write(b"cd").unwrap();
+            buffer.write(b"ef").unwrap();
+
+            assert_eq!(buffer.as_slice(), b"abcdef");
+        }
+
+        /// Invariant: `write_all` succeeds when the full payload fits within capacity.
+        #[test]
+        fn write_all_succeeds_when_payload_fits() {
+            let mut buffer = BoundedBuffer::new(5).unwrap();
+
+            assert!(buffer.write_all(b"hello").is_ok());
+            assert_eq!(buffer.as_slice(), b"hello");
+        }
+
+        /// Invariant: `write_all` reports `WriteZero` once the buffer fills, after
+        /// writing every byte that fit.
+        #[test]
+        fn write_all_fails_with_write_zero_when_payload_overflows_capacity() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+
+            let error = buffer.write_all(b"abcdef").unwrap_err();
+
+            assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: Flushing never fails and leaves buffered contents unchanged.
+        #[test]
+        fn flush_is_a_no_op() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.write_all(b"ab").unwrap();
+
+            assert!(buffer.flush().is_ok());
+            assert_eq!(buffer.as_slice(), b"ab");
+        }
+
+        /// Invariant: The `write!` formatting macro can target the buffer through `io::Write`.
+        #[test]
+        fn write_macro_formats_into_the_buffer() {
+            let mut buffer = BoundedBuffer::new(16).unwrap();
+
+            write!(buffer, "{}-{}", 1, "two").unwrap();
+
+            assert_eq!(buffer.as_slice(), b"1-two");
+        }
+
+        /// Invariant: A zero-capacity buffer accepts no bytes from a nonempty write.
+        #[test]
+        fn zero_capacity_buffer_accepts_no_bytes() {
+            let mut buffer = BoundedBuffer::new(0).unwrap();
+
+            let written = buffer.write(b"a").unwrap();
+
+            assert_eq!(written, 0);
+            assert_eq!(buffer.as_slice(), b"");
+        }
+
+        /// Invariant: A write updates length, fullness, and remaining capacity consistently.
+        #[test]
+        fn write_updates_len_and_capacity_state() {
+            let mut buffer = BoundedBuffer::new(4).unwrap();
+
+            buffer.write_all(b"ab").unwrap();
+
+            assert_eq!(buffer.len(), 2);
+            assert!(!buffer.is_empty());
+            assert!(!buffer.is_full());
+            assert_eq!(buffer.remaining_capacity(), 2);
+
+            buffer.write_all(b"cd").unwrap();
+
+            assert_eq!(buffer.len(), 4);
+            assert!(buffer.is_full());
+            assert_eq!(buffer.remaining_capacity(), 0);
+        }
+
+        /// Invariant: Iteration and dereferencing agree with `as_slice` after a write.
+        #[test]
+        fn write_result_is_visible_through_iteration_and_deref() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+
+            buffer.write_all(b"xy").unwrap();
+
+            assert_eq!(buffer.iter().copied().collect::<Vec<_>>(), b"xy");
+            assert_eq!(&*buffer, b"xy");
+        }
+
+        /// Invariant: `write_all` with an empty payload succeeds even when the buffer is full.
+        #[test]
+        fn write_all_empty_payload_succeeds_on_a_full_buffer() {
+            let mut buffer = BoundedBuffer::new(2).unwrap();
+            buffer.write_all(b"ab").unwrap();
+
+            assert!(buffer.write_all(b"").is_ok());
+            assert_eq!(buffer.as_slice(), b"ab");
+        }
+    }
+
+    mod bounded_buffer_write_push_interop {
+        use std::io::Write;
+
+        use super::*;
+
+        /// Invariant: Bytes appended via `push` count against the capacity a later `write` consumes.
+        #[test]
+        fn write_after_push_only_accepts_remaining_capacity() {
+            let mut buffer = BoundedBuffer::new(5).unwrap();
+            buffer.push(b'a').unwrap();
+            buffer.push(b'b').unwrap();
+
+            let written = buffer.write(b"cdefg").unwrap();
+
+            assert_eq!(written, 3);
+            assert_eq!(buffer.as_slice(), b"abcde");
+            assert!(buffer.is_full());
+        }
+
+        /// Invariant: Bytes appended via `write` count against the capacity a later `push` consumes.
+        #[test]
+        fn push_after_write_only_accepts_remaining_capacity() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.write_all(b"ab").unwrap();
+
+            assert_eq!(buffer.push(b'c'), Ok(()));
+            assert_eq!(buffer.push(b'd'), Err(b'd'));
+            assert_eq!(buffer.as_slice(), b"abc");
+        }
+
+        /// Invariant: A buffer filled entirely via `push` reports full and rejects further writes.
+        #[test]
+        fn write_to_buffer_filled_by_push_accepts_no_bytes() {
+            let mut buffer = BoundedBuffer::new(2).unwrap();
+            buffer.push(b'a').unwrap();
+            buffer.push(b'b').unwrap();
+
+            let written = buffer.write(b"cd").unwrap();
+
+            assert_eq!(written, 0);
+            assert_eq!(buffer.as_slice(), b"ab");
+        }
+    }
+
     mod bounded_buffer_debug_format {
         use super::*;
 
@@ -548,6 +765,32 @@ mod tests {
                 format!("{buffer:?}"),
                 "BoundedBuffer { capacity: 2, len: 2 }"
             );
+        }
+    }
+
+    mod bounded_buffer_zero_capacity {
+        use super::*;
+
+        /// Invariant: Clearing a zero-capacity buffer is a no-op that remains both empty and full.
+        #[test]
+        fn clear_on_zero_capacity_buffer_preserves_full_and_empty_state() {
+            let mut buffer = BoundedBuffer::<u8>::new(0).unwrap();
+
+            buffer.clear();
+
+            assert!(buffer.is_empty());
+            assert!(buffer.is_full());
+            assert_eq!(buffer.remaining_capacity(), 0);
+        }
+
+        /// Invariant: A zero-sized value type at zero capacity is simultaneously empty and full.
+        #[test]
+        fn zero_sized_values_at_zero_capacity_are_empty_and_full() {
+            let mut buffer = BoundedBuffer::<()>::new(0).unwrap();
+
+            assert!(buffer.is_empty());
+            assert!(buffer.is_full());
+            assert_eq!(buffer.push(()), Err(()));
         }
     }
 }
