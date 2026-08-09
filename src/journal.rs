@@ -406,694 +406,730 @@ mod tests {
         assert_eq!(state.flush_calls, 1);
     }
 
-    // ========================================================================
-    // Journal::new Construction and Capacity Validation
-    // ========================================================================
+    mod journal_construction_and_capacity_validation {
+        use super::*;
 
-    /// Invariant: A freshly constructed Journal is usable and unpoisoned.
-    #[test]
-    fn test_new_journal_starts_unpoisoned() {
-        let (journal, state) = journal(1, [], []);
+        // ========================================================================
+        // Journal::new Construction and Capacity Validation
+        // ========================================================================
 
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
+        /// Invariant: A freshly constructed Journal is usable and unpoisoned.
+        #[test]
+        fn new_journal_starts_unpoisoned() {
+            let (journal, state) = journal(1, [], []);
+
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+        }
+
+        /// Invariant: max_record_bytes must reserve one extra byte for newline.
+        #[test]
+        fn new_rejects_max_record_bytes_that_overflow_with_newline() {
+            let writer = ScriptedWriter::new(Rc::new(RefCell::new(SinkState::default())), [], []);
+
+            assert!(matches!(
+                Journal::new(writer, nonzero(usize::MAX)),
+                Err(JournalBuildError::MaxBytesTooLarge)
+            ));
+        }
     }
 
-    /// Invariant: max_record_bytes must reserve one extra byte for newline.
-    #[test]
-    fn test_new_rejects_max_record_bytes_that_overflow_with_newline() {
-        let writer = ScriptedWriter::new(Rc::new(RefCell::new(SinkState::default())), [], []);
+    mod journal_jsonl_encoding_and_successful_commit_protocol {
+        use super::*;
 
-        assert!(matches!(
-            Journal::new(writer, nonzero(usize::MAX)),
-            Err(JournalBuildError::MaxBytesTooLarge)
-        ));
-    }
+        // ========================================================================
+        // Journal::commit JSONL Encoding and Successful Commit Protocol
+        // ========================================================================
 
-    // ========================================================================
-    // Journal::commit JSONL Encoding and Successful Commit Protocol
-    // ========================================================================
+        /// Invariant: One successful commit writes one JSON object, one newline, and flushes once.
+        #[test]
+        fn commit_writes_json_object_newline_and_flushes() {
+            let (mut journal, state) = journal(128, [], []);
+            let record = ObjectRecord { value: "hello" };
 
-    /// Invariant: One successful commit writes one JSON object, one newline, and flushes once.
-    #[test]
-    fn test_commit_writes_json_object_newline_and_flushes() {
-        let (mut journal, state) = journal(128, [], []);
-        let record = ObjectRecord { value: "hello" };
+            journal.commit(&record).unwrap();
 
-        journal.commit(&record).unwrap();
+            let state = state.borrow();
+            assert_eq!(state.bytes, b"{\"value\":\"hello\"}\n".to_vec());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+            assert!(!journal.is_poisoned());
+        }
 
-        let state = state.borrow();
-        assert_eq!(state.bytes, b"{\"value\":\"hello\"}\n".to_vec());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-        assert!(!journal.is_poisoned());
-    }
+        /// Invariant: Record order is sink order, with exactly one newline per record.
+        #[test]
+        fn multiple_commits_preserve_order_without_blank_lines() {
+            let (mut journal, state) = journal(128, [], []);
 
-    /// Invariant: Record order is sink order, with exactly one newline per record.
-    #[test]
-    fn test_multiple_commits_preserve_order_without_blank_lines() {
-        let (mut journal, state) = journal(128, [], []);
+            journal.commit(&ObjectRecord { value: "first" }).unwrap();
+            journal.commit(&ObjectRecord { value: "second" }).unwrap();
 
-        journal.commit(&ObjectRecord { value: "first" }).unwrap();
-        journal.commit(&ObjectRecord { value: "second" }).unwrap();
+            let state = state.borrow();
+            assert_eq!(
+                state.bytes,
+                b"{\"value\":\"first\"}\n{\"value\":\"second\"}\n".to_vec()
+            );
+            assert_eq!(state.flush_calls, 2);
+            assert_eq!(state.write_inputs.len(), 2);
+        }
 
-        let state = state.borrow();
-        assert_eq!(
-            state.bytes,
-            b"{\"value\":\"first\"}\n{\"value\":\"second\"}\n".to_vec()
-        );
-        assert_eq!(state.flush_calls, 2);
-        assert_eq!(state.write_inputs.len(), 2);
-    }
+        /// Invariant: Reusing the encode buffer cannot leak bytes from a prior longer record.
+        #[test]
+        fn short_record_after_long_record_has_no_stale_bytes() {
+            let (mut journal, state) = journal(256, [], []);
 
-    /// Invariant: Reusing the encode buffer cannot leak bytes from a prior longer record.
-    #[test]
-    fn test_short_record_after_long_record_has_no_stale_bytes() {
-        let (mut journal, state) = journal(256, [], []);
+            journal
+                .commit(&ObjectRecord {
+                    value: "this record is deliberately much longer than the next",
+                })
+                .unwrap();
+            journal.commit(&ObjectRecord { value: "x" }).unwrap();
 
-        journal
-            .commit(&ObjectRecord {
-                value: "this record is deliberately much longer than the next",
-            })
-            .unwrap();
-        journal.commit(&ObjectRecord { value: "x" }).unwrap();
-
-        assert_eq!(
+            assert_eq!(
             state.borrow().bytes,
             b"{\"value\":\"this record is deliberately much longer than the next\"}\n{\"value\":\"x\"}\n"
                 .to_vec()
         );
-    }
+        }
 
-    /// Invariant: max_record_bytes bounds the object only; the newline is additional storage.
-    #[test]
-    fn test_object_exactly_at_payload_bound_is_accepted() {
-        let record = ObjectRecord { value: "exact" };
-        let payload = serde_json::to_vec(&record).unwrap();
-        let (mut journal, state) = journal(payload.len(), [], []);
-
-        journal.commit(&record).unwrap();
-
-        let mut expected = payload;
-        expected.push(b'\n');
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, expected);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    /// Invariant: A JSON map is an accepted JSON object record.
-    #[test]
-    fn test_map_object_is_accepted() {
-        let mut record = BTreeMap::new();
-        record.insert("alpha", 7_u8);
-
-        let (mut journal, state) = journal(128, [], []);
-        journal.commit(&record).unwrap();
-
-        assert_eq!(state.borrow().bytes, b"{\"alpha\":7}\n".to_vec());
-    }
-
-    /// Invariant: Short successful writes are retried until the prepared record is complete.
-    #[test]
-    fn test_partial_writes_complete_the_record_before_flush() {
-        let record = ObjectRecord { value: "partial" };
-        let expected = b"{\"value\":\"partial\"}\n";
-
-        let (mut journal, state) =
-            journal(128, [WriteAction::Accept(1), WriteAction::Accept(2)], []);
-
-        journal.commit(&record).unwrap();
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, expected.to_vec());
-        assert_eq!(
-            state.write_inputs,
-            vec![
-                expected.to_vec(),
-                expected[1..].to_vec(),
-                expected[3..].to_vec(),
-            ]
-        );
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    // ========================================================================
-    // Journal::commit Record Shape and Serde Encoding Rejection
-    // ========================================================================
-
-    /// Invariant: Scalar JSON values are not journal records and reach no sink operation.
-    #[test]
-    fn test_scalar_payloads_are_rejected_as_not_an_object() {
-        assert_not_an_object(true);
-        assert_not_an_object(42_i64);
-        assert_not_an_object(String::from("not an object"));
-    }
-
-    /// Invariant: Arrays and null are not journal records and reach no sink operation.
-    #[test]
-    fn test_array_and_unit_payloads_are_rejected_as_not_an_object() {
-        assert_not_an_object(vec![1_u8, 2_u8, 3_u8]);
-        assert_not_an_object(());
-    }
-
-    /// Invariant: A serializer error after partial buffer output writes nothing to the sink.
-    #[test]
-    fn test_partial_encoding_error_writes_nothing_and_does_not_poison() {
-        let (mut journal, state) = journal(128, [], []);
-
-        assert!(matches!(
-            journal.commit(&FailsAfterPartialEncoding),
-            Err(JournalError::Encode(_))
-        ));
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
-
-        journal
-            .commit(&ObjectRecord { value: "recovery" })
-            .expect("encode failure must not disable the journal");
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    /// Invariant: Map keys not representable as JSON strings are Encode failures.
-    #[test]
-    fn test_unsupported_map_key_is_an_encode_error_without_sink_effect() {
-        let mut record = BTreeMap::new();
-        record.insert((1_u8, 2_u8), 3_u8);
-
-        let (mut journal, state) = journal(128, [], []);
-
-        assert!(matches!(
-            journal.commit(&record),
-            Err(JournalError::Encode(_))
-        ));
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
-
-        journal
-            .commit(&ObjectRecord { value: "recovery" })
-            .expect("encode failure must not disable the journal");
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    // ========================================================================
-    // Journal::commit Payload Bound Enforcement
-    // ========================================================================
-
-    /// Invariant: An object one byte over max_record_bytes writes and flushes nothing.
-    #[test]
-    fn test_oversized_object_is_rejected_without_sink_effect_or_poisoning() {
-        let record = ObjectRecord {
-            value: "one byte over",
-        };
-        let payload = serde_json::to_vec(&record).unwrap();
-        let (mut journal, state) = journal(payload.len() - 1, [], []);
-
-        assert!(matches!(
-            journal.commit(&record),
-            Err(JournalError::BoundExceeded)
-        ));
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
-
-        journal
-            .commit(&ObjectRecord { value: "recovery" })
-            .expect("bound failure must not disable the original journal");
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    /// Invariant: Overflow during JSON encoding is reported as BoundExceeded,
-    /// rather than as serde_json's underlying buffer write error.
-    #[test]
-    fn test_object_overflow_during_encoding_is_rejected_as_bound_exceeded() {
-        let record = ObjectRecord {
-            value: "two bytes over",
-        };
-        let payload = serde_json::to_vec(&record).unwrap();
-        let (mut journal, state) = journal(payload.len() - 2, [], []);
-
-        assert!(matches!(
-            journal.commit(&record),
-            Err(JournalError::BoundExceeded)
-        ));
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
-    }
-
-    /// Invariant: A bound below the two-byte `{}` payload rejects every object.
-    #[test]
-    fn test_one_byte_payload_bound_rejects_smallest_object() {
-        let record: BTreeMap<&str, u8> = BTreeMap::new();
-        let (mut journal, state) = journal(1, [], []);
-
-        assert!(matches!(
-            journal.commit(&record),
-            Err(JournalError::BoundExceeded)
-        ));
-        assert!(!journal.is_poisoned());
-        assert_no_sink_effect(&state);
-    }
-
-    /// Invariant: Bounds apply to JSON's encoded bytes, including escapes and UTF-8.
-    #[test]
-    fn test_payload_bound_counts_escaped_and_utf8_bytes() {
-        let record = ObjectRecord {
-            value: "quote: \"\n\u{00e9}",
-        };
-        let payload = b"{\"value\":\"quote: \\\"\\n\xc3\xa9\"}";
-
-        assert_eq!(serde_json::to_vec(&record).unwrap(), payload);
-
-        let (mut exact_journal, exact_state) = journal(payload.len(), [], []);
-        exact_journal.commit(&record).unwrap();
-
-        let mut expected = payload.to_vec();
-        expected.push(b'\n');
-        assert_eq!(exact_state.borrow().bytes, expected);
-
-        let (mut short_journal, short_state) = journal(payload.len() - 1, [], []);
-        assert!(matches!(
-            short_journal.commit(&record),
-            Err(JournalError::BoundExceeded)
-        ));
-        assert!(!short_journal.is_poisoned());
-        assert_no_sink_effect(&short_state);
-    }
-
-    /// Invariant: Objects are accepted iff their encoded length is at most max_record_bytes.
-    #[test]
-    fn test_payload_bound_size_sweep() {
-        for value_len in 0..=64 {
-            let value = "x".repeat(value_len);
-            let record = ObjectRecord { value: &value };
+        /// Invariant: max_record_bytes bounds the object only; the newline is additional storage.
+        #[test]
+        fn object_exactly_at_payload_bound_is_accepted() {
+            let record = ObjectRecord { value: "exact" };
             let payload = serde_json::to_vec(&record).unwrap();
+            let (mut journal, state) = journal(payload.len(), [], []);
 
-            for max_record_bytes in [payload.len() - 1, payload.len(), payload.len() + 1] {
-                let (mut journal, state) = journal(max_record_bytes, [], []);
-                let result = journal.commit(&record);
+            journal.commit(&record).unwrap();
 
-                if payload.len() <= max_record_bytes {
-                    assert!(result.is_ok());
-                    let mut expected = payload.clone();
-                    expected.push(b'\n');
-                    assert_eq!(state.borrow().bytes, expected);
-                } else {
-                    assert!(matches!(result, Err(JournalError::BoundExceeded)));
-                    assert!(!journal.is_poisoned());
-                    assert_no_sink_effect(&state);
-                }
-            }
+            let mut expected = payload;
+            expected.push(b'\n');
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, expected);
+            assert_eq!(state.flush_calls, 1);
+        }
+
+        /// Invariant: A JSON map is an accepted JSON object record.
+        #[test]
+        fn map_object_is_accepted() {
+            let mut record = BTreeMap::new();
+            record.insert("alpha", 7_u8);
+
+            let (mut journal, state) = journal(128, [], []);
+            journal.commit(&record).unwrap();
+
+            assert_eq!(state.borrow().bytes, b"{\"alpha\":7}\n".to_vec());
+        }
+
+        /// Invariant: Short successful writes are retried until the prepared record is complete.
+        #[test]
+        fn partial_writes_complete_the_record_before_flush() {
+            let record = ObjectRecord { value: "partial" };
+            let expected = b"{\"value\":\"partial\"}\n";
+
+            let (mut journal, state) =
+                journal(128, [WriteAction::Accept(1), WriteAction::Accept(2)], []);
+
+            journal.commit(&record).unwrap();
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, expected.to_vec());
+            assert_eq!(
+                state.write_inputs,
+                vec![
+                    expected.to_vec(),
+                    expected[1..].to_vec(),
+                    expected[3..].to_vec(),
+                ]
+            );
+            assert_eq!(state.flush_calls, 1);
         }
     }
 
-    /// Invariant: A rejected record leaves no residue in the reused buffer for a
-    /// later successful commit, even when the rejection left the buffer full.
-    #[test]
-    fn test_bound_exceeded_commit_leaves_no_residue_in_next_commit() {
-        let long_record = ObjectRecord {
-            value: "this value is deliberately too long to fit the configured bound",
-        };
-        let payload = serde_json::to_vec(&long_record).unwrap();
-        let (mut journal, state) = journal(payload.len() - 1, [], []);
+    mod journal_record_shape_and_serde_encoding_rejection {
+        use super::*;
 
-        assert!(matches!(
-            journal.commit(&long_record),
-            Err(JournalError::BoundExceeded)
-        ));
-        assert_no_sink_effect(&state);
+        // ========================================================================
+        // Journal::commit Record Shape and Serde Encoding Rejection
+        // ========================================================================
 
-        journal.commit(&ObjectRecord { value: "x" }).unwrap();
+        /// Invariant: Scalar JSON values are not journal records and reach no sink operation.
+        #[test]
+        fn scalar_payloads_are_rejected_as_not_an_object() {
+            assert_not_an_object(true);
+            assert_not_an_object(42_i64);
+            assert_not_an_object(String::from("not an object"));
+        }
 
-        assert_eq!(state.borrow().bytes, b"{\"value\":\"x\"}\n".to_vec());
+        /// Invariant: Arrays and null are not journal records and reach no sink operation.
+        #[test]
+        fn array_and_unit_payloads_are_rejected_as_not_an_object() {
+            assert_not_an_object(vec![1_u8, 2_u8, 3_u8]);
+            assert_not_an_object(());
+        }
+
+        /// Invariant: A serializer error after partial buffer output writes nothing to the sink.
+        #[test]
+        fn partial_encoding_error_writes_nothing_and_does_not_poison() {
+            let (mut journal, state) = journal(128, [], []);
+
+            assert!(matches!(
+                journal.commit(&FailsAfterPartialEncoding),
+                Err(JournalError::Encode(_))
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+
+            journal
+                .commit(&ObjectRecord { value: "recovery" })
+                .expect("encode failure must not disable the journal");
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+        }
+
+        /// Invariant: Map keys not representable as JSON strings are Encode failures.
+        #[test]
+        fn unsupported_map_key_is_an_encode_error_without_sink_effect() {
+            let mut record = BTreeMap::new();
+            record.insert((1_u8, 2_u8), 3_u8);
+
+            let (mut journal, state) = journal(128, [], []);
+
+            assert!(matches!(
+                journal.commit(&record),
+                Err(JournalError::Encode(_))
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+
+            journal
+                .commit(&ObjectRecord { value: "recovery" })
+                .expect("encode failure must not disable the journal");
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+        }
     }
 
-    /// Invariant: The smallest possible JSON object commits at the smallest bound
-    /// that can hold it plus the reserved newline byte.
-    #[test]
-    fn test_smallest_possible_object_commits_at_minimal_bound() {
-        let record: BTreeMap<&str, u8> = BTreeMap::new();
-        let (mut journal, state) = journal(2, [], []);
+    mod journal_payload_bound_enforcement {
+        use super::*;
 
-        journal.commit(&record).unwrap();
+        // ========================================================================
+        // Journal::commit Payload Bound Enforcement
+        // ========================================================================
 
-        assert_eq!(state.borrow().bytes, b"{}\n".to_vec());
+        /// Invariant: An object one byte over max_record_bytes writes and flushes nothing.
+        #[test]
+        fn oversized_object_is_rejected_without_sink_effect_or_poisoning() {
+            let record = ObjectRecord {
+                value: "one byte over",
+            };
+            let payload = serde_json::to_vec(&record).unwrap();
+            let (mut journal, state) = journal(payload.len() - 1, [], []);
+
+            assert!(matches!(
+                journal.commit(&record),
+                Err(JournalError::BoundExceeded)
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+
+            journal
+                .commit(&ObjectRecord { value: "recovery" })
+                .expect("bound failure must not disable the original journal");
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, b"{\"value\":\"recovery\"}\n".to_vec());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+        }
+
+        /// Invariant: Overflow during JSON encoding is reported as BoundExceeded,
+        /// rather than as serde_json's underlying buffer write error.
+        #[test]
+        fn object_overflow_during_encoding_is_rejected_as_bound_exceeded() {
+            let record = ObjectRecord {
+                value: "two bytes over",
+            };
+            let payload = serde_json::to_vec(&record).unwrap();
+            let (mut journal, state) = journal(payload.len() - 2, [], []);
+
+            assert!(matches!(
+                journal.commit(&record),
+                Err(JournalError::BoundExceeded)
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+        }
+
+        /// Invariant: A bound below the two-byte `{}` payload rejects every object.
+        #[test]
+        fn one_byte_payload_bound_rejects_smallest_object() {
+            let record: BTreeMap<&str, u8> = BTreeMap::new();
+            let (mut journal, state) = journal(1, [], []);
+
+            assert!(matches!(
+                journal.commit(&record),
+                Err(JournalError::BoundExceeded)
+            ));
+            assert!(!journal.is_poisoned());
+            assert_no_sink_effect(&state);
+        }
+
+        /// Invariant: Bounds apply to JSON's encoded bytes, including escapes and UTF-8.
+        #[test]
+        fn payload_bound_counts_escaped_and_utf8_bytes() {
+            let record = ObjectRecord {
+                value: "quote: \"\n\u{00e9}",
+            };
+            let payload = b"{\"value\":\"quote: \\\"\\n\xc3\xa9\"}";
+
+            assert_eq!(serde_json::to_vec(&record).unwrap(), payload);
+
+            let (mut exact_journal, exact_state) = journal(payload.len(), [], []);
+            exact_journal.commit(&record).unwrap();
+
+            let mut expected = payload.to_vec();
+            expected.push(b'\n');
+            assert_eq!(exact_state.borrow().bytes, expected);
+
+            let (mut short_journal, short_state) = journal(payload.len() - 1, [], []);
+            assert!(matches!(
+                short_journal.commit(&record),
+                Err(JournalError::BoundExceeded)
+            ));
+            assert!(!short_journal.is_poisoned());
+            assert_no_sink_effect(&short_state);
+        }
+
+        /// Invariant: Objects are accepted iff their encoded length is at most max_record_bytes.
+        #[test]
+        fn payload_bound_size_sweep() {
+            for value_len in 0..=64 {
+                let value = "x".repeat(value_len);
+                let record = ObjectRecord { value: &value };
+                let payload = serde_json::to_vec(&record).unwrap();
+
+                for max_record_bytes in [payload.len() - 1, payload.len(), payload.len() + 1] {
+                    let (mut journal, state) = journal(max_record_bytes, [], []);
+                    let result = journal.commit(&record);
+
+                    if payload.len() <= max_record_bytes {
+                        assert!(result.is_ok());
+                        let mut expected = payload.clone();
+                        expected.push(b'\n');
+                        assert_eq!(state.borrow().bytes, expected);
+                    } else {
+                        assert!(matches!(result, Err(JournalError::BoundExceeded)));
+                        assert!(!journal.is_poisoned());
+                        assert_no_sink_effect(&state);
+                    }
+                }
+            }
+        }
+
+        /// Invariant: A rejected record leaves no residue in the reused buffer for a
+        /// later successful commit, even when the rejection left the buffer full.
+        #[test]
+        fn bound_exceeded_commit_leaves_no_residue_in_next_commit() {
+            let long_record = ObjectRecord {
+                value: "this value is deliberately too long to fit the configured bound",
+            };
+            let payload = serde_json::to_vec(&long_record).unwrap();
+            let (mut journal, state) = journal(payload.len() - 1, [], []);
+
+            assert!(matches!(
+                journal.commit(&long_record),
+                Err(JournalError::BoundExceeded)
+            ));
+            assert_no_sink_effect(&state);
+
+            journal.commit(&ObjectRecord { value: "x" }).unwrap();
+
+            assert_eq!(state.borrow().bytes, b"{\"value\":\"x\"}\n".to_vec());
+        }
+
+        /// Invariant: The smallest possible JSON object commits at the smallest bound
+        /// that can hold it plus the reserved newline byte.
+        #[test]
+        fn smallest_possible_object_commits_at_minimal_bound() {
+            let record: BTreeMap<&str, u8> = BTreeMap::new();
+            let (mut journal, state) = journal(2, [], []);
+
+            journal.commit(&record).unwrap();
+
+            assert_eq!(state.borrow().bytes, b"{}\n".to_vec());
+        }
     }
 
-    // ========================================================================
-    // Journal Sink Write Loop: Partial Progress and Write Failures
-    // ========================================================================
+    mod journal_sink_write_loop_and_write_failures {
+        use super::*;
 
-    /// Invariant: A write failure before progress poisons the Journal and reports Write.
-    #[test]
-    fn test_immediate_write_error_poison_journal() {
-        let (mut journal, state) =
-            journal(128, [WriteAction::Error(ErrorKind::PermissionDenied)], []);
+        // ========================================================================
+        // Journal Sink Write Loop: Partial Progress and Write Failures
+        // ========================================================================
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::PermissionDenied,
-        );
-        assert!(journal.is_poisoned());
+        /// Invariant: A write failure before progress poisons the Journal and reports Write.
+        #[test]
+        fn immediate_write_error_poison_journal() {
+            let (mut journal, state) =
+                journal(128, [WriteAction::Error(ErrorKind::PermissionDenied)], []);
 
-        let state = state.borrow();
-        assert_eq!(state.bytes, Vec::<u8>::new());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 0);
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::PermissionDenied,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, Vec::<u8>::new());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: A write failure after partial progress poisons the Journal.
+        #[test]
+        fn partial_write_then_error_poison_journal() {
+            let expected = b"{\"value\":\"record\"}\n";
+            let (mut journal, state) = journal(
+                128,
+                [
+                    WriteAction::Accept(4),
+                    WriteAction::Error(ErrorKind::BrokenPipe),
+                ],
+                [],
+            );
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::BrokenPipe,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, expected[..4].to_vec());
+            assert_eq!(state.write_inputs.len(), 2);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: Ok(0) becomes WriteZero and permanently poisons the Journal.
+        #[test]
+        fn zero_progress_write_poison_journal_with_write_zero() {
+            let (mut journal, state) = journal(128, [WriteAction::Accept(0)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::WriteZero,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: Ok(0) poisons with WriteZero even after earlier partial progress,
+        /// not only when it is the very first write.
+        #[test]
+        fn zero_progress_write_after_partial_progress_poison_journal_with_write_zero() {
+            let (mut journal, state) =
+                journal(128, [WriteAction::Accept(4), WriteAction::Accept(0)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::WriteZero,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 2);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: Interrupted writes are not retried and permanently poison the Journal.
+        #[test]
+        fn interrupted_write_is_not_retried() {
+            let (mut journal, state) =
+                journal(128, [WriteAction::Error(ErrorKind::Interrupted)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::Interrupted,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(
+                state.write_inputs.len(),
+                1,
+                "Interrupted writes must not be retried"
+            );
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: An Interrupted write is not retried even mid-loop, after progress.
+        #[test]
+        fn interrupted_write_after_partial_progress_is_not_retried() {
+            let (mut journal, state) = journal(
+                128,
+                [
+                    WriteAction::Accept(4),
+                    WriteAction::Error(ErrorKind::Interrupted),
+                ],
+                [],
+            );
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::Interrupted,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(
+                state.write_inputs.len(),
+                2,
+                "a mid-loop Interrupted write must not be retried"
+            );
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: A sink cannot claim to have written more bytes than it received.
+        #[test]
+        fn oversized_write_count_poison_journal_with_invalid_data() {
+            let (mut journal, state) = journal(128, [WriteAction::Accept(usize::MAX)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::InvalidData,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, Vec::<u8>::new());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: An oversized write-count claim is judged against the bytes still
+        /// owed, not the record's total length, so it is caught even mid-loop.
+        #[test]
+        fn oversized_write_count_after_partial_progress_poison_journal_with_invalid_data() {
+            let (mut journal, state) =
+                journal(128, [WriteAction::Accept(4), WriteAction::Accept(17)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::InvalidData,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 2);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: A write failure short-circuits before flush is ever attempted,
+        /// even when a flush failure is also scripted to occur.
+        #[test]
+        fn write_error_short_circuits_before_flush_is_attempted() {
+            let (mut journal, state) = journal(
+                128,
+                [WriteAction::Error(ErrorKind::PermissionDenied)],
+                [FlushAction::Error(ErrorKind::BrokenPipe)],
+            );
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                true,
+                ErrorKind::PermissionDenied,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(
+                state.flush_calls, 0,
+                "a write failure must never reach flush"
+            );
+        }
+
+        /// Invariant: The write-retry loop completes correctly no matter how finely
+        /// the sink fragments its progress, one byte at a time.
+        #[test]
+        fn single_byte_writes_complete_the_record_before_flush() {
+            let record = ObjectRecord { value: "record" };
+            let expected = b"{\"value\":\"record\"}\n";
+
+            let write_actions = std::iter::repeat(WriteAction::Accept(1)).take(expected.len());
+            let (mut journal, state) = journal(128, write_actions, []);
+
+            journal.commit(&record).unwrap();
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, expected.to_vec());
+            assert_eq!(state.write_inputs.len(), expected.len());
+            assert_eq!(state.flush_calls, 1);
+        }
     }
 
-    /// Invariant: A write failure after partial progress poisons the Journal.
-    #[test]
-    fn test_partial_write_then_error_poison_journal() {
-        let expected = b"{\"value\":\"record\"}\n";
-        let (mut journal, state) = journal(
-            128,
-            [
-                WriteAction::Accept(4),
-                WriteAction::Error(ErrorKind::BrokenPipe),
-            ],
-            [],
-        );
+    mod journal_sink_flush_commitment_and_flush_failures {
+        use super::*;
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::BrokenPipe,
-        );
-        assert!(journal.is_poisoned());
+        // ========================================================================
+        // Journal Sink Flush Commitment and Flush Failures
+        // ========================================================================
 
-        let state = state.borrow();
-        assert_eq!(state.bytes, expected[..4].to_vec());
-        assert_eq!(state.write_inputs.len(), 2);
-        assert_eq!(state.flush_calls, 0);
+        /// Invariant: A flush error poisons after all record bytes were offered to the sink.
+        #[test]
+        fn flush_error_poison_journal_and_reports_flush_operation() {
+            let expected = b"{\"value\":\"record\"}\n";
+            let (mut journal, state) =
+                journal(128, [], [FlushAction::Error(ErrorKind::BrokenPipe)]);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "record" }),
+                false,
+                ErrorKind::BrokenPipe,
+            );
+            assert!(journal.is_poisoned());
+
+            let state = state.borrow();
+            assert_eq!(state.bytes, expected.to_vec());
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+        }
     }
 
-    /// Invariant: Ok(0) becomes WriteZero and permanently poisons the Journal.
-    #[test]
-    fn test_zero_progress_write_poison_journal_with_write_zero() {
-        let (mut journal, state) = journal(128, [WriteAction::Accept(0)], []);
+    mod journal_poison_state_and_post_failure_call_guard {
+        use super::*;
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::WriteZero,
-        );
-        assert!(journal.is_poisoned());
+        // ========================================================================
+        // Journal Poison State and Post-Failure Call Guard
+        // ========================================================================
 
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 0);
+        /// Invariant: Once poisoned, Journal performs no later explicit write or flush operation.
+        #[test]
+        fn poisoned_journal_panics_before_any_later_sink_operation() {
+            let (mut journal, state) =
+                journal(128, [WriteAction::Error(ErrorKind::BrokenPipe)], []);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "first" }),
+                true,
+                ErrorKind::BrokenPipe,
+            );
+            assert!(journal.is_poisoned());
+
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let _ = journal.commit(&ObjectRecord { value: "second" });
+            }));
+
+            assert!(panic.is_err());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 0);
+        }
+
+        /// Invariant: Poisoning via a flush failure also blocks all later commits,
+        /// not only poisoning caused by a write failure.
+        #[test]
+        fn flush_poisoned_journal_panics_before_any_later_sink_operation() {
+            let (mut journal, state) =
+                journal(128, [], [FlushAction::Error(ErrorKind::BrokenPipe)]);
+
+            assert_sink_error(
+                journal.commit(&ObjectRecord { value: "first" }),
+                false,
+                ErrorKind::BrokenPipe,
+            );
+            assert!(journal.is_poisoned());
+
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let _ = journal.commit(&ObjectRecord { value: "second" });
+            }));
+
+            assert!(panic.is_err());
+
+            let state = state.borrow();
+            assert_eq!(state.write_inputs.len(), 1);
+            assert_eq!(state.flush_calls, 1);
+        }
     }
 
-    /// Invariant: Ok(0) poisons with WriteZero even after earlier partial progress,
-    /// not only when it is the very first write.
-    #[test]
-    fn test_zero_progress_write_after_partial_progress_poison_journal_with_write_zero() {
-        let (mut journal, state) =
-            journal(128, [WriteAction::Accept(4), WriteAction::Accept(0)], []);
+    mod bounded_buffer_capacity_and_reset_behavior {
+        use super::*;
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::WriteZero,
-        );
-        assert!(journal.is_poisoned());
+        // ========================================================================
+        // BoundedBuffer Internal Capacity and Reset Behavior
+        // ========================================================================
 
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 2);
-        assert_eq!(state.flush_calls, 0);
-    }
+        /// Invariant: A rejected BoundedBuffer write leaves existing bytes unchanged.
+        #[test]
+        fn bounded_buffer_rejects_oversized_write_without_extending() {
+            let mut buffer = BoundedBuffer::new(nonzero(3));
 
-    /// Invariant: Interrupted writes are not retried and permanently poison the Journal.
-    #[test]
-    fn test_interrupted_write_is_not_retried() {
-        let (mut journal, state) = journal(128, [WriteAction::Error(ErrorKind::Interrupted)], []);
+            assert_eq!(buffer.write(b"abc").unwrap(), 3);
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::Interrupted,
-        );
-        assert!(journal.is_poisoned());
+            let error = buffer.write(b"d").unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WriteZero);
+            assert_eq!(buffer.written_bytes(), b"abc");
+            assert!(buffer.exceeded);
+        }
 
-        let state = state.borrow();
-        assert_eq!(
-            state.write_inputs.len(),
-            1,
-            "Interrupted writes must not be retried"
-        );
-        assert_eq!(state.flush_calls, 0);
-    }
+        /// Invariant: Clearing BoundedBuffer resets both cursor and sticky overflow state.
+        #[test]
+        fn bounded_buffer_clear_resets_record_state() {
+            let mut buffer = BoundedBuffer::new(nonzero(3));
 
-    /// Invariant: An Interrupted write is not retried even mid-loop, after progress.
-    #[test]
-    fn test_interrupted_write_after_partial_progress_is_not_retried() {
-        let (mut journal, state) = journal(
-            128,
-            [
-                WriteAction::Accept(4),
-                WriteAction::Error(ErrorKind::Interrupted),
-            ],
-            [],
-        );
+            buffer.write(b"abc").unwrap();
+            assert!(buffer.write(b"d").is_err());
+            assert!(buffer.exceeded);
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::Interrupted,
-        );
-        assert!(journal.is_poisoned());
+            buffer.clear();
 
-        let state = state.borrow();
-        assert_eq!(
-            state.write_inputs.len(),
-            2,
-            "a mid-loop Interrupted write must not be retried"
-        );
-        assert_eq!(state.flush_calls, 0);
-    }
+            assert_eq!(buffer.written_bytes(), b"");
+            assert!(!buffer.exceeded);
 
-    /// Invariant: A sink cannot claim to have written more bytes than it received.
-    #[test]
-    fn test_oversized_write_count_poison_journal_with_invalid_data() {
-        let (mut journal, state) = journal(128, [WriteAction::Accept(usize::MAX)], []);
+            buffer.write(b"xy").unwrap();
+            assert_eq!(buffer.written_bytes(), b"xy");
+        }
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::InvalidData,
-        );
-        assert!(journal.is_poisoned());
+        /// Invariant: A zero-length write is always accepted, even at full capacity.
+        #[test]
+        fn bounded_buffer_zero_length_write_at_full_capacity_is_accepted() {
+            let mut buffer = BoundedBuffer::new(nonzero(3));
 
-        let state = state.borrow();
-        assert_eq!(state.bytes, Vec::<u8>::new());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 0);
-    }
+            assert_eq!(buffer.write(b"abc").unwrap(), 3);
+            assert_eq!(buffer.write(b"").unwrap(), 0);
 
-    /// Invariant: An oversized write-count claim is judged against the bytes still
-    /// owed, not the record's total length, so it is caught even mid-loop.
-    #[test]
-    fn test_oversized_write_count_after_partial_progress_poison_journal_with_invalid_data() {
-        let (mut journal, state) =
-            journal(128, [WriteAction::Accept(4), WriteAction::Accept(17)], []);
+            assert_eq!(buffer.written_bytes(), b"abc");
+            assert!(!buffer.exceeded);
+        }
 
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::InvalidData,
-        );
-        assert!(journal.is_poisoned());
+        /// Invariant: Successive writes without an intervening clear accumulate in order.
+        #[test]
+        fn bounded_buffer_accumulates_across_multiple_writes() {
+            let mut buffer = BoundedBuffer::new(nonzero(5));
 
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 2);
-        assert_eq!(state.flush_calls, 0);
-    }
+            assert_eq!(buffer.write(b"ab").unwrap(), 2);
+            assert_eq!(buffer.write(b"cd").unwrap(), 2);
 
-    /// Invariant: A write failure short-circuits before flush is ever attempted,
-    /// even when a flush failure is also scripted to occur.
-    #[test]
-    fn test_write_error_short_circuits_before_flush_is_attempted() {
-        let (mut journal, state) = journal(
-            128,
-            [WriteAction::Error(ErrorKind::PermissionDenied)],
-            [FlushAction::Error(ErrorKind::BrokenPipe)],
-        );
-
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            true,
-            ErrorKind::PermissionDenied,
-        );
-        assert!(journal.is_poisoned());
-
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(
-            state.flush_calls, 0,
-            "a write failure must never reach flush"
-        );
-    }
-
-    /// Invariant: The write-retry loop completes correctly no matter how finely
-    /// the sink fragments its progress, one byte at a time.
-    #[test]
-    fn test_single_byte_writes_complete_the_record_before_flush() {
-        let record = ObjectRecord { value: "record" };
-        let expected = b"{\"value\":\"record\"}\n";
-
-        let write_actions = std::iter::repeat(WriteAction::Accept(1)).take(expected.len());
-        let (mut journal, state) = journal(128, write_actions, []);
-
-        journal.commit(&record).unwrap();
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, expected.to_vec());
-        assert_eq!(state.write_inputs.len(), expected.len());
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    // ========================================================================
-    // Journal Sink Flush Commitment and Flush Failures
-    // ========================================================================
-
-    /// Invariant: A flush error poisons after all record bytes were offered to the sink.
-    #[test]
-    fn test_flush_error_poison_journal_and_reports_flush_operation() {
-        let expected = b"{\"value\":\"record\"}\n";
-        let (mut journal, state) = journal(128, [], [FlushAction::Error(ErrorKind::BrokenPipe)]);
-
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "record" }),
-            false,
-            ErrorKind::BrokenPipe,
-        );
-        assert!(journal.is_poisoned());
-
-        let state = state.borrow();
-        assert_eq!(state.bytes, expected.to_vec());
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    // ========================================================================
-    // Journal Poison State and Post-Failure Call Guard
-    // ========================================================================
-
-    /// Invariant: Once poisoned, Journal performs no later explicit write or flush operation.
-    #[test]
-    fn test_poisoned_journal_panics_before_any_later_sink_operation() {
-        let (mut journal, state) = journal(128, [WriteAction::Error(ErrorKind::BrokenPipe)], []);
-
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "first" }),
-            true,
-            ErrorKind::BrokenPipe,
-        );
-        assert!(journal.is_poisoned());
-
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = journal.commit(&ObjectRecord { value: "second" });
-        }));
-
-        assert!(panic.is_err());
-
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 0);
-    }
-
-    /// Invariant: Poisoning via a flush failure also blocks all later commits,
-    /// not only poisoning caused by a write failure.
-    #[test]
-    fn test_flush_poisoned_journal_panics_before_any_later_sink_operation() {
-        let (mut journal, state) = journal(128, [], [FlushAction::Error(ErrorKind::BrokenPipe)]);
-
-        assert_sink_error(
-            journal.commit(&ObjectRecord { value: "first" }),
-            false,
-            ErrorKind::BrokenPipe,
-        );
-        assert!(journal.is_poisoned());
-
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = journal.commit(&ObjectRecord { value: "second" });
-        }));
-
-        assert!(panic.is_err());
-
-        let state = state.borrow();
-        assert_eq!(state.write_inputs.len(), 1);
-        assert_eq!(state.flush_calls, 1);
-    }
-
-    // ========================================================================
-    // BoundedBuffer Internal Capacity and Reset Behavior
-    // ========================================================================
-
-    /// Invariant: A rejected BoundedBuffer write leaves existing bytes unchanged.
-    #[test]
-    fn test_bounded_buffer_rejects_oversized_write_without_extending() {
-        let mut buffer = BoundedBuffer::new(nonzero(3));
-
-        assert_eq!(buffer.write(b"abc").unwrap(), 3);
-
-        let error = buffer.write(b"d").unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::WriteZero);
-        assert_eq!(buffer.written_bytes(), b"abc");
-        assert!(buffer.exceeded);
-    }
-
-    /// Invariant: Clearing BoundedBuffer resets both cursor and sticky overflow state.
-    #[test]
-    fn test_bounded_buffer_clear_resets_record_state() {
-        let mut buffer = BoundedBuffer::new(nonzero(3));
-
-        buffer.write(b"abc").unwrap();
-        assert!(buffer.write(b"d").is_err());
-        assert!(buffer.exceeded);
-
-        buffer.clear();
-
-        assert_eq!(buffer.written_bytes(), b"");
-        assert!(!buffer.exceeded);
-
-        buffer.write(b"xy").unwrap();
-        assert_eq!(buffer.written_bytes(), b"xy");
-    }
-
-    /// Invariant: A zero-length write is always accepted, even at full capacity.
-    #[test]
-    fn test_bounded_buffer_zero_length_write_at_full_capacity_is_accepted() {
-        let mut buffer = BoundedBuffer::new(nonzero(3));
-
-        assert_eq!(buffer.write(b"abc").unwrap(), 3);
-        assert_eq!(buffer.write(b"").unwrap(), 0);
-
-        assert_eq!(buffer.written_bytes(), b"abc");
-        assert!(!buffer.exceeded);
-    }
-
-    /// Invariant: Successive writes without an intervening clear accumulate in order.
-    #[test]
-    fn test_bounded_buffer_accumulates_across_multiple_writes() {
-        let mut buffer = BoundedBuffer::new(nonzero(5));
-
-        assert_eq!(buffer.write(b"ab").unwrap(), 2);
-        assert_eq!(buffer.write(b"cd").unwrap(), 2);
-
-        assert_eq!(buffer.written_bytes(), b"abcd");
+            assert_eq!(buffer.written_bytes(), b"abcd");
+        }
     }
 }
