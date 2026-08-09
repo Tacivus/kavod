@@ -484,15 +484,22 @@ pub struct Journal<W: std::io::Write> {
 impl<W: std::io::Write> Journal<W> {
     /// Reserves the encode buffer up front.
     pub fn new(writer: W, max_record_bytes: NonZeroUsize)
-        -> Result<Self, std::collections::TryReserveError>;
+        -> Result<Self, JournalBuildError>;
     /// Encode into bounded storage, write one line, flush.
     /// Precondition: not poisoned (§7.4).
     pub fn commit<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError>;
     pub fn is_poisoned(&self) -> bool;
 }
 
+pub enum JournalBuildError {
+    /// `max_record_bytes` leaves no room for the reserved newline byte.
+    MaxBytesTooLarge,
+}
+
 pub enum JournalError {
     Encode(serde_json::Error),
+    /// The payload serialized to something other than a JSON object.
+    NotAnObject,
     BoundExceeded,
     Sink { operation: SinkOperation, error: std::io::Error },
 }
@@ -504,7 +511,9 @@ pub enum SinkOperation { Write, Flush }
 
 Terminology: the *sink* is the `W: std::io::Write` value the Journal writes into — a file, an in-memory `Vec<u8>`, a socket; the Journal neither knows nor cares which. *Poisoned* is the Journal's permanent post-sink-failure state: after one failed write or flush, the sink's tail is unknowable (`JRN-COMMIT`), so appending more bytes could only corrupt evidence, and the Journal refuses. `is_poisoned` exists for the Engine's Fatal-finalization decision (§8.4).
 
-Encode requirements on all payloads: `Serialize` implementations are deterministic, side-effect-free, bounded, and nonpanicking (trusted obligations, §10); map iteration order is stable; the bounded encoder rejects non-finite floats and map keys not representable as JSON strings as `Encode` failures. Lossy serialization is evidence only of the fields it emits.
+Encode requirements on all payloads: `Serialize` implementations are deterministic, side-effect-free, bounded, and nonpanicking (trusted obligations, §10); map iteration order is stable; map keys not representable as JSON strings are `Encode` failures. Non-finite floating-point serialization follows `serde_json` behavior. Lossy serialization is evidence only of the fields it emits. `JRN-FORMAT` requires every record to serialize as a JSON object; a payload that does not is rejected as `NotAnObject`, checked immediately after a successful encode and before the newline is appended, with the same write-nothing, poison-nothing guarantee as `Encode` and `BoundExceeded`.
+
+`max_record_bytes` plus the reserved newline byte must not overflow `usize`; `JournalBuildError::MaxBytesTooLarge` rejects the one construction where it would (`max_record_bytes == usize::MAX`), per A6's ban on silent saturation.
 
 Memory sinks (`Vec<u8>` via a user-owned shared handle) make tests and fault injection direct; `std::io::sink()` discards evidence but still pays encoding. Because JSONL bytes alone cannot identify the committed prefix after a sink failure, replay requires a cleanly completed Journal or an externally trusted committed boundary.
 
@@ -513,22 +522,25 @@ Memory sinks (`Vec<u8>` via a user-owned shared handle) make tests and fault inj
 | ID | Invariant |
 |---|---|
 | `JRN-FORMAT` | One record is one serde JSON object plus one newline; line order is the sequence. `max_record_bytes` bounds the encoded object and excludes the newline. |
-| `JRN-ENCODE` | Encoding completes in the reusable bounded buffer — the encoder rejects excess bytes before extending it — before any byte of that record reaches the sink. `Encode` and `BoundExceeded` therefore write nothing and do not poison. |
+| `JRN-ENCODE` | Encoding completes in the reusable bounded buffer before any byte of that record reaches the sink. `Encode`, `NotAnObject`, and `BoundExceeded` therefore write nothing and do not poison. |
 | `JRN-COMMIT` | Only a successful flush commits a record. After a sink failure, bytes past the last committed record are an uncertain suffix and are not records, even if they form complete lines. |
 | `JRN-POISON` | Any sink failure — a write or flush Error, zero progress (`Ok(0)` becomes `WriteZero`), or `Interrupted`, which is not retried — permanently poisons the Journal; no later explicit `write` or `flush` occurs through it. |
 | `JRN-SINK` | `W: std::io::Write` is the whole persistence abstraction. A sink is fresh for one run or positioned immediately after a newline. Persistence beyond successful `flush`, including power-loss durability, is outside the contract; writer destructor behavior is too. |
 
 ### 7.4 Implementation
 
-The bounded encoder is the reusable buffer behind an internal `std::io::Write` adapter that rejects any write which would exceed `max_record_bytes` *before* extending the buffer (`JRN-ENCODE`); `serde_json::to_writer` targets that adapter. serde_json itself surfaces non-finite floats and non-string map keys as errors, satisfying §7.2's rejection requirement as `Encode`.
+The bounded encoder is the reusable buffer behind an internal `std::io::Write` adapter; `serde_json::to_writer` targets that adapter. The adapter and newline append reject a record that cannot fit the configured buffer, reporting `BoundExceeded` before any sink interaction (`JRN-ENCODE`). serde_json surfaces map keys not representable as JSON strings as `Encode` errors.
+
+`new` computes `max_record_bytes.checked_add(1)` to size the buffer for the object plus the reserved newline byte; overflow — only at `max_record_bytes == usize::MAX` — is `JournalBuildError::MaxBytesTooLarge` rather than a saturated size (A6).
 
 | Step | `commit` procedure |
 |---|---|
 | 1 | Poisoned → precondition violation: an invariant panic (A8). The Engine never calls a poisoned Journal (§8.4). |
 | 2 | Clear the buffer; encode the record through the bounded adapter. Adapter rejection → `BoundExceeded`; serde failure → `Encode`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
-| 3 | Append the newline (excluded from the bound, `JRN-FORMAT`). |
-| 4 | Write the buffer with a hand-rolled loop bounded by record length — not `write_all`, because `Interrupted` is not retried (`JRN-POISON`); `Ok(0)` becomes `WriteZero`. First failure → poison, `Sink { operation: Write, .. }`. |
-| 5 | Flush. Failure → poison, `Sink { operation: Flush, .. }`. Success commits (`JRN-COMMIT`). |
+| 3 | Encoded bytes must start with `{` and end with `}` — otherwise `NotAnObject`. Nothing was written, nothing poisons (`JRN-ENCODE`). |
+| 4 | Append the newline (excluded from the bound, `JRN-FORMAT`). |
+| 5 | Write the buffer with a hand-rolled loop bounded by record length — not `write_all`, because `Interrupted` is not retried (`JRN-POISON`); `Ok(0)` becomes `WriteZero`. First failure → poison, `Sink { operation: Write, .. }`. |
+| 6 | Flush. Failure → poison, `Sink { operation: Flush, .. }`. Success commits (`JRN-COMMIT`). |
 
 The Journal writes directly from its complete record buffer, with no second buffering layer. Reading Journals back is not Kavod's concern: the output is plain JSON Lines, and consumers read it with whatever tooling they like.
 
