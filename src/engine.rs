@@ -46,17 +46,20 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineConfig {
     pub max_turns: NonZeroUsize,
     pub max_commands_per_turn: NonZeroUsize,
     pub max_record_bytes: NonZeroUsize,
 }
 
+#[derive(Debug)]
 pub enum EngineExit<S, AF, EE> {
     Stopped { state: S },
     Fatal { state: S, cause: FatalCause<AF, EE> },
 }
 
+#[derive(Debug)]
 pub enum FatalCause<AF, EE> {
     Application(AF),
     Environment(EnvironmentFatal<EE>),
@@ -64,6 +67,7 @@ pub enum FatalCause<AF, EE> {
     Core(CoreFatal),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreFatal {
     TimeRegression {
         previous: Timestamp,
@@ -73,16 +77,19 @@ pub enum CoreFatal {
     CommandBoundExceeded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
     CommandBuffer(TryReserveError),
     Journal(JournalBuildError),
 }
 
+#[derive(Debug)]
 pub struct JournalFatal {
     pub record_kind: RecordKind,
     pub error: JournalError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordKind {
     RunStarted,
     EventAccepted,
@@ -92,11 +99,13 @@ pub enum RecordKind {
     TurnCompleted,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentFatal<EE> {
     pub error: EE,
     pub operation: EnvironmentOperation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentOperation {
     Start,
     NextEvent,
