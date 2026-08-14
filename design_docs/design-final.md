@@ -156,7 +156,7 @@ impl<'a, C> Context<'a, C> {
 
 ### 2.2 Semantics
 
-`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `Timestamp` nanosecond count originating at unix with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
+`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `Timestamp` is a nanosecond count with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
 
 During a handler, `Context` is the single authority for the current turn's index and logical time (A1) — including the accepted start time at index 0, so no synthetic "ready" Event exists; the `EventAccepted` record evidences the same facts (§8.2). That staged Commands are never dropped, coalesced, duplicated, or reordered follows from A3; that State mutations survive a later failure follows from A3 as well.
 
