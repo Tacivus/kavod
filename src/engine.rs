@@ -1,11 +1,13 @@
 use std::{collections::TryReserveError, num::NonZeroUsize};
 
+use serde::Serialize;
+
 use crate::{
-    application::Application,
+    application::{Application, Outcome},
     bounded_buffer::BoundedBuffer,
     environment::Environment,
     journal::{Journal, JournalBuildError, JournalError},
-    time::Timestamp,
+    time::{EventIndex, Timestamp},
 };
 
 pub struct Engine<A, E, W>
@@ -28,9 +30,9 @@ where
     W: std::io::Write,
 {
     pub fn new(config: EngineConfig, app: A, env: E, writer: W) -> Result<Self, BuildError> {
-        let journal = Journal::new(writer, config.max_record_bytes).map_err(BuildError::Journal)?;
         let cmd_buf = BoundedBuffer::new(config.max_commands_per_turn.get())
             .map_err(BuildError::CommandBuffer)?;
+        let journal = Journal::new(writer, config.max_record_bytes).map_err(BuildError::Journal)?;
 
         Ok(Self {
             journal: journal,
@@ -44,6 +46,27 @@ where
     pub fn run(self) -> EngineExit<A::State, A::Fatal, E::Error> {
         todo!()
     }
+
+    fn process_turn(
+        index: EventIndex,
+        outcome: Outcome<A::Fatal>,
+        overflowed: bool,
+        cmd_buf: &mut BoundedBuffer<A::Command>,
+        journal: &mut Journal<W>,
+        env: &mut Option<E>,
+    ) -> TurnFlow<A::Fatal, E::Error> {
+        todo!()
+    }
+
+    fn fatal_exit() -> EngineExit<A::State, A::Fatal, E::Error> {
+        todo!()
+    }
+}
+
+enum TurnFlow<AF, EE> {
+    Continue,
+    Stop,
+    Fatal(FatalCause<AF, EE>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,4 +134,37 @@ pub enum EnvironmentOperation {
     NextEvent,
     Dispatch { position: usize },
     ShutdownGraceful,
+}
+
+#[derive(Serialize)]
+enum Record<'a, E, C> {
+    RunStarted {
+        schema_version: u32,
+        logical_time: Timestamp,
+    },
+    EventAccepted {
+        index: EventIndex,
+        logical_time: Timestamp,
+        event: &'a E,
+    },
+    CommandsPrepared {
+        index: EventIndex,
+        commands: &'a [C],
+    },
+    CommandsDispatched {
+        index: EventIndex,
+    },
+    StopRequested {
+        index: EventIndex,
+    },
+    TurnCompleted {
+        index: EventIndex,
+        outcome: TurnOutcome,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum TurnOutcome {
+    Continue,
+    Stop,
 }

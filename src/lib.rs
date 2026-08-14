@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod application;
 pub mod engine;
 pub mod environment;

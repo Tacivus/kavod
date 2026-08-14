@@ -18,8 +18,8 @@ Kavod Core is written under `#![forbid(unsafe_code)]`. Kavod is informed by NASA
 
 | ID | Location | Subject |
 |---|---|---|
-| OPEN-1 | §5 | Live Environment construction and wiring: builder, Slot binding, `LiveCtx` final signatures, Fatal-sum composition, graceful disposition configuration |
-| OPEN-2 | §6 | Simulated Environment construction and wiring: builder, Slot binding, `SimConfig`, Fatal-sum composition, fixed-input replay wiring |
+| OPEN-1 | §5 | Live Environment construction and wiring: builder, Slot binding, `LiveCtx` final signatures, Fatal-sum composition, `LiveConfig` |
+| OPEN-2 | §6 | Simulated Environment construction and wiring: builder, Slot binding, `SimConfig`, Fatal-sum composition |
 
 ## 1. Principles
 
@@ -79,7 +79,7 @@ Every Kavod-owned configuration bound — `EngineConfig`'s fields and Environmen
 | Owner | Bounds and storage | Exhaustion |
 |---|---|---|
 | Engine | External turns, per-turn Commands, record bytes | Core Fatal, Journal Fatal, or pre-run `BuildError` |
-| Live Environment | Event queue, per-Port Command inboxes, failure latch, time domain, shutdown work | Typed Environment Error |
+| Live Environment | Event queue, per-Port Command inboxes, failure latch, time domain, shutdown deadline | Typed Environment Error |
 | Simulated Environment | One wakeup arm per Port, equal-time cursor, time domain, `max_steps_per_event` | Typed Environment Error |
 
 The Port and thread count is not a configured bound: it is fixed statically by Slot registration at construction and cannot change during a run. Bounds inside user code — Port domain containers, native buffers, and the transitive memory of Application, Port, or sink values — are outside Kavod's accounting entirely and are trusted obligations (`BOUND-BLOCKING`, §10); the only Kavod-owned per-Port storage is the Command inbox, and the live Environment owns it.
@@ -104,6 +104,9 @@ pub struct EventIndex(/* u64, private */);
 pub struct Timestamp(/* u64 nanoseconds, private */);
 
 impl Timestamp {
+    /// Constructs a timestamp from a nanosecond count; the origin and meaning
+    /// of the count are the stamping Environment's to define (§2.2).
+    pub fn from_nanos(nanos: u64) -> Self;
     /// Returns a timestamp advanced by `elapsed`, or `None` if the duration
     /// cannot be represented in nanoseconds or the result would overflow.
     pub fn checked_add(self, elapsed: std::time::Duration) -> Option<Self>;
@@ -153,7 +156,7 @@ impl<'a, C> Context<'a, C> {
 
 ### 2.2 Semantics
 
-`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `Timestamp` is an opaque nanosecond count with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
+`EventIndex` is the accepted-turn number — 0 for the start turn, External Events from 1 — and is the sole accepted-Event order. `Timestamp` nanosecond count originating at unix with an Environment-owned origin and stamping authority (§4); equal times are valid and ordered by index. Port-domain timestamps, such as exchange or receive time, are ordinary Event payload fields with no Core meaning.
 
 During a handler, `Context` is the single authority for the current turn's index and logical time (A1) — including the accepted start time at index 0, so no synthetic "ready" Event exists; the `EventAccepted` record evidences the same facts (§8.2). That staged Commands are never dropped, coalesced, duplicated, or reordered follows from A3; that State mutations survive a later failure follows from A3 as well.
 
@@ -212,7 +215,7 @@ Every Contract is duplex; an absent direction uses `Never`, whose `Serialize` im
 
 A Slot is one named use of a Contract. The Application uses one closed, source-qualified Event sum and one closed, destination-qualified Command sum whose variants are its Slots; distinct Slots of one Contract are distinct variants. `ports!` is declarative syntax sugar for the two paired enums; hand-written equivalents are supported and observationally identical. The macro generates no routing, topology, Engine behavior, or Environment behavior.
 
-The compiler proves exhaustiveness and payload agreement, not that an arm selects the semantically correct Slot. Trusted, per-Slot-tested obligations (§10): correct one-to-one routing and Error mapping; and for an externally consequential Command, an Application-owned stable business key sufficient to recognize a repeated or uncertain external effect. A `Never` Command arm is discharged by matching the uninhabited value. Terminal Port state is recovered through user-owned handles captured before binding, never through the Engine.
+The compiler proves exhaustiveness and payload agreement, not that an arm selects the semantically correct Slot. Trusted, per-Slot-tested obligations (§10): correct one-to-one routing and Error mapping; and for an externally consequential Command, an Application-owned stable business key sufficient to recognize a repeated or uncertain external effect. A `Never` Command arm is discharged by matching the uninhabited value. Terminal Port state is recovered through user-owned handles captured before binding, never through the Engine; a handle is settled only after a quiesced shutdown — after a `ShutdownTimeout` or an Abort, a detached Port thread may still be running behind it (§5.2).
 
 ### 3.3 Invariants
 
@@ -277,10 +280,10 @@ Commitment points (A3 applies on both sides of each):
 
 | Operation | Commitment point | `Err` before commitment | After commitment |
 |---|---|---|---|
-| `start` | Successful return: start time frozen, run-scoped machinery live. | No run-scoped activity remains; the Environment is safe to drop. | — |
+| `start` | Successful return: start time frozen, run-scoped machinery live. | No new run-scoped activity begins and the Environment is safe to drop; live cleanup detaches rather than joins (`LIVE-START`), so already-spawned threads may briefly outlive the call. | — |
 | `next_event` | Returning `(Event, Timestamp)` consumes one candidate. | No candidate was consumed. | The candidate is never retried or revoked; it becomes *accepted* only when `EventAccepted` commits (§8.2). |
 | `dispatch` | Mode-specific handoff point (`LIVE-DISPATCH`, `SIM-DISPATCH`); the attempt never waits for future capacity. | This Command was not handed off; the Engine does not retry it. | Port processing failure cannot revoke the handoff. |
-| `shutdown` | The call itself: it consumes the Environment. | — | Always quiesces and returns safe-to-drop, even on `Err`; an Error never reports failure to quiesce. |
+| `shutdown` | The call itself: it consumes the Environment. | — | Always returns safe-to-drop. Graceful either quiesces or reports its failure to quiesce as a typed `Err` (`LIVE-SHUTDOWN` bounds the wait); Abort does not wait for quiescence. |
 
 If Engine Fatal finalization begins while a latched Port failure is still unreported, Abort discards it, as it discards every Error of Abort's own cleanup: the primary cause is the only failure the run reports (§1.4).
 
@@ -289,9 +292,9 @@ If Engine Fatal finalization begins while a latched Port failure is still unrepo
 | ID | Invariant |
 |---|---|
 | `ENV-CALLS` | Only the Engine calls the Environment, serially: `start` exactly once, then `next_event` and `dispatch` interleaved one at a time, then `shutdown` at most once. |
-| `ENV-LATCH` | The Environment latches at most its first Port failure. Failure publication is linearized against each operation's commitment: observed before, the operation returns `Err`; observed after, the commitment stands and the latched failure is returned by the next `next_event` or `dispatch` call before that call's own commitment — or by a graceful `shutdown` as its `Err` after quiescing, in preference to Errors from shutdown's own work. |
+| `ENV-LATCH` | The Environment latches at most its first Port failure. Failure publication is linearized against each operation's commitment: observed before, the operation returns `Err`; observed after, the commitment stands and the latched failure is returned by the next `next_event` or `dispatch` call before that call's own commitment — or by a graceful `shutdown` as its `Err` after its bounded shutdown work, in preference to every Error of that work, `ShutdownTimeout` included. |
 | `ENV-TIME` | One Environment authority — the single Event acceptor — stamps `Timestamp` on `start` and every `next_event`; the Engine validates nondecrease (§8.4). |
-| `ENV-SHUTDOWN` | `Graceful` stops Event delivery, rejects new Commands, and resolves the configured disposition of already-handed-off Commands. `Abort` stops Event delivery and new handoffs and initiates no further externally consequential work. |
+| `ENV-SHUTDOWN` | `Graceful` stops Event delivery, rejects new Commands, and delivers the shutdown signal to each Port ahead of that Port's queued Commands; already-handed-off residue is the destination Port's to drain or abandon — Port authorship is the disposition, and no Environment knob exists. `Abort` stops Event delivery and new handoffs, initiates no further externally consequential work, and does not wait for Port threads. |
 | `ENV-SEPARATION` | The Environment orchestrates Ports but owns no Port domain state and never invokes an Application handler. |
 | `ENV-BOUNDS` | Every operation preserves the Environment's own configured bounds: queues, channels, Port and thread counts, wakeup storage, time domain, shutdown work. |
 
@@ -334,7 +337,7 @@ pub enum Lifecycle { Running, Graceful, Abort }
 
 ### 5.2 Semantics
 
-A finite Event source does not complete `run`; it offers its application-defined terminal Event and waits for shutdown. The transition out of Running is linearized with Port completion, so completion is unambiguously premature or expected. Port blocking points must observe lifecycle state and cooperate with shutdown; Kavod promises no wall-clock shutdown deadline (`BOUND-BLOCKING`).
+A finite Event source does not complete `run`; it offers its application-defined terminal Event and waits for shutdown. The transition out of Running is linearized with Port completion, so completion is unambiguously premature or expected. Port blocking points must observe lifecycle state and cooperate with shutdown. Kavod-owned blocking points wake on the shutdown signal; Port work itself remains unbounded and trusted (`BOUND-BLOCKING`), so graceful shutdown waits at most the configured shutdown deadline — a Port unfinished when it expires is the typed `ShutdownTimeout` failure, its thread detached, never joined, and left to die with the process. After a `ShutdownTimeout` or an Abort the process is condemned: in-process reclamation of a stuck thread is impossible and never attempted; the caller renders the exit and terminates, and the durable evidence is the Journal's committed prefix (§1.5's stance).
 
 A rejected offer (`Full` or `Closed`) is reported to the offering Port, which may recover or return an Error to latch.
 
@@ -349,8 +352,8 @@ A rejected offer (`Full` or `Closed`) is reported to the offering Port, which ma
 | `LIVE-DISPATCH` | Each destination Port owns one configured bounded Command inbox; one admission to it is the handoff commitment, linearized against failure publication per `ENV-LATCH`. |
 | `LIVE-SUPERVISION` | Port `run(Err)` and unexpected `run` completion while Running (premature closure) each latch a typed failure and wake a blocked `next_event`. |
 | `LIVE-LIFECYCLE` | Graceful and Abort signals are Context authority — not Events or Commands — and consume no queue or inbox capacity. |
-| `LIVE-START` | A `start` failure after spawning some Port threads signals and joins them before returning `Err`. A Port failing immediately after spawn is not itself a `start` failure: `start` does not wait on or inspect the latch, so `RunStarted` and `on_start` may proceed normally, with the already-latched failure surfacing at the first subsequent `next_event` or `dispatch` call per `ENV-LATCH`. |
-| `LIVE-SHUTDOWN` | `shutdown` publishes lifecycle state, closes Engine-facing admission, and joins every supervised thread; it continues past an Error, returning the first subject to `ENV-LATCH` precedence. |
+| `LIVE-START` | A `start` failure after spawning some Port threads signals Abort and detaches them before returning `Err` — no wait, matching Abort's discipline. A Port failing immediately after spawn is not itself a `start` failure: `start` does not wait on or inspect the latch, so `RunStarted` and `on_start` may proceed normally, with the already-latched failure surfacing at the first subsequent `next_event` or `dispatch` call per `ENV-LATCH`. |
+| `LIVE-SHUTDOWN` | `shutdown` publishes lifecycle state and closes Engine-facing admission. Graceful waits at most the configured shutdown deadline for every supervised thread to complete, joining finishers and detaching stragglers, continuing past Errors; its `Err` precedence: latched unreported Port failure (`ENV-LATCH`), then `ShutdownTimeout` naming the first unfinished Slot in frozen Slot order, then the first Error from shutdown's own work. Abort detaches every supervised thread and returns without waiting. |
 
 ### 5.4 Implementation
 
@@ -376,15 +379,15 @@ One workable mechanism (tier 3 — replaceable wherever §5.3 holds): one bounde
 | 3 | Try one non-waiting admission to the destination inbox; full or closed → typed `Err`, nothing handed off. |
 | 4 | Admission succeeded → `Ok` (`LIVE-DISPATCH`). |
 
-Supervision shell per Port thread: run the Port; map `Err` or completion-while-Running into a typed failure; publish it to the latch (first wins) and wake the select. No separate watcher thread is needed — the shell runs on the Port's own thread and publishes as `run` returns. `shutdown` follows `LIVE-SHUTDOWN`: publish the mode to the lifecycle cell, wake all Port blocking points, close admission, join threads in Slot order, collect the first Error under `ENV-LATCH` precedence.
+Supervision shell per Port thread: run the Port; map `Err` or completion-while-Running into a typed failure; publish it to the latch (first wins) and wake the select. No separate watcher thread is needed — the shell runs on the Port's own thread and publishes as `run` returns. `shutdown` follows `LIVE-SHUTDOWN`: publish the mode to the lifecycle cell, wake all Port blocking points, close admission; under Graceful, wait on the supervision shells' completion signals with `Condvar::wait_timeout` against the monotonic clock (`JoinHandle` has no timed join), joining completed threads in Slot order and dropping stragglers' handles at the deadline; under Abort, drop all handles immediately.
 
 > **OPEN-1 — Live construction and wiring (needs design).**
 > Decisions this section must make:
 > - The builder/registration API binding each Slot to one `LivePort` implementation, with per-inbox capacity and the fan-in queue capacity (all `NonZero*`, §1.6).
 > - Where the frozen fan-in constructors and the hand-written fan-out match live and how the builder receives them (`PORT-ROUTING`).
-> - Composition of the Environment `Error` sum: Kavod-owned variants (queue exhaustion, time-domain exhaustion, premature closure) plus one mapped variant per Slot's Port Error.
+> - Composition of the Environment `Error` sum: Kavod-owned variants (queue exhaustion, time-domain exhaustion, premature closure, `ShutdownTimeout` naming the first unfinished Slot) plus one mapped variant per Slot's Port Error.
 > - Final `LiveCtx` signatures (freezing §5.1's provisional set), including how a `LiveCtx` is constructed against the chosen channel types.
-> - The configuration surface for `ENV-SHUTDOWN`'s "configured disposition of already-handed-off Commands" under Graceful.
+> - `LiveConfig`'s shutdown deadline field (`NonZeroU64` milliseconds, §1.6), the Graceful wait bound of `LIVE-SHUTDOWN`. Command disposition needs no configuration — it is Port-owned (`ENV-SHUTDOWN`).
 > - Thread naming conventions, if any.
 > Constraints already fixed: every invariant in §5.3, the commitment table in §4.2, `Send + 'static` boundaries, frozen Slot order as the only ordering authority, and A6's nonzero bounds. The builder must freeze everything before `Engine::run` (`APP-FROZEN`).
 
@@ -424,7 +427,7 @@ pub enum SimCtxError {
 
 Two consequences worth deriving once, to show the method: `on_command(Err)` is a failure *after* the handoff commitment, so by `ENV-LATCH` the mutations stand, the Error is latched, and the current `dispatch` returns `Ok`. Likewise `step(Err)` cannot roll back the advanced `now`, the cleared arm, or Port mutations — A3 forbids it. Commands and earlier equal-time turns may alter or cancel a later Port's wakeup before it fires; that is what "revocable" means.
 
-Simulated processing is synchronous, so Graceful and Abort coincide and `stop` takes no mode. Port determinism, bounded work, and avoidance of hidden authority are trusted, repeatability-tested obligations (§10).
+Simulated processing is synchronous, so Graceful and Abort coincide and `stop` takes no mode. Kavod ships no built-in replay: a fixed or recorded input trace is presented by a user-written `SimPort` — or a bespoke `Environment` implementation, which `Timestamp::from_nanos` makes possible outside the crate — and the determinism guarantee (§1.3) is the counterfactual such wiring relies on. Port determinism, bounded work, and avoidance of hidden authority are trusted, repeatability-tested obligations (§10).
 
 ### 6.3 Invariants
 
@@ -436,7 +439,7 @@ Simulated processing is synchronous, so Graceful and Abort coincide and `stop` t
 | `SIM-WAKEUP` | Each Port has at most one revocable wakeup arm, modifiable only through its own `SimCtx`: `set_next` requires `time >= now` — violation is the `SimCtxError` rejection, which changes nothing — and is last-call-wins; `clear_next` disarms. An arm is not an Event. |
 | `SIM-SELECT` | `next_event` checks the failure latch, then selects the armed Port with the lowest time — equal times by round-robin in frozen Slot order, the cursor advancing past the selected Port after every selected `step`, including one returning `None` — advances `now`, clears the arm, and calls `step`. Only `step(Some)` creates the returned candidate; `step(None)` continues selection; `step(Err)` returns that failure. |
 | `SIM-STEPS` | Every `step` call, including one returning `Some`, consumes one unit of the configured `max_steps_per_event`; the budget is fresh for each `next_event` invocation, and `start`, `on_command`, and `stop` calls consume none of it. The check occurs before selecting, advancing time, or clearing an arm for work that would exceed it; exhaustion is an Environment Error under `NextEvent`. |
-| `SIM-COMPLETION` | No armed Port is the `SimQuiescent` Environment Error. Normal completion is an application-defined terminal Event whose handler returns `Stop`; fixed-input replay wiring therefore accepts a constructor for that Event. |
+| `SIM-COMPLETION` | No armed Port is the `SimQuiescent` Environment Error. Normal completion is an application-defined terminal Event whose handler returns `Stop`. |
 | `SIM-SHUTDOWN` | `shutdown` calls every Port's `stop` in frozen Slot order, continues past an Error, returning the first subject to `ENV-LATCH` precedence. |
 
 ### 6.4 Implementation
@@ -471,7 +474,6 @@ Environment state: `now`, per-Port `Option<Timestamp>` arm, the round-robin curs
 > - The builder/registration API binding each Slot to one `SimPort` implementation in frozen Slot order.
 > - `SimConfig`: the time origin and `max_steps_per_event` (`NonZero*`, §1.6), and where it lives relative to `EngineConfig`.
 > - Composition of the Environment `Error` sum: Kavod-owned variants (`SimQuiescent`, step-budget exhaustion, time-domain exhaustion) plus one mapped variant per Slot's Port Error.
-> - Fixed-input replay wiring: how a recorded/fixed Event trace is presented (a provided `SimPort`?), and the terminal-Event constructor required by `SIM-COMPLETION`.
 > - Where the fan-in constructors and fan-out match are supplied (same question as OPEN-1; ideally one shared wiring answer).
 > Constraints already fixed: every invariant in §6.3, the commitment table in §4.2, single-threaded synchronous execution, frozen Slot order, A6's nonzero bounds, `APP-FROZEN`.
 

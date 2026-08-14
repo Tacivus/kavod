@@ -80,6 +80,11 @@ impl<T> BoundedBuffer<T> {
     pub(crate) fn iter(&self) -> slice::Iter<'_, T> {
         self.values.iter()
     }
+
+    /// Returns a `Drain` iterator that pops values in insertion order
+    pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, T> {
+        self.values.drain(..)
+    }
 }
 
 impl<T> fmt::Debug for BoundedBuffer<T> {
@@ -359,6 +364,101 @@ mod tests {
                 (&buffer).into_iter().rev().copied().collect::<Vec<_>>(),
                 vec![3, 2, 1]
             );
+        }
+    }
+
+    mod bounded_buffer_drain {
+        use super::*;
+
+        /// Invariant: Draining transfers every stored value in insertion order and
+        /// restores the empty buffer state.
+        #[test]
+        fn full_drain_yields_values_in_insertion_order() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+            buffer.push(3).unwrap();
+
+            assert_eq!(buffer.drain().collect::<Vec<_>>(), vec![1, 2, 3]);
+            assert!(buffer.is_empty());
+            assert_eq!(buffer.len(), 0);
+            assert_eq!(buffer.remaining_capacity(), 3);
+        }
+
+        /// Invariant: Draining an empty buffer transfers no values and preserves
+        /// its logical capacity.
+        #[test]
+        fn empty_buffer_drain_yields_no_values() {
+            let mut buffer = BoundedBuffer::<u8>::new(3).unwrap();
+
+            assert_eq!(buffer.drain().next(), None);
+            assert!(buffer.is_empty());
+            assert_eq!(buffer.remaining_capacity(), 3);
+        }
+
+        /// Invariant: Dropping a partially consumed drain drops each unyielded
+        /// value exactly once and leaves yielded values owned by the caller.
+        #[test]
+        fn partially_consumed_drain_drops_unyielded_values_once() {
+            let drops = Rc::new(Cell::new(0));
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.push(DropProbe(Rc::clone(&drops))).unwrap();
+            buffer.push(DropProbe(Rc::clone(&drops))).unwrap();
+            buffer.push(DropProbe(Rc::clone(&drops))).unwrap();
+
+            let mut drain = buffer.drain();
+            let yielded = drain.next().unwrap();
+            assert_eq!(drops.get(), 0);
+
+            drop(drain);
+            assert_eq!(drops.get(), 2);
+            assert!(buffer.is_empty());
+            assert_eq!(buffer.remaining_capacity(), 3);
+
+            drop(yielded);
+            assert_eq!(drops.get(), 3);
+        }
+
+        /// Invariant: Draining and refilling reuse the allocation established at
+        /// construction.
+        #[test]
+        fn drain_retains_allocation_for_reuse() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            let allocation = buffer.values.as_ptr();
+            let allocation_capacity = buffer.values.capacity();
+            buffer.push(b'a').unwrap();
+            buffer.push(b'b').unwrap();
+            buffer.push(b'c').unwrap();
+
+            assert_eq!(buffer.drain().collect::<Vec<_>>(), b"abc");
+            buffer.push(b'd').unwrap();
+            buffer.push(b'e').unwrap();
+            buffer.push(b'f').unwrap();
+
+            assert_eq!(buffer.as_slice(), b"def");
+            assert_eq!(buffer.capacity(), 3);
+            assert_eq!(buffer.values.as_ptr(), allocation);
+            assert_eq!(buffer.values.capacity(), allocation_capacity);
+        }
+
+        /// Invariant: Dropping a partially consumed drain restores the full
+        /// logical capacity for the next batch.
+        #[test]
+        fn partial_drain_restores_full_logical_capacity() {
+            let mut buffer = BoundedBuffer::new(3).unwrap();
+            buffer.push(1).unwrap();
+            buffer.push(2).unwrap();
+            buffer.push(3).unwrap();
+
+            let mut drain = buffer.drain();
+            assert_eq!(drain.next(), Some(1));
+            drop(drain);
+
+            assert_eq!(buffer.push(4), Ok(()));
+            assert_eq!(buffer.push(5), Ok(()));
+            assert_eq!(buffer.push(6), Ok(()));
+            assert_eq!(buffer.push(7), Err(7));
+            assert_eq!(buffer.as_slice(), [4, 5, 6]);
         }
     }
 
