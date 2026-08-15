@@ -46,12 +46,20 @@ where
     }
 
     pub fn run(self) -> EngineExit<A::State, A::Fatal, E::Error> {
+        let Self {
+            mut journal,
+            app,
+            mut env,
+            mut cmd_buf,
+            max_turns,
+        } = self;
+
         // Startup 1: before any fallible step, so every exit path carries state.
-        let mut state = self.app.initial_state();
+        let mut state = app.initial_state();
 
         // Startup 2: `env` is still a plain local here, so an Err drops it
         // without Abort — §4.2's start row is unrepresentable to violate.
-        let start_time = match self.env.start() {
+        let start_time = match env.start() {
             Ok(time) => time,
             Err(error) => {
                 return EngineExit::Fatal {
@@ -65,7 +73,7 @@ where
         };
 
         // From here on: started ∧ unconsumed ⇔ `Some` (FAIL-FINALIZE).
-        let mut env = Some(self.env);
+        let mut env = Some(env);
         let mut last_record_kind: Option<RecordKind> = None;
 
         // Startup 3
@@ -74,7 +82,7 @@ where
             logical_time: start_time,
         };
         if let Err(fatal) = Self::commit_record(
-            &mut self.journal,
+            &mut journal,
             &mut last_record_kind,
             &record,
             RecordKind::RunStarted,
@@ -84,15 +92,15 @@ where
 
         // Startup 4: the start turn, at index 0, through the shared protocol.
         let mut index = EventIndex::START;
-        let mut ctx = Context::new(index, start_time, &mut self.cmd_buf);
-        let outcome = self.app.on_start(&mut state, &mut ctx);
+        let mut ctx = Context::new(index, start_time, &mut cmd_buf);
+        let outcome = app.on_start(&mut state, &mut ctx);
         let overflowed = ctx.is_overflowed();
         match Self::process_turn(
             index,
             outcome,
             overflowed,
-            &mut self.cmd_buf,
-            &mut self.journal,
+            &mut cmd_buf,
+            &mut journal,
             &mut last_record_kind,
             &mut env,
         ) {
