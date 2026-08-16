@@ -30,7 +30,7 @@ impl Timestamp {
 ///
 /// The start turn has index zero; each accepted external event has the next
 /// consecutive index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct EventIndex(u64);
 
@@ -42,6 +42,7 @@ impl EventIndex {
         self.0
     }
 
+    /// Increments the current index by 1
     pub(crate) fn checked_next(self) -> Option<Self> {
         self.0.checked_add(1).map(EventIndex)
     }

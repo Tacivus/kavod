@@ -8,11 +8,12 @@ pub trait Environment {
     fn start(&mut self) -> Result<Timestamp, Self::Error>;
     fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error>;
     fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error>;
-    fn shutdown(self, mode: ShutdownMode) -> Result<(), Self::Error>;
+    fn take_error(&mut self) -> Option<Self::Error>;
+    fn shutdown(self) -> Quiescence;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ShutdownMode {
-    Graceful,
-    Abort,
+pub enum Quiescence {
+    Quiesced,
+    Incomplete,
 }

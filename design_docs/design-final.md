@@ -52,9 +52,9 @@ Everything else in this document is a consequence of eight axioms:
 
 ### 1.3 Determinism
 
-Same inputs, same run. Within one concrete Environment type, the same build, frozen Application, initial State, configuration, and trace — every accepted `(Event, Timestamp)`, every Environment result, every Journal-sink result — reproduce the same handler calls, State transitions, ordered Command intent, Journal bytes, and typed `EngineExit`.
+Same inputs, same run. Within one concrete Environment type, the same build, frozen Application, initial State, configuration, and trace — every accepted `(Event, Timestamp)`, every Environment result (`take_failure` and shutdown's `Quiescence` included), every Journal-sink result — reproduce the same handler calls, State transitions, ordered Command intent, Journal bytes, and typed `EngineExit`.
 
-Across live and simulated Environments the guarantee is the same with concrete failure values erased: equal abstract traces produce equal handler calls, State transitions, Command intent, and Journal bytes — no failure value is ever serialized, so nothing mode-varying reaches the Journal — and exits equal in every Core-owned discriminant (`FatalCause` variant, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreFatal` including its payloads). Mode-specific failure content may differ only inside `EngineExit`.
+Across live and simulated Environments the guarantee is the same with concrete failure values erased: equal abstract traces — including equal `take_failure` presence and `Quiescence` — produce equal handler calls, State transitions, Command intent, and Journal bytes, and exits equal in every Core-owned discriminant (`FatalCause` variant, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreFatal` including its payloads). No failure value is ever serialized, so nothing mode-varying reaches the Journal; only concrete failure content may differ inside `EngineExit`.
 
 Concurrent live sources may race; the accepted trace records the resolution, and the Core is deterministic conditional on it. Hidden authority is forbidden to Application code and serialization alike: no clocks, entropy, IO, environment variables, process globals, concurrency order, pointer identity, unstable iteration, or Environment-mode dependence.
 
@@ -79,7 +79,7 @@ Every Kavod-owned configuration bound — `EngineConfig`'s fields and Environmen
 | Owner | Bounds and storage | Exhaustion |
 |---|---|---|
 | Engine | External turns, per-turn Commands, record bytes | Core Fatal, Journal Fatal, or pre-run `BuildError` |
-| Live Environment | Event queue, per-Port Command inboxes, failure latch, time domain, shutdown deadline | Typed Environment Error |
+| Live Environment | Event queue, per-Port Command inboxes, failure latch, time domain, shutdown deadline | Typed Environment Error or `Quiescence::Incomplete` |
 | Simulated Environment | One wakeup arm per Port, equal-time cursor, time domain, `max_steps_per_event` | Typed Environment Error |
 
 The Port and thread count is not a configured bound: it is fixed statically by Slot registration at construction and cannot change during a run. Bounds inside user code — Port domain containers, native buffers, and the transitive memory of Application, Port, or sink values — are outside Kavod's accounting entirely and are trusted obligations (`BOUND-BLOCKING`, §10); the only Kavod-owned per-Port storage is the Command inbox, and the live Environment owns it.
@@ -215,7 +215,7 @@ Every Contract is duplex; an absent direction uses `Never`, whose `Serialize` im
 
 A Slot is one named use of a Contract. The Application uses one closed, source-qualified Event sum and one closed, destination-qualified Command sum whose variants are its Slots; distinct Slots of one Contract are distinct variants. `ports!` is declarative syntax sugar for the two paired enums; hand-written equivalents are supported and observationally identical. The macro generates no routing, topology, Engine behavior, or Environment behavior.
 
-The compiler proves exhaustiveness and payload agreement, not that an arm selects the semantically correct Slot. Trusted, per-Slot-tested obligations (§10): correct one-to-one routing and Error mapping; and for an externally consequential Command, an Application-owned stable business key sufficient to recognize a repeated or uncertain external effect. A `Never` Command arm is discharged by matching the uninhabited value. Terminal Port state is recovered through user-owned handles captured before binding, never through the Engine; a handle is settled only after a quiesced shutdown — after a `ShutdownTimeout` or an Abort, a detached Port thread may still be running behind it (§5.2).
+The compiler proves exhaustiveness and payload agreement, not that an arm selects the semantically correct Slot. Trusted, per-Slot-tested obligations (§10): correct one-to-one routing and Error mapping; and for an externally consequential Command, an Application-owned stable business key sufficient to recognize a repeated or uncertain external effect. A `Never` Command arm is discharged by matching the uninhabited value. Terminal Port state is recovered through user-owned handles captured before binding, never through the Engine; a handle is settled only behind witnessed quiescence — an exit of `Stopped`, or `Fatal` with `quiescence: Quiescence::Quiesced`; behind `Quiescence::Incomplete` a detached Port thread may still be running (§5.2).
 
 ### 3.3 Invariants
 
@@ -265,12 +265,16 @@ pub trait Environment {
     fn start(&mut self) -> Result<Timestamp, Self::Error>;
     fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error>;
     fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error>;
-    fn shutdown(self, mode: ShutdownMode) -> Result<(), Self::Error>;
+    /// Takes the first currently latched failure without waiting for one.
+    fn take_failure(&mut self) -> Option<Self::Error>;
+    /// Publishes the shutdown signal, closes admission, and applies the
+    /// Environment's bounded quiescence policy (§4.2).
+    fn shutdown(self) -> Quiescence;
 }
 
-pub enum ShutdownMode {
-    Graceful,
-    Abort,
+pub enum Quiescence {
+    Quiesced,
+    Incomplete,
 }
 ```
 
@@ -278,23 +282,24 @@ pub enum ShutdownMode {
 
 Commitment points (A3 applies on both sides of each):
 
-| Operation | Commitment point | `Err` before commitment | After commitment |
+| Operation | Commitment point | Failure before commitment | After commitment |
 |---|---|---|---|
-| `start` | Successful return: start time frozen, run-scoped machinery live. | No new run-scoped activity begins and the Environment is safe to drop; live cleanup detaches rather than joins (`LIVE-START`), so already-spawned threads may briefly outlive the call. | — |
+| `start` | Mode-specific activation after the start time is frozen (`LIVE-START`, `SIM-START`); successful return, if any, follows with run-scoped machinery live. | No Port execution begins; all preparatory activity is completed before `Err`, so the Environment is quiesced and safe to drop. | Mutations and effects stand. An `Err` completes mode-specific cleanup before returning, so the Environment is quiesced and safe to drop. |
 | `next_event` | Returning `(Event, Timestamp)` consumes one candidate. | No candidate was consumed. | The candidate is never retried or revoked; it becomes *accepted* only when `EventAccepted` commits (§8.2). |
 | `dispatch` | Mode-specific handoff point (`LIVE-DISPATCH`, `SIM-DISPATCH`); the attempt never waits for future capacity. | This Command was not handed off; the Engine does not retry it. | Port processing failure cannot revoke the handoff. |
-| `shutdown` | The call itself: it consumes the Environment. | — | Always returns safe-to-drop. Graceful either quiesces or reports its failure to quiesce as a typed `Err` (`LIVE-SHUTDOWN` bounds the wait); Abort does not wait for quiescence. |
+| `take_failure` | One atomic snapshot of the first-failure latch. | — | `Some(error)` takes the pending first failure and marks it reported forever; `None` proves only that no failure was published before the snapshot. The call never waits for a future failure. |
+| `shutdown` | The call itself: it consumes the Environment. | — | The Environment value admits no further calls. `Quiesced` witnesses that every unit of run-scoped activity completed; `Incomplete` means at least one unit remained unfinished under the Environment's bounded shutdown policy and the process is condemned (§5.2). |
 
-If Engine Fatal finalization begins while a latched Port failure is still unreported, Abort discards it, as it discards every Error of Abort's own cleanup: the primary cause is the only failure the run reports (§1.4).
+`shutdown` has no Environment Error channel; `Incomplete` reports only that quiescence was not established. The Engine performs one final `take_failure` before beginning a non-Fatal completion path (§8.4); on a Stop turn that snapshot is the final failure-observation boundary. A failure published after it, a still-pending failure at `shutdown`, and an Error arising during shutdown work are discarded inside the Environment and never reach the Engine. During Fatal finalization the primary cause remains the only failure the run reports (§1.4). The signal itself carries no intent beyond "no more input is coming; finish what you own and return": an Application that wants stop-specific Port behavior expresses it as Commands emitted before returning `Stop`, never through the signal.
 
 ### 4.3 Invariants
 
 | ID | Invariant |
 |---|---|
-| `ENV-CALLS` | Only the Engine calls the Environment, serially: `start` exactly once, then `next_event` and `dispatch` interleaved one at a time, then `shutdown` at most once. |
-| `ENV-LATCH` | The Environment latches at most its first Port failure. Failure publication is linearized against each operation's commitment: observed before, the operation returns `Err`; observed after, the commitment stands and the latched failure is returned by the next `next_event` or `dispatch` call before that call's own commitment — or by a graceful `shutdown` as its `Err` after its bounded shutdown work, in preference to every Error of that work, `ShutdownTimeout` included. |
+| `ENV-CALLS` | Only the Engine calls the Environment, serially: `start` exactly once, then `next_event`, `dispatch`, and `take_failure` interleaved one at a time, then `shutdown` at most once. |
+| `ENV-LATCH` | The Environment records at most its first Port failure, in a permanent logical state equivalent to empty, pending, or reported. Publication is linearized against `next_event` and `dispatch` commitment and `take_failure`'s snapshot: a pending failure observed before an operation's own commitment is taken, marked reported forever, and returned as that operation's `Err` or `take_failure`'s `Some`; otherwise the operation's commitment stands. `take_failure(None)` leaves a later first publication pending for a later observing operation. Once reported, or once shutdown begins, every later publication is discarded; shutdown also discards any still-pending failure (§4.2). |
 | `ENV-TIME` | One Environment authority — the single Event acceptor — stamps `Timestamp` on `start` and every `next_event`; the Engine validates nondecrease (§8.4). |
-| `ENV-SHUTDOWN` | `Graceful` stops Event delivery, rejects new Commands, and delivers the shutdown signal to each Port ahead of that Port's queued Commands; already-handed-off residue is the destination Port's to drain or abandon — Port authorship is the disposition, and no Environment knob exists. `Abort` stops Event delivery and new handoffs, initiates no further externally consequential work, and does not wait for Port threads. |
+| `ENV-SHUTDOWN` | `shutdown` stops Event delivery, rejects new Commands, delivers the shutdown signal to each Port ahead of that Port's queued Commands, and applies the Environment's own bounded quiescence policy; already-handed-off residue is the destination Port's to drain or abandon — Port authorship is the disposition, and no disposition knob exists. The Environment itself initiates no further externally consequential work. |
 | `ENV-SEPARATION` | The Environment orchestrates Ports but owns no Port domain state and never invokes an Application handler. |
 | `ENV-BOUNDS` | Every operation preserves the Environment's own configured bounds: queues, channels, Port and thread counts, wakeup storage, time domain, shutdown work. |
 
@@ -319,9 +324,9 @@ pub trait LivePort<C: PortContract>: Send + 'static {
 
 ```rust
 impl<C: PortContract> LiveCtx<C> {
-    /// Block until one Command arrives or a lifecycle signal is raised.
+    /// Block until one Command arrives or the shutdown signal is raised.
     pub fn recv(&mut self) -> PortInput<C::Command>;
-    /// Nonblocking inspection of pending Commands / signals.
+    /// Nonblocking inspection of pending Commands / the shutdown signal.
     pub fn try_recv(&mut self) -> Option<PortInput<C::Command>>;
     /// Offer one Event through the Slot's frozen fan-in constructor.
     /// Never waits for future capacity.
@@ -330,14 +335,14 @@ impl<C: PortContract> LiveCtx<C> {
     pub fn lifecycle(&self) -> Lifecycle;
 }
 
-pub enum PortInput<Cmd> { Command(Cmd), Graceful, Abort }
+pub enum PortInput<Cmd> { Command(Cmd), Shutdown }
 pub enum OfferRejected { Full, Closed }
-pub enum Lifecycle { Running, Graceful, Abort }
+pub enum Lifecycle { Running, Shutdown }
 ```
 
 ### 5.2 Semantics
 
-A finite Event source does not complete `run`; it offers its application-defined terminal Event and waits for shutdown. The transition out of Running is linearized with Port completion, so completion is unambiguously premature or expected. Port blocking points must observe lifecycle state and cooperate with shutdown. Kavod-owned blocking points wake on the shutdown signal; Port work itself remains unbounded and trusted (`BOUND-BLOCKING`), so graceful shutdown waits at most the configured shutdown deadline — a Port unfinished when it expires is the typed `ShutdownTimeout` failure, its thread detached, never joined, and left to die with the process. After a `ShutdownTimeout` or an Abort the process is condemned: in-process reclamation of a stuck thread is impossible and never attempted; the caller renders the exit and terminates, and the durable evidence is the Journal's committed prefix (§1.5's stance).
+A finite Event source does not complete `run`; it offers its application-defined terminal Event and waits for shutdown. The transition out of Running is linearized with Port completion, so completion is unambiguously premature or expected. Port blocking points must observe lifecycle state and cooperate with shutdown. Kavod-owned blocking points wake on the shutdown signal; Port work itself remains unbounded and trusted (`BOUND-BLOCKING`), so `shutdown` waits at most the Live Environment's configured shutdown deadline — a Port unfinished when it expires is detached, its thread never joined and left to die with the process, and `shutdown` returns `Quiescence::Incomplete`. After `Incomplete` the process is condemned: in-process reclamation of a stuck thread is impossible and never attempted; the caller renders the exit and terminates promptly, and the durable evidence is the Journal's committed prefix (§1.5's stance). `Quiesced` is a full witness — every supervised thread was joined and therefore finished entirely, destructors included — which is what settles user-owned handles (§3.2).
 
 A rejected offer (`Full` or `Closed`) is reported to the offering Port, which may recover or return an Error to latch.
 
@@ -350,21 +355,23 @@ A rejected offer (`Full` or `Closed`) is reported to the offering Port, which ma
 | `LIVE-SELECT` | `next_event` waits, without busy-spinning, until the first-failure latch is set or one Event is available, under one Environment-defined linear order between the two. |
 | `LIVE-TIME` | The single acceptor stamps from one monotonic clock, making regression structurally impossible in correct operation; monotonic-duration conversion is checked and exhaustion is an Environment Error. |
 | `LIVE-DISPATCH` | Each destination Port owns one configured bounded Command inbox; one admission to it is the handoff commitment, linearized against failure publication per `ENV-LATCH`. |
-| `LIVE-SUPERVISION` | Port `run(Err)` and unexpected `run` completion while Running (premature closure) each latch a typed failure and wake a blocked `next_event`. |
-| `LIVE-LIFECYCLE` | Graceful and Abort signals are Context authority — not Events or Commands — and consume no queue or inbox capacity. |
-| `LIVE-START` | A `start` failure after spawning some Port threads signals Abort and detaches them before returning `Err` — no wait, matching Abort's discipline. A Port failing immediately after spawn is not itself a `start` failure: `start` does not wait on or inspect the latch, so `RunStarted` and `on_start` may proceed normally, with the already-latched failure surfacing at the first subsequent `next_event` or `dispatch` call per `ENV-LATCH`. |
-| `LIVE-SHUTDOWN` | `shutdown` publishes lifecycle state and closes Engine-facing admission. Graceful waits at most the configured shutdown deadline for every supervised thread to complete, joining finishers and detaching stragglers, continuing past Errors; its `Err` precedence: latched unreported Port failure (`ENV-LATCH`), then `ShutdownTimeout` naming the first unfinished Slot in frozen Slot order, then the first Error from shutdown's own work. Abort detaches every supervised thread and returns without waiting. |
+| `LIVE-SUPERVISION` | Port `run(Err)` and unexpected `run` completion while Running (premature closure) each publish a typed failure to `ENV-LATCH` and wake a blocked `next_event`. Completion after the shutdown transition and every later Error are shutdown work and are not published. |
+| `LIVE-LIFECYCLE` | The shutdown signal is Context authority — not an Event or Command — and consumes no queue or inbox capacity. |
+| `LIVE-START` | Every spawned supervisor shell waits at one Kavod-owned start/cancel gate and cannot invoke `LivePort::run` while the gate is pending. Setup failure publishes cancel, wakes and joins every shell, and returns `Err` with no Port execution begun. After all fallible setup and start-time stamping succeed, publishing start is the `start` commitment point; no fallible startup work follows it. A Port failure after start publication is a runtime failure even if published before `start` returns, and surfaces through the first subsequent latch-observing operation per `ENV-LATCH`. |
+| `LIVE-SHUTDOWN` | `shutdown` publishes the shutdown signal, closes Engine-facing admission and failure observation, and wakes every Kavod-owned blocking point; it waits at most the configured whole-shutdown deadline for every supervised thread to complete, joining finishers and detaching stragglers at the deadline, continuing past Errors and discarding them (§4.2). It returns `Quiesced` iff every supervised thread was joined, otherwise `Incomplete`. |
 
 ### 5.4 Implementation
 
-One workable mechanism (tier 3 — replaceable wherever §5.3 holds): one bounded MPMC/MPSC channel for Event fan-in; one bounded SPSC inbox per destination Port; a supervisor-owned latch (`Mutex<Option<FailureRecord>>` + `Condvar`, or an equivalent channel) that both the fan-in wait and Port supervision can wake.
+One workable mechanism (tier 3 — replaceable wherever §5.3 holds): one bounded MPMC/MPSC channel for Event fan-in; one bounded SPSC inbox per destination Port; a supervisor-owned latch (`Mutex<FailureLatch> + Condvar`, or an equivalent channel) with permanent logical states empty, pending, reported, and shutdown-closed that both the fan-in wait and Port supervision can wake; and one start/cancel gate shared by the supervisor shells.
 
 | Step | `start` procedure |
 |---|---|
-| 1 | Freeze Slot order and capacities; create queue, inboxes, latch, lifecycle cell. |
-| 2 | Spawn one thread per bound Port in frozen Slot order; each thread runs the Port inside a supervisor shell that publishes its completion (`LIVE-SUPERVISION`). |
-| 3 | Any spawn or setup failure: apply `LIVE-START`, return `Err`. |
-| 4 | Stamp and freeze the start time from the monotonic clock (`LIVE-TIME`); return it. |
+| 1 | Freeze Slot order and capacities; create queue, inboxes, latch, lifecycle cell, completion tracking, and the pending start/cancel gate. |
+| 2 | Spawn one thread per bound Port in frozen Slot order; each supervisor shell waits at the gate without invoking Port code. |
+| 3 | Complete every remaining fallible setup step and stamp and freeze the start time (`LIVE-TIME`). |
+| 4 | Any spawn, setup, or stamping failure: publish cancel, wake and join every spawned shell, return `Err` (`LIVE-START`). |
+| 5 | Publish start — the activation commitment — and wake every shell; no fallible startup work follows. Each shell invokes `LivePort::run` and publishes its runtime completion under `LIVE-SUPERVISION`. |
+| 6 | Return the frozen start time. |
 
 | Step | `next_event` procedure |
 |---|---|
@@ -379,15 +386,21 @@ One workable mechanism (tier 3 — replaceable wherever §5.3 holds): one bounde
 | 3 | Try one non-waiting admission to the destination inbox; full or closed → typed `Err`, nothing handed off. |
 | 4 | Admission succeeded → `Ok` (`LIVE-DISPATCH`). |
 
-Supervision shell per Port thread: run the Port; map `Err` or completion-while-Running into a typed failure; publish it to the latch (first wins) and wake the select. No separate watcher thread is needed — the shell runs on the Port's own thread and publishes as `run` returns. `shutdown` follows `LIVE-SHUTDOWN`: publish the mode to the lifecycle cell, wake all Port blocking points, close admission; under Graceful, wait on the supervision shells' completion signals with `Condvar::wait_timeout` against the monotonic clock (`JoinHandle` has no timed join), joining completed threads in Slot order and dropping stragglers' handles at the deadline; under Abort, drop all handles immediately.
+| Step | `take_failure` procedure |
+|---|---|
+| 1 | Atomically snapshot the latch without waiting for future publication. |
+| 2 | Pending failure → take and map it, permanently mark the latch reported, return `Some(error)`. |
+| 3 | Empty, reported, or shutdown-closed → return `None`. |
+
+Supervision shell per Port thread: wait at the start/cancel gate; cancel returns without invoking the Port, while start invokes the Port and maps `Err` or completion-while-Running into a typed failure, publishes it to the latch (first wins forever), and wakes the select. No separate watcher thread is needed — the shell runs on the Port's own thread and publishes as `run` returns. `shutdown` follows `LIVE-SHUTDOWN`: publish the signal to the lifecycle cell, close failure observation and Engine-facing admission, and wake all Port blocking points; wait on the supervision shells' completion signals with `Condvar::wait_timeout` against one whole-shutdown deadline from the monotonic clock (`JoinHandle` has no timed join), joining completed threads in Slot order and dropping stragglers' handles at the deadline; return `Quiesced` iff every handle was joined, otherwise `Incomplete`.
 
 > **OPEN-1 — Live construction and wiring (needs design).**
 > Decisions this section must make:
 > - The builder/registration API binding each Slot to one `LivePort` implementation, with per-inbox capacity and the fan-in queue capacity (all `NonZero*`, §1.6).
 > - Where the frozen fan-in constructors and the hand-written fan-out match live and how the builder receives them (`PORT-ROUTING`).
-> - Composition of the Environment `Error` sum: Kavod-owned variants (queue exhaustion, time-domain exhaustion, premature closure, `ShutdownTimeout` naming the first unfinished Slot) plus one mapped variant per Slot's Port Error.
+> - Composition of the Environment `Error` sum: Kavod-owned variants (queue exhaustion, time-domain exhaustion, premature closure) plus one mapped variant per Slot's Port Error. Shutdown contributes no Environment Error (§4.2).
 > - Final `LiveCtx` signatures (freezing §5.1's provisional set), including how a `LiveCtx` is constructed against the chosen channel types.
-> - `LiveConfig`'s shutdown deadline field (`NonZeroU64` milliseconds, §1.6), the Graceful wait bound of `LIVE-SHUTDOWN`. Command disposition needs no configuration — it is Port-owned (`ENV-SHUTDOWN`).
+> - `LiveConfig`'s whole-shutdown deadline (`NonZeroU64` milliseconds, §1.6), which the Live Environment owns and applies in `LIVE-SHUTDOWN`. Command disposition needs no configuration — it is Port-owned (`ENV-SHUTDOWN`).
 > - Thread naming conventions, if any.
 > Constraints already fixed: every invariant in §5.3, the commitment table in §4.2, `Send + 'static` boundaries, frozen Slot order as the only ordering authority, and A6's nonzero bounds. The builder must freeze everything before `Engine::run` (`APP-FROZEN`).
 
@@ -427,20 +440,20 @@ pub enum SimCtxError {
 
 Two consequences worth deriving once, to show the method: `on_command(Err)` is a failure *after* the handoff commitment, so by `ENV-LATCH` the mutations stand, the Error is latched, and the current `dispatch` returns `Ok`. Likewise `step(Err)` cannot roll back the advanced `now`, the cleared arm, or Port mutations — A3 forbids it. Commands and earlier equal-time turns may alter or cancel a later Port's wakeup before it fires; that is what "revocable" means.
 
-Simulated processing is synchronous, so Graceful and Abort coincide and `stop` takes no mode. Kavod ships no built-in replay: a fixed or recorded input trace is presented by a user-written `SimPort` — or a bespoke `Environment` implementation, which `Timestamp::from_nanos` makes possible outside the crate — and the determinism guarantee (§1.3) is the counterfactual such wiring relies on. Port determinism, bounded work, and avoidance of hidden authority are trusted, repeatability-tested obligations (§10).
+Simulated processing is synchronous, so quiescence is structural: `shutdown` always returns `Quiescence::Quiesced`. Kavod ships no built-in replay: a fixed or recorded input trace is presented by a user-written `SimPort` — or a bespoke `Environment` implementation, which `Timestamp::from_nanos` makes possible outside the crate — and the determinism guarantee (§1.3) is the counterfactual such wiring relies on. Port determinism, bounded work, and avoidance of hidden authority are trusted, repeatability-tested obligations (§10).
 
 ### 6.3 Invariants
 
 | ID | Invariant |
 |---|---|
 | `SIM-STATE` | Each simulated Port owns all of its simulated domain state; the Environment has no shared model, no transactions, no rollback, and no concurrency. |
-| `SIM-START` | `start` fixes the start time, then calls every Port's `start` in frozen Slot order with `now` equal to it; the first Error fails Environment startup. |
+| `SIM-START` | `start` fixes the start time; immediately before the first Port `start` invocation is the Environment startup commitment point (with no Ports, successful return is the commitment). It then calls every Port's `start` in frozen Slot order with `now` equal to the fixed time; the first Error fails Environment startup after synchronous effects and mutations already made, which remain real, and no run-scoped activity survives the return. |
 | `SIM-DISPATCH` | `dispatch` synchronously routes to exactly one Port's `on_command`; invocation is the handoff commitment, and `now` does not advance. |
 | `SIM-WAKEUP` | Each Port has at most one revocable wakeup arm, modifiable only through its own `SimCtx`: `set_next` requires `time >= now` — violation is the `SimCtxError` rejection, which changes nothing — and is last-call-wins; `clear_next` disarms. An arm is not an Event. |
 | `SIM-SELECT` | `next_event` checks the failure latch, then selects the armed Port with the lowest time — equal times by round-robin in frozen Slot order, the cursor advancing past the selected Port after every selected `step`, including one returning `None` — advances `now`, clears the arm, and calls `step`. Only `step(Some)` creates the returned candidate; `step(None)` continues selection; `step(Err)` returns that failure. |
 | `SIM-STEPS` | Every `step` call, including one returning `Some`, consumes one unit of the configured `max_steps_per_event`; the budget is fresh for each `next_event` invocation, and `start`, `on_command`, and `stop` calls consume none of it. The check occurs before selecting, advancing time, or clearing an arm for work that would exceed it; exhaustion is an Environment Error under `NextEvent`. |
 | `SIM-COMPLETION` | No armed Port is the `SimQuiescent` Environment Error. Normal completion is an application-defined terminal Event whose handler returns `Stop`. |
-| `SIM-SHUTDOWN` | `shutdown` calls every Port's `stop` in frozen Slot order, continues past an Error, returning the first subject to `ENV-LATCH` precedence. |
+| `SIM-SHUTDOWN` | `shutdown` closes failure observation, calls every Port's `stop` in frozen Slot order, continues past Errors and discards them (§4.2), and returns `Quiesced`. |
 
 ### 6.4 Implementation
 
@@ -449,7 +462,7 @@ Environment state: `now`, per-Port `Option<Timestamp>` arm, the round-robin curs
 | Step | `start` procedure |
 |---|---|
 | 1 | Fix the start time (configured origin); set `now` to it. |
-| 2 | Call each Port's `start` in frozen Slot order with a `SimCtx` for that Port. |
+| 2 | Immediately before the first invocation, commit Environment startup; call each Port's `start` in frozen Slot order with a `SimCtx` for that Port. With no Ports, successful return commits startup. |
 | 3 | First `Err` → map via the Slot's Error mapping (`PORT-ROUTING`) and fail startup (§4.2 `start` row). |
 
 | Step | `dispatch` procedure |
@@ -457,6 +470,8 @@ Environment state: `now`, per-Port `Option<Timestamp>` arm, the round-robin curs
 | 1 | Latch set → return its `Err` before committing (`ENV-LATCH`). |
 | 2 | Route via the exhaustive destination match to one Port; invoke `on_command` (`SIM-DISPATCH` — the invocation commits). |
 | 3 | `Err` → latch it, return `Ok` (§6.2). `Ok` → return `Ok`. |
+
+`take_failure` atomically takes a pending simulated failure and permanently marks the latch reported, or returns `None` without waiting; in particular, it exposes an `on_command(Err)` from the final Command in a turn, for which no later `dispatch` need occur.
 
 | Step | `next_event` selection loop |
 |---|---|
@@ -467,7 +482,7 @@ Environment state: `now`, per-Port `Option<Timestamp>` arm, the round-robin curs
 | 5 | Advance `now` to the arm time; clear the arm; count one step; call `step`; advance the cursor past the selected Port. |
 | 6 | `Ok(Some(event))` → map via the Slot's frozen fan-in constructor, return `(event, now)`. `Ok(None)` → go to 1. `Err` → map and return it. |
 
-`shutdown` follows `SIM-SHUTDOWN` directly: iterate `stop` in Slot order, remember the first Error, prefer a latched unreported failure per `ENV-LATCH`.
+`shutdown` follows `SIM-SHUTDOWN` directly: close failure observation, iterate `stop` in Slot order, discarding Errors; return `Quiesced`.
 
 > **OPEN-2 — Simulated construction and wiring (needs design).**
 > Decisions this section must make:
@@ -593,7 +608,12 @@ pub enum RecordKind {
 
 pub enum EngineExit<S, AF, EE> {
     Stopped { state: S },
-    Fatal { state: S, cause: FatalCause<AF, EE> },
+    Fatal {
+        state: S,
+        cause: FatalCause<AF, EE>,
+        /// Whether Environment-managed run-scoped activity is complete (§4.2).
+        quiescence: Quiescence,
+    },
 }
 
 pub enum FatalCause<AF, EE> {
@@ -610,7 +630,9 @@ pub enum EnvironmentOperation {
     /// this Command's own routing/admission; an unrelated already-latched
     /// failure can surface here too, per `ENV-LATCH`.
     Dispatch { position: usize },
-    ShutdownGraceful,
+    /// A previously published Port failure taken at the turn-boundary
+    /// checkpoint; `take_failure` itself did not fail.
+    ObserveFailure,
 }
 
 pub struct EnvironmentFatal<EE> {
@@ -627,12 +649,14 @@ pub enum CoreFatal {
     TimeRegression { previous: Timestamp, offered: Timestamp },
     TurnBoundExceeded,
     CommandBoundExceeded,
+    /// The Stop path's `shutdown` returned `Quiescence::Incomplete` (§8.4).
+    ShutdownIncomplete,
 }
 ```
 
 ### 8.2 Semantics: record protocol
 
-`RecordKind` is the closed set of record names below. Records use serde's default externally tagged representation. `RunStarted` is the only possible first committed record, so every nonempty Journal begins with a versioned record.
+`RecordKind` is the closed set of record names below. A record is one flat JSON object whose first member is `record_kind` naming the `RecordKind`, followed by that record's fields in table order — e.g. `{"record_kind":"RunStarted","schema_version":1,"logical_time":100}` (the current `schema_version` is 1). `RunStarted` is the only possible first committed record, so every nonempty Journal begins with a versioned record.
 
 | Record | Fields | Committed | Evidences |
 |---|---|---|---|
@@ -640,20 +664,23 @@ pub enum CoreFatal {
 | `EventAccepted` | `index`, `logical_time`, `event` | Before `on_event`. | Acceptance of one External Event. |
 | `CommandsPrepared` | `index`, ordered `commands` | Before the first handoff of a nonempty batch. | The complete Command intent of the turn. |
 | `CommandsDispatched` | `index` | After the last handoff of a nonempty batch. | Every prepared Command was handed off. |
-| `StopRequested` | `index` | After a `Stop` outcome, before graceful shutdown. | The Application requested shutdown. |
+| `StopRequested` | `index` | After a `Stop` outcome, before shutdown. | The Application requested shutdown. |
 | `TurnCompleted` | `index`, `outcome` (`Continue`/`Stop`) | End of every non-Fatal turn. | The turn's outcome. |
 
-Both `CommandsPrepared` and `CommandsDispatched` are omitted for an empty batch. These commit points are A5 in action: no handler runs before its acceptance record commits, no handoff precedes `CommandsPrepared`, and no next Event is acquired before `TurnCompleted(Continue)` commits. A run's exit is never journaled — a fatal turn's Journal simply ends at its last committed record, and `CommandsPrepared` plus the typed dispatch position in `EngineExit` identifies the exact successful prefix.
+Both `CommandsPrepared` and `CommandsDispatched` are omitted for an empty batch. These commit points are A5 in action: no handler runs before its acceptance record commits, no handoff precedes `CommandsPrepared`, and no next Event is acquired before `TurnCompleted(Continue)` commits. A run's exit is never journaled — a fatal turn's Journal simply ends at its last committed record, and `CommandsPrepared` plus the typed dispatch position in `EngineExit` identifies the exact successful prefix. `CommandsDispatched` may be the final record when the following turn-boundary `take_failure` observes a Port failure. Neither a failure nor `Quiescence` is ever journaled.
 
 The concrete Rust types of the records are Engine-internal (tier 3); their serialized form per this table is normative.
+
+The commit points above form a state machine over record phases, and the Engine enforces it at compile time: an affine phase token, consumed and reissued by each commit, is the only way to commit a record — the token, its phases, and the transition methods live in a private module that owns the sole path to `Journal::commit` (`RECORD-GRAMMAR`). An out-of-order record, a record whose `record_kind` disagrees with its payload, a `TurnCompleted` outcome inconsistent with the phase, or a post-acceptance index mismatch is therefore a compile error, not a runtime condition; no runtime grammar assertion exists. The proof's boundary: the token is affine, not linear — Fatal paths drop it and commit nothing by design, so a record *omitted* where the protocol requires one is caught by golden-Journal tests, never the compiler, and payload content beyond kind, outcome, and index is likewise test territory. Mechanism and transition table: `record-typestate.md`.
 
 ### 8.3 Invariants
 
 | ID | Invariant |
 |---|---|
-| `FAIL-FINALIZE` | Fatal finalization runs exactly once, in order: stop normal execution → if the Environment was started and not consumed, `shutdown(Abort)`, discarding its `Err` (§1.4) → return `EngineExit::Fatal { state, cause }`. After the primary failure the Engine never writes to the Journal again; no handler, dispatch, Event acquisition, or graceful action begins after Fatal (A2, A4). |
+| `FAIL-FINALIZE` | Fatal finalization runs exactly once, in order: stop normal execution → fix `quiescence` (Environment started and not consumed → call `shutdown` and take its result; consumed by the Stop path's `shutdown` → reuse that call's result; `start` returned `Err` → `Quiesced` by §4.2) → return `EngineExit::Fatal { state, cause, quiescence }`. After the primary failure the Engine never writes to the Journal again; no handler, dispatch, `take_failure`, or Event acquisition begins after Fatal (A2, A4). |
 | `BOUND-SIZING` | `max_record_bytes` must accommodate the largest batch the Application can stage under `max_commands_per_turn`; this sizing is a trusted configuration obligation, not a construction proof. |
 | `BOUND-INDEX` | `max_turns` may equal `u64::MAX`; the pre-acquisition turn check makes `EventIndex` overflow unreachable, so overflow is an invariant panic, not an Engine outcome. |
+| `RECORD-GRAMMAR` | Records are committed only through the record module's typestate transitions; the §8.2 record protocol is enforced at compile time. After any Fatal the phase token is dropped and the commit path becomes unreachable, backing `FAIL-FINALIZE`'s "never writes to the Journal again" structurally. |
 
 ### 8.4 Implementation
 
@@ -669,7 +696,7 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | Step | Action | On failure |
 |---|---|---|
 | 1 | Create initial State exactly once (`APP-STATE`). | A panic is outside Engine outcomes (A8). |
-| 2 | `Environment::start`. | `Environment(Start)` Fatal; `start` already cleaned up (§4.2), so finalization skips Abort. |
+| 2 | `Environment::start`. | `Environment(Start)` Fatal; `start` already completed mode-specific cleanup (§4.2), so finalization skips `shutdown` and the exit carries `Quiescence::Quiesced`. |
 | 3 | Commit `RunStarted`. | Journal Fatal. |
 | 4 | Index 0 becomes current; invoke `on_start`; process the turn result. | — |
 
@@ -695,19 +722,21 @@ The concrete Rust types of the records are Engine-internal (tier 3); their seria
 | 3 | Nonempty batch: commit `CommandsPrepared`. | Journal failure dispatches nothing. |
 | 4 | Dispatch each Command once, in order. | `Err` at position `k` is `Environment(Dispatch { position: k })`: the prefix `[0, k)` stands, the Command at `k` was not handed off, the suffix is discarded. |
 | 5 | Nonempty batch: commit `CommandsDispatched`. | Journal failure leaves every handoff real. |
-| 6a | `Continue`: commit `TurnCompleted(Continue)`. | Only success permits the next Event acquisition; Journal failure is Fatal, and the Environment is still live and unconsumed, so finalization runs Abort. |
-| 6b | `Stop`: commit `StopRequested`. | Journal failure precedes shutdown. |
-| 7b | `shutdown(Graceful)` (consumes the Environment). | `Err` is primary `Environment(ShutdownGraceful)`; no second shutdown call is possible. |
-| 8b | Commit `TurnCompleted(Stop)`. | Journal Fatal; the Environment is already consumed, so finalization skips Abort. |
-| 9b | Return `EngineExit::Stopped { state }`. | — |
+| 6 | `Environment::take_failure`. | `Some(error)` is `Environment(ObserveFailure)` Fatal. `None` is the turn-boundary snapshot; on a Stop turn it is the final failure-observation boundary, so every later Environment failure is ignored. |
+| 7a | `Continue`: commit `TurnCompleted(Continue)`. | Only success permits the next Event acquisition; Journal failure is Fatal, and the Environment is still live and unconsumed, so finalization runs `shutdown`. A failure published after order 6 remains pending for the next latch-observing Environment operation. |
+| 7b | `Stop`: commit `StopRequested`. | Journal failure precedes shutdown; the failure checkpoint has already closed Environment failure observation for this Stop turn. |
+| 8b | `shutdown` (consumes the Environment). | Its `Quiescence` is retained; no second shutdown call is possible. |
+| 9b | Shutdown returned `Incomplete`. | Core Fatal `ShutdownIncomplete`, with the consumed Environment's `Incomplete` result reused by finalization. `Quiesced` proceeds. |
+| 10b | Commit `TurnCompleted(Stop)`. | Journal Fatal with `Quiesced` (order 8b's result reused); the Environment is already consumed, so finalization skips `shutdown`. |
+| 11b | Return `EngineExit::Stopped { state }`. | The variant therefore implies `Quiescence::Quiesced`. |
 
 **Fatal finalization** (the procedure behind `FAIL-FINALIZE`):
 
 | Step | Action | Notes |
 |---|---|---|
 | 1 | Stop normal execution; fix the primary cause (A4). | |
-| 2 | Environment started and not consumed → `shutdown(Abort)`, discarding its `Err` (§1.4; terminal Port and Environment state flows through user-owned handles, §3.2). | Skipped after a `start` failure or any consuming shutdown. |
-| 3 | Return `EngineExit::Fatal { state, cause }`. | State always exists here — it is created before any fallible run step. The Journal is not touched. |
+| 2 | Environment started and not consumed → `shutdown`; its result is the exit's `quiescence` (terminal Port and Environment state flows through user-owned handles, §3.2). | After a `start` failure use `Quiesced` from §4.2; after the Stop path's consuming `shutdown`, reuse that call's result. |
+| 3 | Return `EngineExit::Fatal { state, cause, quiescence }`. | State always exists here — it is created before any fallible run step. The Journal is not touched. |
 
 ## 9. Crate layout
 
@@ -719,11 +748,14 @@ kavod/src/
   time.rs        EventIndex, Timestamp
   application.rs Application, Outcome, Context
   port.rs        PortContract, Never, ports!
-  environment.rs Environment, ShutdownMode
+  environment.rs Environment, Quiescence
   live/          LivePort, LiveCtx, live Environment (OPEN-1)
   sim/           SimPort, SimCtx, simulated Environment (OPEN-2)
   journal.rs     Journal, JournalError
-  engine.rs      Engine, EngineConfig, records, EngineExit, FatalCause
+  engine/
+    mod.rs       module wiring + re-exports only
+    engine.rs    Engine, EngineConfig, EngineExit, FatalCause
+    record.rs    records + record typestate (private sibling module; RecordKind, JournalFatal)
 ```
 
 ## 10. Obligations and verification
@@ -740,7 +772,8 @@ Kavod enforces its invariants; everything below is trusted — upheld by a named
 | `Serialize` impls deterministic, side-effect-free, bounded, nonpanicking; stable map order (§7.2) | Payload authors | Golden-Journal tests |
 | Simulated Port determinism and bounded `step` work (§6.2) | Sim Port author | Repeatability tests |
 | Live Port blocking points observe lifecycle and cooperate with shutdown (`BOUND-BLOCKING`) | Live Port author | Shutdown tests under load |
+| The process terminates promptly after an exit carrying `Quiescence::Incomplete` — detach is sound only because a supervisor above the process sweeps it (§5.2) | Caller / deployment | Operational review |
 | `BOUND-SIZING`: `max_record_bytes` fits the largest stageable batch | Deployment configuration | Config review; construction proves nothing about record sizes |
 | Transitive memory bounds of owned values (§1.6) | Value owner | Owner-defined |
 
-Kavod-side verification conventions: Journal and sink failures are exercised through memory sinks and failing writers (§7.2); and the determinism contract (§1.3) is checked by running one conformance trace suite against both Environments and comparing every Core-owned discriminant.
+Kavod-side verification conventions: Journal and sink failures are exercised through memory sinks and failing writers (§7.2); and the determinism contract (§1.3) is checked by running one conformance trace suite against both Environments and comparing every Core-owned discriminant. Environment conformance tests prove both sides of the failure-check linearization, permanent first-failure reporting, final-Command simulated failure observation, and the rule that `Stopped` follows only `Quiesced`. Live lifecycle tests additionally prove that no `LivePort::run` begins before start-gate activation, failed startup cancels and joins every preparatory shell, `Quiesced` joins every supervised thread, and deadline expiry returns `Incomplete` while detaching only unfinished threads.

@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::{
     application::{Application, Context, Outcome},
     bounded_buffer::BoundedBuffer,
-    environment::{Environment, ShutdownMode},
+    environment::{Environment, Quiescence},
     journal::{Journal, JournalBuildError, JournalError},
     time::{EventIndex, Timestamp},
 };
@@ -46,6 +46,7 @@ where
     }
 
     pub fn run(self) -> EngineExit<A::State, A::Fatal, E::Error> {
+        // Makes the borrow checker happy to split things off this way
         let Self {
             mut journal,
             app,
@@ -54,23 +55,24 @@ where
             max_turns,
         } = self;
 
-        // Startup 1: before any fallible step, so every exit path carries state.
+        // Startup state
         let mut state = app.initial_state();
-
-        // Startup 2: `env` is still a plain local here, so an Err drops it
-        // without Abort — §4.2's start row is unrepresentable to violate.
         let start_time = match env.start() {
-            Ok(time) => time,
+            Ok(ts) => ts,
             Err(error) => {
                 return EngineExit::Fatal {
                     state,
                     cause: FatalCause::Environment(EnvironmentFatal {
-                        error,
+                        error: error,
                         operation: EnvironmentOperation::Start,
                     }),
+                    quiescence: Quiescence::Quiesced,
                 };
             }
         };
+
+        // Startup 1: before any fallible step, so every exit path carries state.
+        let mut state = app.initial_state();
 
         // From here on: started ∧ unconsumed ⇔ `Some` (FAIL-FINALIZE).
         let mut env = Some(env);
@@ -342,21 +344,19 @@ where
         }
     }
 
-    /// FAIL-FINALIZE steps 2–3: `shutdown(Abort)` iff the Environment was
-    /// started and not consumed (`Some`), its Err discarded (§1.4). Step 1 —
-    /// fixing the primary cause — holds at every call site by construction:
-    /// each failure returns here immediately, so no later Error can precede it.
+    /// Shuts down the environment and retuns `EngineExit::Fatal`  
     fn fatal_exit(
         state: A::State,
         cause: FatalCause<A::Fatal, E::Error>,
-        env: Option<E>,
+        env: E,
     ) -> EngineExit<A::State, A::Fatal, E::Error> {
-        if let Some(env) = env {
-            // Best-effort cleanup: this Err can never replace the primary cause (A4).
-            let _ = env.shutdown(ShutdownMode::Abort);
-        }
+        let quiescence = env.shutdown();
 
-        EngineExit::Fatal { state, cause }
+        EngineExit::Fatal {
+            state,
+            cause,
+            quiescence,
+        }
     }
 
     /// Commits one record, pairing any failure with the `RecordKind` it was
@@ -430,8 +430,14 @@ pub struct EngineConfig {
 
 #[derive(Debug)]
 pub enum EngineExit<S, AF, EE> {
-    Stopped { state: S },
-    Fatal { state: S, cause: FatalCause<AF, EE> },
+    Stopped {
+        state: S,
+    },
+    Fatal {
+        state: S,
+        cause: FatalCause<AF, EE>,
+        quiescence: Quiescence,
+    },
 }
 
 #[derive(Debug)]

@@ -10,6 +10,20 @@
 >
 > The Engine is tested exclusively against fully scripted fakes — scripted Application, scripted Environment, commit-granular scripted sink — sharing one chronological trace. Every failure the design's tables name is injectable at its exact call site, and a spec-derived model predicts the outcome of every single-fault run.
 
+> **2026-08-15 shutdown amendment (design-final.md) — not yet integrated below.**
+> The shutdown contract changed: `Environment::shutdown(self, timeout: Duration) -> bool`
+> — no `ShutdownMode`, no `Err` channel; `true` = witnessed quiescence. `EngineConfig`
+> gains `shutdown_timeout: NonZeroU64` (ms), `EngineExit::Fatal` gains `quiesced: bool`,
+> `CoreFatal` gains `ShutdownTimeout`, and `EnvironmentOperation::ShutdownGraceful` is
+> deleted. Ripples to fold in when implementation resumes: §3's pseudocode rows 7b/8b and
+> `fatal_exit` (capture the bool from `shutdown`, reuse the Stop path's, `false` when never
+> started); matrix rows E1/E4/E5 (shutdown-`false` is now `Core(ShutdownTimeout)` and E5's
+> "no Abort" reads "skips `shutdown`, `quiesced: true`"); `Fault::ShutdownGraceful` becomes
+> a shutdown-returns-`false` scripting knob; ScriptedEnv's shutdown script and
+> `EnvShutdown` trace event drop the mode and record the received `timeout`; the model
+> oracle predicts `quiesced`; group F asserts the bool per fatal path. The Journal/record
+> protocol is untouched.
+
 Notation used throughout: `RS` = RunStarted, `EA(i)` = EventAccepted at index i, `CP(i)` = CommandsPrepared, `CD(i)` = CommandsDispatched, `SR(i)` = StopRequested, `TC(i,o)` = TurnCompleted with outcome o. `J=` committed journal sequence, `Env=` environment call log, `H=` handler call log.
 
 ## 1. Conformance fixes found by review
