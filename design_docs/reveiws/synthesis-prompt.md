@@ -4,7 +4,6 @@ You are adjudicating and synthesizing twelve independent adversarial reviews of
 @design_docs/reveiws/deepseek.md
 @design_docs/reveiws/fable.md
 @design_docs/reveiws/gemini.md
-@design_docs/reveiws/glm.md
 @design_docs/reveiws/grok.md
 @design_docs/reveiws/kimi.md
 @design_docs/reveiws/muse.md
