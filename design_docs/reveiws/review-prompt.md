@@ -1,13 +1,5 @@
-# Round-2 Adversarial Review Prompt
-
-> Feed the block below verbatim to each review agent, alongside `design_docs/design-v12.md`
-> as the sole attached file. Commit the doc first so every agent reviews the same bytes.
-> Written 2026-08-23, after the Tier 1 + Tier 2 fix rounds; supersedes the round-1 prompt.
-
----
-
-You are performing one adversarial design review of design_docs/design-v12.md. It is the
-sole input: do not read any other file, and do not assume any prior review exists. The
+You are performing one adversarial design review of @design_docs/design-v12.md . It is the
+sole input: DO NOT READ ANY OTHER FILE, and do not assume any prior review exists. The
 document claims to stand alone; if you cannot resolve a question from its text alone, that
 inability is itself a finding.
 
@@ -116,4 +108,4 @@ One line per document section: walked / skimmed / skipped.
 ## Questions the document cannot answer
 Only questions whose answers are underivable from the text.
 
-Do not summarize the document. No praise outside Verdict and Attacked-and-held.
+Do not summarize the document. No praise outside Verdict and Attacked-and-held. 
