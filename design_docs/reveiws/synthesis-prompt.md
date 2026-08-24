@@ -1,6 +1,7 @@
 You are adjudicating and synthesizing twelve independent adversarial reviews of
-@design_docs/design-v12.md . The reviews are:
+@design_docs/design-v12.md 
 
+The reviews are:
 @design_docs/reveiws/deepseek.md
 @design_docs/reveiws/fable.md
 @design_docs/reveiws/gemini.md
