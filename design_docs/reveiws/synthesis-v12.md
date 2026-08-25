@@ -449,6 +449,9 @@ The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No dec
 - SYN-46: prefer the wording fix ("before engine construction") over moving the justification.
 - SYN-50 (settled by D7): the placement rules bind the Glossary too — move the Sim Port lifecycle entry to a §9 `*Define:*`.
 - Everything else is a single-line edit — keep it mechanical, no rewording beyond each fix direction.
+- **Added scope (authorized by Devon at the Batch 6 gate, 2026-08-25):** `TurnOutcome` — a public item Batch 3 created (design-v12.md:627) with no §11 home — joins SYN-52's fix: `record.rs`'s parenthetical becomes "(private; `RecordKind`, `TurnOutcome`, and `JournalFatal` re-exported)".
+- **Added scope (authorized by Devon at the Batch 6 gate, 2026-08-25; declared §12 excursion):** extend `VERIFY-LIVE`'s enumeration with the two cases Batch 5's new behavioral clauses left unpinned, keeping §0's universal enforcement claim true: Events admitted in a known order are dequeued in that order; and, under an injected clock, an Event waking a blocked `next_event` receives a stamp no earlier than its admission instant.
+- **SYN-54 was declined at the Batch 6 gate:** no rename, every path unchanged; the finding is recorded as declined-by-decision, excluded from the commit's closure list, and no partial fix (pointer without directory or vice versa) may ever be applied.
 
 #### SYN-42 The printed "complete expansion" of `ports!` does not compile verbatim — NIT, false claim (executed)
 - **Sources:** sole: opus KV-21

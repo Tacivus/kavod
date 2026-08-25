@@ -5,7 +5,9 @@ All test modules in Kavod follow this pattern:
 - Keep unit tests in a `#[cfg(test)] mod tests` module in the source file they test.
 - Suites that span files live in `tests/`: the conformance trace suite (both
   Environments), golden-Journal suites, and live lifecycle tests. Compile-fail proofs
-  (illegal transitions, missing witnesses) use `trybuild` under `tests/`.
+  (illegal transitions, missing witnesses) run from an `include!`-based fixture crate
+  that reconstructs the Engine module's visibility position, so each failure reaches
+  the grammar restriction rather than module privacy (`VERIFY-GRAMMAR`).
 - Create one nested module per **subject and behavior**.
 - Name every group `<subject>_<behavior>`, even when the source file currently has one
   subject.
