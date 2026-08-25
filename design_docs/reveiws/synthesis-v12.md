@@ -9,59 +9,46 @@
 
 Grouped into **resolution batches**: each batch is one work order — one editing pass over one
 region of the document, one commit naming the SYNs it closes — listed in the order to run
-them. Finding bodies below are unchanged from adjudication. The adjudication themes map to
+them, ending with a close-out pass that is verification, not editing. Finding bodies below are unchanged from adjudication. The adjudication themes map to
 SYN ranges as: Environment contract SYN-01..10, enforcement tiers SYN-11..20, Run grammar
 SYN-21..32, Live/Sim API SYN-33..36, panics SYN-37, vocabulary/self-conformance SYN-38..54.
 
-### Batch 0 — Decisions (no edits)
-
-Settle these before any batch runs; the later batches apply the answers mechanically.
-
-- **D1 (gates Batch 1; SYN-01):** which order `ENV-SHUTDOWN` fixes. Recommended: close-before-signal — both shipped implementations already behave this way.
-- **D2 (gates Batch 1; SYN-02, enables SYN-39):** adopt the `ENV-LATCH` precedence clause — a pending Error ordered before the commitment point wins over an operation's own Error, and a latch-woken `next_event` returns it.
-- **D3 (gates Batch 3; SYN-11, -12, -16, -18):** the enforcement-tier strategy. Three ways to discharge §0's promise, not mutually exclusive: **(a) name suites** — strongest, keeps §0's claim intact, but creates real test-suite obligations; **(b) add `TRUST-*` rows** — honest for rules only review can check, but grows the trusted boundary §12 wants small; **(c) scope §0's quantifier** — cheapest, but weakens the document's strongest meta-claim and is a retreat the next review round will notice. Recommended: (a) for every behaviorally-testable row, (b) only where no trace can witness the rule, (c) never. The per-row assignment is the actual decision — approve or amend the **Proposed D3 disposition** table below; Batch 3 executes that table, not this bullet.
-- **D4 (gates Batch 2; SYN-24, SYN-25):** approve the two API-block changes. For SYN-24 the two options are *not* equivalent: splitting `RecordKind`'s `TurnCompleted` variant changes the serialized `record_kind` tag strings — a wire-format change rippling into `RUN-RECORDS`, the Records table, and every byte-exact golden test — while adding an outcome field to `JournalFatal` changes only the exit type and leaves Journal bytes untouched. Recommended: `JournalFatal` carries the outcome; leave `RecordKind` alone. SYN-25 (the `pub struct Engine` declaration) has no real alternative — just approve it.
-- **D5 (gates Batch 4; SYN-36):** reword `BOUND-STATIC` neutrally now (recommended), or defer it to Wiring close.
-- **D6 (gates Batch 3; SYN-40):** whether §0 names Mechanism a fourth, explicitly nonbinding prose job (recommended); the three load-bearing sentences get promoted either way.
-- **D7 (gates Batch 3; the Unresolved item):** declare in §0 whether the placement rules bind the current text. Recommended: yes — every violation is being fixed anyway, and the declaration ends the question permanently.
-
-**Proposed D3 disposition** (approve or amend per row; Batch 3 executes this table):
-
-| Untiered rule / clause | Proposed disposition |
-|---|---|
-| `SIM-SELECT`'s cursor and round-robin clauses; `SIM-STEPS` budget fenceposts; `SIM-WAKEUP` last-call-wins; `SIM-COMPLETION` | Extend `VERIFY-SIM`'s scope from lifecycle to scheduling: check order, persistent cursor, equal-time ties, wakeup mutation, budget boundaries (SOL-06's list, quoted in SYN-11) |
-| `LIVE-SELECT`'s stamp/dequeue and nothing-fallible clauses; `LIVE-EVENTS`'s `Full`/`Closed` returns; `LIVE-DISPATCH`'s admission-identity clause | Extend `VERIFY-LIVE` with select/offer/dispatch behavior cases |
-| `APP-EMIT`, `APP-OVERFLOW`, `APP-STATE` | One small named Context suite (new row, e.g. `VERIFY-CONTEXT`): call-order append, first-overflow marker semantics, fresh-invocation reset, State-stands-on-Fatal |
-| `DET-RUN` two-run repeatability (SYN-12) | Extend `VERIFY-CONFORMANCE`: run each scripted trace twice, compare `DET-RUN`'s list; cite it from `DET-RUN`'s row |
-| Edge runtime checks (`Core(TimeRegression)`, `Core(IndexExhausted)` classification) | No separate action — falls out of SYN-14's `VERIFY-FAULTS` extension |
-| `ENV-BOUNDS` | Shipped implementations: witnessed by the extended `VERIFY-LIVE`/`VERIFY-SIM` rejection and exhaustion cases; bespoke: already rides `TRUST-ENV` — say both in the row |
-| `PORT-STATE`'s "never reading the payload" (SYN-18) | Extend `TRUST-ROUTING`'s obligation text (upholder: wiring author; verified by: review) — no new row |
-| `ASSERT-INVARIANTS`, `BOUND-LOOPS`, `NO-UNWIND` first clause | Reclassify as tier definitions per KV-03's steelman: move into §0 (or mark definitional in place); `NO-UNWIND`'s abort half already rides `TRUST-ABORT` |
-| The answer passed to `classify` (KV-08); blocked-`next_event` wake (SOL-07) | Enforcement already exists in effect — add the missing citations: `RUN-ENFORCEMENT` cites `VERIFY-JOURNAL`'s sequence pinning; `VERIFY-LATCH` gains one explicit publish-while-blocked case |
+All seven gating decisions (D1–D7) were resolved on 2026-08-25 — D1–D3 and D5–D7 recorded in
+`batch_0.md`, D4 (SYN-24: `JournalFatal` carries the outcome; `RecordKind` and the wire format
+untouched) decided in session — and their content is baked into the batch intros and execution
+notes below. Where a decision overrides a finding's original **Fix direction** (SYN-01:
+signal-first, not close-first; SYN-19: superseded verification cases), the batch notes say so
+and win.
 
 ### How to run a batch (all batches)
 
 Ground rules for whoever executes a batch — read these before the batch's own notes:
 
 - **`design-v12.md` is the sole authority.** The quotes in each finding are excerpts; re-read the full row or section in place before editing it. The eleven reviews are testimony — do not consult them for wording.
-- **Scope is exactly the batch's SYNs.** If a fix seems to demand a further change, write it down as a follow-up and stop; do not make it.
+- **Scope is exactly the batch's SYNs** plus any added scope its notes declare. If a fix seems to demand a further change, write it down as a follow-up and stop; do not make it.
+- **Each batch leaves the document self-consistent.** A contract change and the realization and verification rows that must agree with it belong to the same batch — never split across commits.
 - **Every new normative sentence must land in one of §0's four binding forms** — a guarantee row with an ID, an API block, a binding-table row, or an Obligations row. No rules in prose; run §0's own deletion test on any prose you add.
 - **Follow the document's citation discipline:** cite IDs, never section numbers; citations point backward across sections; trust marks may point forward into the Obligations table.
 - **Fix directions are directions, not drafted text.** Write the change in the document's voice: derive rather than enumerate, plain language, one line per Glossary term.
 - **Appendix A must reconcile after the batch:** every added or renamed ID appears there exactly once; no dangling citations anywhere in the body.
 - **One commit per batch**, message listing the SYNs closed. Do not edit this synthesis's finding bodies; track completion against the disposition index.
 
-### Batch 1 — Environment contract & Glossary pass (§1 + §5)
+### Batch 1 — Shutdown & latch redesign (D1 + D2; §5, §8, §9, §12)
 
-Highest value first: both content MAJORs and all of the bespoke-implementor exposure. §5 declares itself "the complete contract"; this pass makes that claim true. One editing pass over the Glossary (§1) and the Environment contract (§5), including its API doc comments and commitment table. Requires D1 and D2.
+The round's one design change, done atomically. The D1 shutdown discipline (signal first, latch open through the bounded graceful-shutdown window, close as the final Error observation) and the D2 latch precedence clause land in the contract, both shipped realizations, and the verification rows in one commit — after this batch the document is coherent end-to-end on its new shutdown design, and every later batch is mechanical. Decision record: `batch_0.md` D1/D2.
 
-**Contains:** `SYN-01`, `SYN-02`, `SYN-03`, `SYN-06`, `SYN-07`, `SYN-08`, `SYN-09`, `SYN-10`, `SYN-26`, `SYN-38`, `SYN-43`, `SYN-44`, `SYN-47`, `SYN-49`.
+**Contains:** `SYN-01`, `SYN-02`, `SYN-03`, `SYN-04`, `SYN-09`, `SYN-10`, `SYN-19`.
 
 **Execution notes:**
-- SYN-01 and SYN-02 both edit `ENV-SHUTDOWN`/`ENV-LATCH`: draft the two rows jointly, once, then check SYN-03 and SYN-08's wording against the result rather than patching sequentially.
-- Write SYN-02's precedence clause inside `ENV-LATCH`'s existing row — no new ID — so Batch 2's SYN-39 has a citable home.
-- The Glossary edits (SYN-38, -43, -49, and SYN-03/-06/-07 if the Glossary route is chosen) must keep §1's "one line per term."
-- After the pass, re-read `VERIFY-LATCH` (§12): its wording tracks `ENV-LATCH`'s ordering language. If it no longer matches, flag it for Batch 3 — do not edit §12 here.
+- **D1, contract half (decided — overrides SYN-01's Fix direction, which recommended close-before-signal):** rewrite `ENV-SHUTDOWN` and the `shutdown` doc comment, at contract level: raise the signal first, apply the bounded quiescence policy while the latch remains open, close the latch as the final Error observation. A publication before the close latches normally (first-wins); one after the close is discarded. The full Stop-path outcome matrix is in `batch_0.md` D1.
+- **D1, realization half (added scope — the decision's required follow-up):** rewrite `LIVE-SHUTDOWN` to signal first, wait for completion or the deadline with the latch open, and close at the final observation; rewrite `LIVE-SUPERVISION` so a `run(Err)` during the graceful-shutdown window still publishes (an `Ok` completion after the signal stays expected and unpublished); rewrite `SIM-SHUTDOWN` to invoke `stop` while the latch is open, publish the first returned Error, and close after the calls. Update the §9 notes that derive the Stop-path report Error as "structurally `None`" — under D1 it no longer is.
+- **D2 (decided, as recommended):** write the precedence clause inside `ENV-LATCH`'s existing row — a pending Error ordered before the commitment point is returned in preference to the operation's own pre-commitment Error, which is secondary and discarded; a `next_event` woken by the latch returns that Error. No new ID, so Batch 3's SYN-39 has a citable home.
+- **Verification half:** D1 supersedes SYN-19's original Fix direction (the atomic signal-and-close bullet). `VERIFY-LIVE`, `VERIFY-SIM`, and `VERIFY-LATCH` instead cover: the latch remaining open through graceful shutdown, a typed shutdown Error before the final close, a publication racing that final close, deadline timeout without an Error, Error-plus-timeout precedence, and post-close discard — plus D2's publish-while-blocked case in `VERIFY-LATCH`.
+- SYN-03 is part of the design, not a patch: under D1 the bounded quiescence policy *is* the graceful-shutdown window. Define the bound (it applies to waiting for outstanding activity, not to reclaiming activity already witnessed complete) in `ENV-SHUTDOWN` or one Glossary line while writing the new rows.
+- SYN-04: the deadline survives D1 as the graceful-shutdown deadline; put the saturation clause on it here, in-row, inside closed text. Construction-time validation stays a Wiring-close option — pick one, don't do both halfway.
+- SYN-09: scope "witnessed complete" while rewriting `SIM-SHUTDOWN` and the commitment row — Live's `Quiesced` is join-witnessed; the Sim/bespoke residue is `TRUST-SPAWN`/`TRUST-ENV`-scoped.
+- SYN-10: under D1 the report's contents fix at the final observation — say so in the shutdown commitment row (the consuming call is the irrevocability; the report fixes within it, at the final observation).
+- Draft `ENV-SHUTDOWN` and `ENV-LATCH` jointly, then check that `StopPending`'s row (§7) still reads correctly against the new report semantics — `batch_0.md` D1's outcome matrix says it should need no change; if it does, stop and flag rather than edit §7 here.
 
 #### SYN-01 Shutdown signal vs latch close: order unfixed — MAJOR, omission
 - **Sources:** sole: opus KV-01
@@ -84,6 +71,45 @@ Highest value first: both content MAJORs and all of the bespoke-implementor expo
 - **Witness:** KV-07's two conforming policies P1/P2; P1 can hang the process, P2 cannot.
 - **Fix direction:** One Glossary line or one `ENV-SHUTDOWN` clause: the bound applies to waiting for outstanding activity, not to reclaiming activity already witnessed complete.
 
+#### SYN-04 Shutdown-deadline arithmetic overflow has no defined outcome — MINOR, omission
+- **Sources:** kimi KK3-02, ox OA-03
+- **Text:** `LIVE-SHUTDOWN`: "fixes one absolute shutdown deadline, the configured duration after that close"; A6: "Arithmetic on … times … is checked"; §10: "the shutdown deadline (nonzero milliseconds)".
+- **Adjudication:** Confirmed: A6 forces the addition to be checked, `shutdown` returns no `Result`, the report's `error` field is defined as the latch's pending Error, and `Quiescence` has two variants — a checked failure has nowhere to go (ox), and the two natural recoveries diverge observably in `Quiescence`, a Core-owned compared payload (kimi). Reachable only under an absurd-but-legal configuration (`u64::MAX` ms), hence MINOR. §10's openness does not excuse it: the gap is in closed text (`LIVE-SHUTDOWN` + A6).
+- **Witness:** KK3-02's: deadline `u64::MAX` ms; implementation A treats `checked_add` `None` as "no effective deadline" → can return `Quiesced`; implementation B treats it as already-expired → `Incomplete` with detached threads.
+- **Fix direction:** Validate the deadline at construction (typed config error) or name saturation behavior in `LIVE-SHUTDOWN`; one sentence either way.
+
+#### SYN-09 `Quiescence`'s "witnessed complete" is not witnessed for Sim or bespoke Environments — MINOR, unenforceable claim
+- **Sources:** sole: sonnet CR-02
+- **Text:** Glossary: "`Quiesced` (witnessed complete)"; Commitment points, `shutdown`: "`Quiesced` witnesses that every unit of run-scoped activity completed"; `TRUST-SPAWN`: "run-scoped activity is otherwise unwitnessable"; Sim Notes: "the report always carries `Quiesced`."
+- **Adjudication:** Confirmed: the document's own `TRUST-SPAWN` row concedes that beyond Live's joins the activity is *unwitnessable*, while the binding commitment row uses "witnesses" unconditionally — for Sim the value is structural and trust-derived, not witnessed. A wording overclaim on a disclosed limitation, so MINOR, not a hidden contradiction.
+- **Witness:** CR-02's: a `SimPort::start` spawns `thread::spawn(|| loop {})` and never joins it; `SIM-SHUTDOWN` still reports `Quiesced`, indistinguishable from a clean run.
+- **Fix direction:** Scope the Glossary parenthetical and the commitment-row "witnesses" to what the implementation accounts for, marking the Sim/bespoke residue `TRUST-SPAWN`/`TRUST-ENV`-scoped — matching the hedge §8's Notes already carry for Live.
+
+#### SYN-10 `shutdown`'s commitment point "the call itself" is an interval, not an instant — NIT, wording
+- **Sources:** sole: sol SOL-05 (severity moved from MAJOR)
+- **Text:** Glossary: "Commitment point — the instant an operation's outcome becomes fixed"; Commitment points, `shutdown`: "The call itself."
+- **Adjudication:** Downgraded from MAJOR: the table's preamble ("The table binds outcomes, not instants: where a commitment sits inside an implementation is that implementation's business") licenses the looseness; `shutdown` has no `Err` path, so the before/after-commitment split — the only machinery the commitment point drives — is vacuous for it, and no two conforming implementations diverge. SOL's observation that the Live report's contents are fixed at the final observation, not at invocation, is correct and worth one clause.
+- **Witness:** SOL-05's: at call entry one entry is `Outstanding`, deadline 10 ms; completion at 9 ms → `Quiesced`, at 11 ms → `Incomplete`.
+- **Fix direction:** One clause: the consuming call is the commitment (irrevocable at invocation); the report's contents fix within it, at the final latch/completion observation.
+
+#### SYN-19 `VERIFY-LIVE` has no bullet for a completion racing shutdown's initiating instant — MINOR, omission
+- **Sources:** sole: sonnet CR-04
+- **Text:** `LIVE-SUPERVISION`: "The transition out of `Running` and the latch close are one linearized instant"; `VERIFY-LIVE`'s enumeration covers completion-before-shutdown and completion-concurrent-with-expiry only.
+- **Adjudication:** Confirmed: the atomicity is realized by a lock only in nonbinding Mechanism prose, and the enumerated suite bullets bracket the race at both far ends but not at the initiating instant itself, leaving the linearization requirement's tier unstated — an instance of the Theme-2 shape with a one-bullet fix.
+- **Witness:** CR-04's: an implementation flipping `Running` and closing the latch as two unsynchronized writes, a shell's `run()` returning in the gap; no bullet, read literally, is written to catch it.
+- **Fix direction:** Add the bullet: a completion racing shutdown's initiating instant is classified premature or expected, never both or neither.
+
+### Batch 2 — Environment contract & Glossary wording residue (§1 + §5)
+
+The remaining Environment-contract and Glossary wording fixes — all mechanical after Batch 1. One pass over §1 and §5.
+
+**Contains:** `SYN-06`, `SYN-07`, `SYN-08`, `SYN-26`, `SYN-38`, `SYN-43`, `SYN-44`, `SYN-47`, `SYN-49`.
+
+**Execution notes:**
+- Several of these edit rows Batch 1 just rewrote (`ENV-LATCH` for SYN-08, `ENV-SHUTDOWN` for SYN-07, the `shutdown` doc comment for SYN-44): re-read the merged Batch 1 text first, and make SYN-08's scoping fit the D2 precedence clause rather than the pre-D2 wording its finding quotes.
+- The Glossary edits (SYN-38, -43, -49, and SYN-06/-07 if the Glossary route is chosen) must keep §1's "one line per term."
+- SYN-26 is one quantifier: "`start` at most once, and first if at all" in `ENV-SERIAL`.
+
 #### SYN-06 `ENV-START`'s "lifecycle" has no general binding meaning — MINOR, ambiguity
 - **Sources:** sole: deepseek OCN-02
 - **Text:** `ENV-START`: "no Port is left mid-lifecycle: every Port either never began or will receive no further call, its lifecycle ended before the return." Glossary defines only "Sim Port lifecycle."
@@ -104,20 +130,6 @@ Highest value first: both content MAJORs and all of the bespoke-implementor expo
 - **Adjudication:** Confirmed with opus's own scope note: for `Ok` returns and `take_error` the witness claim is forced and checkable; for an `Err` return the placement is legible only from the Error value's provenance, and `Environment::Error` is opaque with no required discriminability between a republished latch Error and an operation-minted one — against a bespoke Environment with an indistinct Error sum, `VERIFY-LATCH`'s agreement check has nothing to compare.
 - **Witness:** KV-19's: during a `next_event`, Event `E` arrives *and* Port `A` publishes `P`; the Environment's duration conversion also overflows. `Err(TimeExhausted)` with `P` pending and `Err(P)` with the latch reported are one `Err` of one opaque type each.
 - **Fix direction:** Scope the witness sentence to `Ok` returns and `take_error`, or require the Error sum to distinguish republished latch Errors. SYN-02's precedence fix shrinks but does not close this.
-
-#### SYN-09 `Quiescence`'s "witnessed complete" is not witnessed for Sim or bespoke Environments — MINOR, unenforceable claim
-- **Sources:** sole: sonnet CR-02
-- **Text:** Glossary: "`Quiesced` (witnessed complete)"; Commitment points, `shutdown`: "`Quiesced` witnesses that every unit of run-scoped activity completed"; `TRUST-SPAWN`: "run-scoped activity is otherwise unwitnessable"; Sim Notes: "the report always carries `Quiesced`."
-- **Adjudication:** Confirmed: the document's own `TRUST-SPAWN` row concedes that beyond Live's joins the activity is *unwitnessable*, while the binding commitment row uses "witnesses" unconditionally — for Sim the value is structural and trust-derived, not witnessed. A wording overclaim on a disclosed limitation, so MINOR, not a hidden contradiction.
-- **Witness:** CR-02's: a `SimPort::start` spawns `thread::spawn(|| loop {})` and never joins it; `SIM-SHUTDOWN` still reports `Quiesced`, indistinguishable from a clean run.
-- **Fix direction:** Scope the Glossary parenthetical and the commitment-row "witnesses" to what the implementation accounts for, marking the Sim/bespoke residue `TRUST-SPAWN`/`TRUST-ENV`-scoped — matching the hedge §8's Notes already carry for Live.
-
-#### SYN-10 `shutdown`'s commitment point "the call itself" is an interval, not an instant — NIT, wording
-- **Sources:** sole: sol SOL-05 (severity moved from MAJOR)
-- **Text:** Glossary: "Commitment point — the instant an operation's outcome becomes fixed"; Commitment points, `shutdown`: "The call itself."
-- **Adjudication:** Downgraded from MAJOR: the table's preamble ("The table binds outcomes, not instants: where a commitment sits inside an implementation is that implementation's business") licenses the looseness; `shutdown` has no `Err` path, so the before/after-commitment split — the only machinery the commitment point drives — is vacuous for it, and no two conforming implementations diverge. SOL's observation that the Live report's contents are fixed at the final observation, not at invocation, is correct and worth one clause.
-- **Witness:** SOL-05's: at call entry one entry is `Outstanding`, deadline 10 ms; completion at 9 ms → `Quiesced`, at 11 ms → `Incomplete`.
-- **Fix direction:** One clause: the consuming call is the commitment (irrevocable at invocation); the report's contents fix within it, at the final latch/completion observation.
 
 #### SYN-26 `ENV-SERIAL`'s "`start` exactly once" vs Environments dropped without a run — MINOR, ambiguity
 - **Sources:** sole: opus KV-20
@@ -161,16 +173,16 @@ Highest value first: both content MAJORs and all of the bespoke-implementor expo
 - **Witness:** `std::io::Write::flush`'s signature.
 - **Fix direction:** "a write's Ok count or a flush's success, or the failure's presence."
 
-### Batch 2 — The Run pass (§7, plus one A4 clause in §2)
+### Batch 3 — The Run pass (§7, plus one A4 clause in §2)
 
-One pass over §7 — graph preambles, grammar rows, records, enforcement prose — plus A4's cleanup-scope clause. The graph itself held everywhere; these are seam and scope fixes between the binding tables and the fused realization. Requires D4. SYN-39 lands here but depends on Batch 1's SYN-02 clause (cite the new `ENV-LATCH` rule, or delete the note).
+One pass over §7 — graph preambles, grammar rows, records, enforcement prose — plus A4's cleanup-scope clause. The graph itself held everywhere; these are seam and scope fixes between the binding tables and the fused realization. D4 is settled (see notes). SYN-39 lands here and cites the `ENV-LATCH` precedence clause Batch 1 added.
 
 **Contains:** `SYN-21`, `SYN-22`, `SYN-23`, `SYN-24`, `SYN-25`, `SYN-27`, `SYN-28`, `SYN-29`, `SYN-30`, `SYN-31`, `SYN-32`, `SYN-39`, `SYN-41`.
 
 **Execution notes:**
 - SYN-22, -23, -28, and -30 all land in §7's opening paragraph and Edges preamble: draft them as one rewrite of those few sentences, not four sequential patches that fight each other.
-- SYN-24 applies D4's choice; under the recommended `JournalFatal`-carries-outcome option, `RUN-RECORDS`, the Records table, and the golden tests are untouched — verify that stays true.
-- SYN-39 cites the `ENV-LATCH` clause Batch 1 added (or, if D2 was declined, delete the note outright — do not leave it citing nothing).
+- **D4 (decided):** SYN-24 takes the `JournalFatal`-carries-outcome option — add an outcome field to `JournalFatal` for `TurnCompleted` commit failures; `RecordKind`, the `record_kind` wire tags, `RUN-RECORDS`, the Records table, and every golden test stay untouched — verify that stays true. SYN-25 adds the `pub struct Engine` declaration; no alternative existed.
+- SYN-39 cites the `ENV-LATCH` precedence clause Batch 1 added (D2).
 - SYN-41's target is nonbinding Mechanism prose — keep the fix in that register: one disclosing sentence, not a new rule.
 - SYN-27's edit is one clause in §2's A4 row; touch nothing else in the axiom table.
 
@@ -265,19 +277,40 @@ One pass over §7 — graph preambles, grammar rows, records, enforcement prose 
 - **Witness:** CR-12's executed pair: naive derive → `{"kind":null,…}`; hand-written impl + rename → the documented bytes exactly.
 - **Fix direction:** One sentence: the shared kind-marker's `Serialize` is one hand-written impl driven by `RecordPayload`'s tag.
 
-### Batch 3 — Enforcement & verification pass (§0 + §12)
+### Batch 4 — Enforcement & verification pass (§0 + §12)
 
-The enforcement-accounting pass: discharge §0's "Every ID outside the Obligations table is enforced" per D3, apply D6's Mechanism ruling and D7's placement declaration, and repair the `VERIFY-*`/`TRUST-*` rows. Touches `DET-RUN`'s row in §7 (SYN-12, SYN-13) and adds trust-mark citations at `RUN-FINALIZE` and in §9 (SYN-20).
+The enforcement-accounting pass: discharge §0's "Every ID outside the Obligations table is enforced" per the approved D3 disposition table below, apply D6's Mechanism ruling and D7's placement declaration, and repair the `VERIFY-*`/`TRUST-*` rows. Touches `DET-RUN`'s row in §7 (SYN-12, SYN-13) and adds trust-mark citations at `RUN-FINALIZE` and in §9 (SYN-20).
 
-**Contains:** `SYN-11`, `SYN-12`, `SYN-13`, `SYN-14`, `SYN-15`, `SYN-16`, `SYN-17`, `SYN-18`, `SYN-19`, `SYN-20`, `SYN-40`.
+**Contains:** `SYN-11`, `SYN-12`, `SYN-13`, `SYN-14`, `SYN-15`, `SYN-16`, `SYN-17`, `SYN-18`, `SYN-20`, `SYN-40`.
 
 **Execution notes:**
-- The approved **Proposed D3 disposition** table (Batch 0) is the scope for SYN-11 — execute it row by row; this batch's prose does not override it.
-- Any new `TRUST-*` row needs all four cells (ID, obligation, upholder, verified-by); extended `VERIFY-*` rows stay single rows.
-- SYN-20 is citation-only: trust marks are exempt from the backward rule, so cite `TRUST-BLOCKING` at `RUN-FINALIZE` and in §9 directly.
-- Apply D6 (Mechanism as a declared nonbinding prose job) and D7 (the placement-rules declaration) in §0 here; SYN-40's three promotions (`JRN-ENCODE` encode-region size, `Never: Serialize` into the §4 API block, the §11 re-export rule) go wherever D6's answer sends them.
-- §12's framing sentences ("complete trusted boundary") must still be true when the batch ends — re-read them last.
-- Update Appendix A for every ID added or moved.
+- **D3 (decided):** preserve §0's universal enforcement claim — do not scope or weaken its quantifier. Apply the tier order strictly (unrepresentable, else always-on assertion, else named required suite); use a trusted obligation only where no execution trace can witness the rule. No new `TRUST-*` row may be added merely to avoid writing an observable-behavior test, and §12 must remain the complete trusted boundary. The **Approved D3 disposition** table below is SYN-11's scope — execute it row by row.
+- Batch 1 already put the D1/D2 shutdown and publish-while-blocked cases into `VERIFY-LIVE`, `VERIFY-SIM`, and `VERIFY-LATCH`. This pass *extends* those rows per the table (scheduling, select/offer/dispatch, bounds cases) — verify the Batch 1 cases are present and do not regress or duplicate them; the table's blocked-wake row is already satisfied.
+- **D6 (decided):** add Mechanism to §0 as a fourth, explicitly nonbinding prose job, with the sentence: "Mechanism illustrates one replaceable realization of the binding rules. It creates no obligation and is never authority over an API block, guarantee row, binding table, or obligation row." SYN-40's three promotions happen regardless: the encode-region size and checked `max_record_bytes + 1` into `JRN-ENCODE` (making the `NotAnObject`/`BoundExceeded` split binding); `Never: Serialize` declared in the §4 API block (the `match *self {}` body may stay Mechanism); the §11 re-export/no-repeated-path rule into a guarantee row with an Appendix A entry.
+- **D7 (decided):** the placement rules bind current and future text. Introduce them with "Placement rules, for this document and every future edit:" — and treat any batch that leaves placement debt as unfinished. The known violations stay in their assigned batches (SYN-39, -45, -46, -48, -50).
+- Any new or extended `TRUST-*` row needs all four cells (ID, obligation, upholder, verified-by); extended `VERIFY-*` rows stay single rows. `NO-UNWIND` is handled per the table: extend `TRUST-ABORT` (joint upholders; review plus a CI build-profile check) — do not reclassify it as definitional.
+- SYN-20 is citation-only: trust marks are exempt from the backward rule, so cite `TRUST-BLOCKING` at `RUN-FINALIZE` and in §9 directly, and state the nontermination consequence for Sim as well as Live.
+- §12's framing sentences ("complete trusted boundary") must still be true when the batch ends — re-read them last. Update Appendix A for every ID added or moved.
+
+**Approved D3 disposition** (decision record: `batch_0.md`; this table is Batch 4's scope for SYN-11):
+
+| Rule or clause | Enforcement disposition |
+|---|---|
+| `SIM-SELECT` cursor and round-robin behavior; `SIM-STEPS` fenceposts; `SIM-WAKEUP` last-call-wins; `SIM-COMPLETION` | Extend `VERIFY-SIM` from lifecycle-only coverage to scheduling and bounds coverage: frozen order, persistent cursor, equal-time ties, wakeup replacement and clearing, exact budget boundaries, no mutation on exhaustion, and no-armed-Port completion. |
+| `LIVE-SELECT` stamp/dequeue ordering and post-dequeue infallibility; `LIVE-EVENTS` `Full`/`Closed` returns; `LIVE-DISPATCH` admission identity | Extend `VERIFY-LIVE` with select, offer, dispatch, ownership-return, and capacity-boundary cases. |
+| `APP-EMIT`, `APP-OVERFLOW`, `APP-STATE` | Add the required `VERIFY-CONTEXT` suite: append in call order, first-overflow marker behavior, later-emission rejection, fresh-handler reset, and State mutations standing on every Fatal path. |
+| `DET-RUN` repeatability | Extend `VERIFY-CONFORMANCE`: run every scripted trace twice within each Environment type and compare all values in `DET-RUN`'s list. Cite that suite from `DET-RUN`; retain the explicit `TRUST-PURE` and `TRUST-SERIALIZE` preconditions (SYN-12, SYN-13). |
+| `Core(TimeRegression)`, `Core(CommandBoundExceeded)`, `Core(ShutdownIncomplete)` | Extend `VERIFY-FAULTS` with a decreasing successful timestamp, an over-emitting Application, and an `{ Incomplete, None }` shutdown report. Restrict the operation-Error/report-Error cross-product to post-`start` failures and separately prove that `start Err` performs no shutdown (SYN-14, SYN-15). |
+| `Core(IndexExhausted)` | Keep the structural `RUN-INDEX` enforcement: check the index domain before `next_event`, make overflow past the check an always-on invariant panic, and do not add a test-only certificate-forging path that weakens `RUN-GRAMMAR`. |
+| `ENV-BOUNDS` | For shipped Environments, require the extended `VERIFY-LIVE` and `VERIFY-SIM` rejection, exhaustion, and no-growth cases. For bespoke Environments, cite `TRUST-ENV`; its verification must name `VERIFY-CONFORMANCE`, `VERIFY-LATCH`, and review for bounds and other properties no trace can witness (SYN-16). |
+| `PORT-STATE` payload noninspection | Extend `TRUST-ROUTING` to prohibit reading routed payloads, upheld by the wiring author and verified by review. Bespoke Environment routing also remains covered by `TRUST-ENV`. Trusted because a payload read with no externally visible effect cannot be detected by a behavioral suite (SYN-18). |
+| `ASSERT-INVARIANTS` | Move to §0 as the definition of the asserted tier: only always-on, constant-time assertions count as enforcement. Every invariant still requires an owning guarantee and assertion site. |
+| `BOUND-LOOPS` | Move to §0 as the definition and registry of bounded active-loop enforcement. Each concrete loop remains enforced by its owner and bound; blocking waits remain governed by `TRUST-BLOCKING`. |
+| `NO-UNWIND` | Do not erase this implementation property by calling it definitional. Extend `TRUST-ABORT` to require both that shipped code relies on unwinding nowhere and that the final binary uses `panic = "abort"`; upheld jointly by the Kavod implementer and build configuration, verified by code review and a CI build-profile check. |
+| Answer passed to `classify` | Cite `VERIFY-JOURNAL`; its required record sequences and outcomes pin the answer passed at the single runtime call site. |
+| Blocked `next_event` wake | Extend `VERIFY-LATCH` with an explicit publish-while-blocked case. Per D2, a call woken by the latch must return and report the pending Error. |
+| `VERIFY-GRAMMAR` visibility | Require a fixture mechanism that attacks from the Engine's module visibility position, such as an `include!`-based fixture crate, so compile failures test grammar restrictions rather than merely failing on privacy (SYN-17). |
+| `TRUST-BLOCKING` dependencies | Cite `TRUST-BLOCKING` at `RUN-FINALIZE`, `SIM-START`, and `SIM-SHUTDOWN`, and state the nontermination consequence for Sim as well as Live (SYN-20). |
 
 #### SYN-11 Behavioral rows with no locatable enforcement tier — MAJOR, unenforceable claim
 - **Sources:** ox OA-01, opus KV-03, sol SOL-06, sol SOL-07, opus KV-08
@@ -335,13 +368,6 @@ The enforcement-accounting pass: discharge §0's "Every ID outside the Obligatio
 - **Witness:** KAV-02's two `dispatch` fan-out matches, one logging a payload field before forwarding — both pass every named suite.
 - **Fix direction:** Either move the clause to a `TRUST-*` row (wiring/Environment author, review-verified) or reword it as a derivation of A1 ownership rather than an enforced prohibition.
 
-#### SYN-19 `VERIFY-LIVE` has no bullet for a completion racing shutdown's initiating instant — MINOR, omission
-- **Sources:** sole: sonnet CR-04
-- **Text:** `LIVE-SUPERVISION`: "The transition out of `Running` and the latch close are one linearized instant"; `VERIFY-LIVE`'s enumeration covers completion-before-shutdown and completion-concurrent-with-expiry only.
-- **Adjudication:** Confirmed: the atomicity is realized by a lock only in nonbinding Mechanism prose, and the enumerated suite bullets bracket the race at both far ends but not at the initiating instant itself, leaving the linearization requirement's tier unstated — an instance of the Theme-2 shape with a one-bullet fix.
-- **Witness:** CR-04's: an implementation flipping `Running` and closing the latch as two unsynchronized writes, a shell's `run()` returning in the gap; no bullet, read literally, is written to catch it.
-- **Fix direction:** Add the bullet: a completion racing shutdown's initiating instant is classified premature or expected, never both or neither.
-
 #### SYN-20 The hang consequence of `TRUST-BLOCKING` is disclosed only in §8's Notes, uncited where it is relied on — MINOR, omission
 - **Sources:** sonnet CR-03, sonnet CR-13
 - **Text:** `RUN-FINALIZE`: "… → call `shutdown` …" (no termination citation); `SIM-START`/`SIM-SHUTDOWN` cite `TRUST-SIM-PORT`/`TRUST-SPAWN` but not `TRUST-BLOCKING`; §8 Notes alone derive "`shutdown` remains blocked in a join and produces neither a `ShutdownReport` nor an `EngineExit`."
@@ -356,25 +382,18 @@ The enforcement-accounting pass: discharge §0's "Every ID outside the Obligatio
 - **Witness:** KV-05's executed encode-region divergence, above.
 - **Fix direction:** Either declare Mechanism a fourth, explicitly nonbinding prose job in §0 *and* promote these three sentences (encode-region size into `JRN-ENCODE`; `Never: Serialize` into the API block; the re-export rule into a row), or just promote them.
 
-### Batch 4 — Live/Sim pass (§8 + §9, plus two Laws rows in §2)
+### Batch 5 — Live/Sim residue (§8 + §9, plus two Laws rows in §2)
 
-One pass over the Live and Sim Port-facing rows, plus the two Laws-row wordings: A8's profile scoping (SYN-37) and `BOUND-STATIC` (SYN-36, requires D5).
+One pass over the remaining Live and Sim Port-facing rows — small now that D1's realization landed in Batch 1 — plus the two Laws-row wordings: A8's profile scoping (SYN-37) and `BOUND-STATIC` (SYN-36, settled by D5).
 
-**Contains:** `SYN-04`, `SYN-05`, `SYN-33`, `SYN-34`, `SYN-35`, `SYN-36`, `SYN-37`.
+**Contains:** `SYN-05`, `SYN-33`, `SYN-34`, `SYN-35`, `SYN-36`, `SYN-37`.
 
 **Execution notes:**
-- SYN-04: prefer the in-row fix (a saturation clause in `LIVE-SHUTDOWN`) — it stays inside closed text; construction-time validation belongs to open §10 and can be added at Wiring close instead. Pick one, don't do both halfway.
-- SYN-05 edits both `LIVE-DISPATCH` and the Glossary's `Handoff`/`Admission` lines; those Glossary lines are disjoint from Batch 1's edits, but re-read them as merged before writing.
-- SYN-36 applies D5; if D5 chose deferral, record the open question in §10's list instead of editing `BOUND-STATIC`.
+- **D5 (decided):** reword `BOUND-STATIC` to exactly: "Construction fixes the nonempty Port set and one Slot order; both remain unchanged for the Environment's lifetime." The order's source (registration vs declaration) stays an open Wiring decision — do not choose it here.
+- SYN-34 and SYN-35 edit `LIVE-EVENTS`/`LIVE-SELECT`, which Batch 1's shutdown work largely left alone — but `LIVE-EVENTS`' fan-in-close sentence interacts with the D1 signal, so re-read the merged rows before writing.
+- SYN-05 edits both `LIVE-DISPATCH` and the Glossary's `Handoff`/`Admission` lines; those Glossary lines are disjoint from Batch 2's edits, but re-read them as merged before writing.
 - SYN-37's A8 fix is one scoping clause in the axiom's own sentence, citing `TRUST-ABORT` — do not restructure the axiom table or touch the Panics prose, which is already correct.
 - SYN-33's fix lands in the `LiveCtx` API doc comments (binding under §0 form 1) — semantics there are normative even while exact signatures stay provisional.
-
-#### SYN-04 Shutdown-deadline arithmetic overflow has no defined outcome — MINOR, omission
-- **Sources:** kimi KK3-02, ox OA-03
-- **Text:** `LIVE-SHUTDOWN`: "fixes one absolute shutdown deadline, the configured duration after that close"; A6: "Arithmetic on … times … is checked"; §10: "the shutdown deadline (nonzero milliseconds)".
-- **Adjudication:** Confirmed: A6 forces the addition to be checked, `shutdown` returns no `Result`, the report's `error` field is defined as the latch's pending Error, and `Quiescence` has two variants — a checked failure has nowhere to go (ox), and the two natural recoveries diverge observably in `Quiescence`, a Core-owned compared payload (kimi). Reachable only under an absurd-but-legal configuration (`u64::MAX` ms), hence MINOR. §10's openness does not excuse it: the gap is in closed text (`LIVE-SHUTDOWN` + A6).
-- **Witness:** KK3-02's: deadline `u64::MAX` ms; implementation A treats `checked_add` `None` as "no effective deadline" → can return `Quiesced`; implementation B treats it as already-expired → `Incomplete` with detached threads.
-- **Fix direction:** Validate the deadline at construction (typed config error) or name saturation behavior in `LIVE-SHUTDOWN`; one sentence either way.
 
 #### SYN-05 The per-Port Command inbox has two stated owners — MINOR, ambiguity
 - **Sources:** opus KV-12, sonnet CR-10, ox OA-04
@@ -418,9 +437,9 @@ One pass over the Live and Sim Port-facing rows, plus the two Laws-row wordings:
 - **Witness:** TERRA-01's trace, verified reachable, reclassified as the documented behavior rather than a contradiction.
 - **Fix direction:** Scope A8's abort clause to the shipped profile in the axiom's own sentence ("under the shipped profile the process aborts…"), citing `TRUST-ABORT`.
 
-### Batch 5 — NIT sweep (§3, §4, §9, §11, status line)
+### Batch 6 — NIT sweep (§3, §4, §9, §11, status line)
 
-The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No decisions needed; safe any time after Batch 0, but running it last keeps the earlier diffs clean.
+The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No decisions needed; safe to run any time, but running it last keeps the earlier diffs clean.
 
 **Contains:** `SYN-42`, `SYN-45`, `SYN-46`, `SYN-48`, `SYN-50`, `SYN-51`, `SYN-52`, `SYN-53`, `SYN-54`.
 
@@ -428,7 +447,7 @@ The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No dec
 - SYN-45 needs a home for the finite-source pattern *before* the citation can change — add the Glossary line (or ID) first, then repoint `SIM-COMPLETION`, in that order within this batch.
 - SYN-54: renaming means `git mv design_docs/reveiws design_docs/reviews` **plus** the status-line pointer **plus** a repo-wide grep for the old path (this synthesis file lives in that directory; memory notes reference it too) — all in one commit, or decline the whole thing. Never fix the pointer without the directory or vice versa.
 - SYN-46: prefer the wording fix ("before engine construction") over moving the justification.
-- SYN-50 depends on D7's answer about whether §0's rule 4 reaches the Glossary; if D7 declared the rules binding, move the entry to a §9 `*Define:*`; otherwise the §0 exemption sentence suffices.
+- SYN-50 (settled by D7): the placement rules bind the Glossary too — move the Sim Port lifecycle entry to a §9 `*Define:*`.
 - Everything else is a single-line edit — keep it mechanical, no rewording beyond each fix direction.
 
 #### SYN-42 The printed "complete expansion" of `ports!` does not compile verbatim — NIT, false claim (executed)
@@ -494,6 +513,14 @@ The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No dec
 - **Witness:** `ls design_docs/` (executed here).
 - **Fix direction:** Rename the directory and the pointer together, or leave both; never fix one without the other.
 
+### Close-out pass (after Batch 6 — verification, not a batch)
+
+Three jobs, no new edits beyond what they surface:
+
+1. **Mechanical reconciliation.** Appendix A holds every added or renamed ID exactly once; every citation in the body resolves; §12's completeness sentences ("complete trusted boundary", the enforced/trusted split) are still true of the finished text; one repo-wide grep for stale references (including the old `reveiws` path if SYN-54's rename was taken).
+2. **Targeted adversarial re-review of the Batch 1 sections.** The new shutdown design (`ENV-SHUTDOWN`, `ENV-LATCH`, `LIVE-SHUTDOWN`, `LIVE-SUPERVISION`, `SIM-SHUTDOWN`, and the amended `VERIFY-*` rows) is the round's only substantial new text, and no reviewer has ever attacked it — the eleven reviews certified the design D1 replaced. Run the review-prompt rules scoped to those rows and their interactions with `StopPending` and `RUN-FINALIZE`.
+3. **Version decision.** D1 changes shipped behavior: decide whether the result remains v12 or becomes v13 with v12 frozen the way v11 was, and update the Status block accordingly. Devon's call; it goes on this list so it is not decided by default.
+
 ## Disputes resolved
 
 - **terra TERRA-01 (CRITICAL) vs the field.** Terra alone rated the document unsound on the test-profile-panic-to-`Stopped` trace. The trace is real, but the §2 Panics prose, `NO-UNWIND`, `TRUST-ABORT`, and §8's Notes all disclose and derive exactly this behavior; only A8's own sentence lacks the scoping. Downgraded to MINOR (SYN-37). Terra's verdict of "Unsound" is rejected.
@@ -518,7 +545,7 @@ The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No dec
 | opus KV-10 | `LIVE-COMPLETION`'s set mismatches the supervisor set after a partial spawn | "Matching the frozen supervisor set and order (`BOUND-STATIC`)" — the citation fixes the referent: the construction-frozen bound-Slot set, not the dynamically-spawned subset. Under that forced reading the entry set always matches; the unowned-entry residue is unobservable (start returned `Err`; `ENV-SERIAL` forbids every later call), as opus's own "consequence is nil" concedes. |
 | opus KV-30 | "Frozen" is undefined in three senses | Ordinary English with one uniform core meaning (fixed at its owner's fixing point, immutable after); the witness lists senses but constructs no divergent readings, and no Glossary binding exists to violate. §1 promises one line per *defined* term, not a line for every word. |
 | opus KV-31 | `SIM-SELECT`'s cursor advance past the last Slot is unstated | Opus's own witness proves cursor `N` and cursor `0` select identically because the scan wraps — there are no two observably different readings, so no ambiguity exists under the review vocabulary. |
-| opus KV-32 | `LIVE-SHUTDOWN`'s four-way instant vs the Mechanism's two-way lock | `LIVE-EVENTS` (binding) defines the fan-in close as the signal's publication, and the lifecycle cell the blocking points check *is* the signal — the two-element lock instant covers all four by the binding rows themselves; the Mechanism's brevity breaks nothing and is nonbinding. |
+| opus KV-32 | `LIVE-SHUTDOWN`'s four-way instant vs the Mechanism's two-way lock | `LIVE-EVENTS` (binding) defines the fan-in close as the signal's publication, and the lifecycle cell the blocking points check *is* the signal — the two-element lock instant covers all four by the binding rows themselves; the Mechanism's brevity breaks nothing and is nonbinding. *(Moot after D1: the attacked "one linearized instant" design is itself replaced by signal-first; the rejection stands against v12-as-written.)* |
 | sonnet CR-06 | "Sink failure" is misreadable under "fail/failure — no further meaning" | "Sink failure" has its own normative Glossary line spelling out all three outcomes, and `JRN-POISON` restates them; no reading survives in which `Ok(0)` does not poison. Sonnet's own text concedes "not a real contradiction." |
 | sonnet CR-07 | `TurnOpen` bare vs `TurnOpen<A>` arity overload | Lives entirely in the table the document flags "neither an API block nor a binding table"; both renderings satisfy every binding row, so nonbinding notation shorthand creates no defect. |
 | sonnet CR-08 | `DET-ENV`'s `Quiescence` equality reads falsely without §1 | The Glossary's Trace definition is binding and folds the `ShutdownReport` (hence `Quiescence`) into the trace as premise; a reader skipping the normative Glossary is not a conforming reader of a document whose §0 sends vocabulary there. |
@@ -530,9 +557,16 @@ The cosmetic sweep: citation forms, spellings, layout homes, print fixes. No dec
 
 ## Unresolved
 
-- **Do §0's placement rules claim current-text compliance?** The block is prefixed "Placement rules, for every future edit:" — read as forward-only, the citation/placement NITs (SYN-45, SYN-46, and parts of SYN-39) are discipline debt rather than violations; read as binding now, they are violations. Rule 4's own text asserts current compliance ("earlier mentions … are navigation only"), which is why this synthesis treated the set as binding now — but the prefix supports the other reading, and only the author's intent settles it. Either answer leaves the fixes worth making.
+None remaining. The one open question from adjudication — whether §0's placement rules bind
+the current text — was resolved 2026-08-25 by decision D7 (`batch_0.md`): they bind the current
+document and every future edit. Batch 4 adds the declaring sentence, and every batch must leave
+its edited text conforming; placement violations cannot be accepted as historical debt.
 
 ## Held under fire
+
+*Note (2026-08-25):* decision D1 deliberately replaces the shipped shutdown design several items
+below verified — the close-then-signal order and the signal/latch-close linearized instant. Those
+verdicts stand as the record of v12-as-reviewed, not of the post-D1 design.
 
 - **`RUN-FINALIZE`'s three quiescence arms** — opus enumerated all 17 Fatal-producing points against the guards: pairwise disjoint, none matches zero or two; deepseek, kimi, ox, sol, terra walked the same branches independently.
 - **The Run graph and certificate grammar** — every phase × input walked by grok/opus/sonnet/kimi; no unlisted transition, `Closed` only via a clean report, `Stopped` ⇒ clean report structurally.
