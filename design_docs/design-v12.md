@@ -132,8 +132,6 @@ the same way.
 - **Run-scoped activity** — everything an Environment must end before the run is over:
   its own threads, timers, and callbacks, and whatever its Ports started
   (`TRUST-SPAWN`).
-- **Sim Port lifecycle** — the Environment-owned method-eligibility state of one bound
-  SimPort: `NotStarted`, `Open`, or `Ended`.
 - **Quiescence** — the Environment's account of whether all run-scoped activity
   finished: `Quiesced` means it accounts every unit complete; `Incomplete` means it
   does not. Completion the Environment cannot itself witness relies on `TRUST-SPAWN`;
@@ -143,6 +141,10 @@ the same way.
 - **Clean report** — a ShutdownReport of `Quiesced` carrying no Error.
 - **Shutdown signal** — the Environment-delivered notice: no more input is coming;
   finish what you own and return.
+- **Finite-source pattern** — a source that runs out of input offers one
+  application-defined terminal Event and awaits the shutdown signal; the terminal Event's
+  handler answers `Stop`. Ending a run is Application logic, expressed in the Event
+  protocol like everything else.
 - **Trace** — the run's full operation-result history: every Environment operation's
   returned value — Ok payloads and the ShutdownReport included — and every sink call's
   result (one write or flush call: a write's Ok count or a flush's success, or the
@@ -321,7 +323,7 @@ payload fields with no Core meaning. Equal logical times are valid; index order 
 ties.
 
 *Justify:* `initial_state` is infallible by design: State is pure data, and anything
-fallible needed to build it happens before `Engine::new`, while constructing the
+fallible needed to build it happens before engine construction, while constructing the
 Application value itself. Its conduct is covered by `TRUST-BLOCKING`.
 
 ## 4. Port contract
@@ -365,18 +367,18 @@ kavod::ports!(
 ```rust
 #[derive(::serde::Serialize)]
 pub enum TradingEvent {
-    Primary(<MarketData as $crate::PortContract>::Event),
-    Secondary(<MarketData as $crate::PortContract>::Event),
-    Execution(<Execution as $crate::PortContract>::Event),
-    Timer(<Timer as $crate::PortContract>::Event),
+    Primary(<MarketData as kavod::PortContract>::Event),
+    Secondary(<MarketData as kavod::PortContract>::Event),
+    Execution(<Execution as kavod::PortContract>::Event),
+    Timer(<Timer as kavod::PortContract>::Event),
 }
 
 #[derive(::serde::Serialize)]
 pub enum TradingCommand {
-    Primary(<MarketData as $crate::PortContract>::Command),
-    Secondary(<MarketData as $crate::PortContract>::Command),
-    Execution(<Execution as $crate::PortContract>::Command),
-    Timer(<Timer as $crate::PortContract>::Command),
+    Primary(<MarketData as kavod::PortContract>::Command),
+    Secondary(<MarketData as kavod::PortContract>::Command),
+    Execution(<Execution as kavod::PortContract>::Command),
+    Timer(<Timer as kavod::PortContract>::Command),
 }
 ```
 
@@ -393,11 +395,6 @@ and a `Never` arm is discharged by matching the uninhabited value.
 ### Notes
 
 *Define:* every Contract is duplex; an absent direction uses `Never`.
-
-*Define:* the finite-source pattern — a source that runs out of input offers one
-application-defined terminal Event and awaits the shutdown signal; the terminal Event's
-handler answers `Stop`. Ending a run is Application logic, expressed in the Event
-protocol like everything else.
 
 *Justify:* the expansion above is exhaustive, so the two enums are inspectable by eye
 and replaceable by hand — the macro is sugar, never authority.
@@ -598,7 +595,7 @@ pub struct Engine<A, E, W> {
 }
 
 pub enum BuildError {
-    CommandBuffer(TryReserveError),
+    CommandBuffer(std::collections::TryReserveError),
     Journal(JournalBuildError),
 }
 
@@ -924,7 +921,7 @@ in the trace.
 
 *Derive:* Environment activation precedes `RunStarted`'s commit — the record carries
 the frozen start time — so a run whose first commit fails exits Fatal with real
-effects and an empty Journal; the exit carries the cause.
+effects and no committed record; the exit carries the cause.
 
 *Derive:* after an abort no exit exists (A8): the Journal then bounds the dispatch
 uncertainty to the whole prepared batch — `CommandsPrepared` names the intent, nothing
@@ -1108,6 +1105,9 @@ time; Ports advance only when stepped. This section ships the second implementat
 the Environment contract — every guarantee below realizes a named contract row or
 defines the sim Port-facing API.
 
+*Define:* Sim Port lifecycle — the Environment-owned method-eligibility state of one bound
+SimPort: `NotStarted`, `Open`, or `Ended`.
+
 ### Lifecycle
 
 | ID | Guarantee |
@@ -1148,14 +1148,14 @@ pub enum SimCtxError {
 
 | ID | Guarantee |
 |---|---|
-| `SIM-STATE` | Each simulated Port owns all of its simulated domain state; the Environment holds no shared model and runs no concurrency. |
+| `SIM-STATE` | Each simulated Port owns all of its simulated domain state; the Environment holds no shared model and runs no concurrency — realizes `ENV-SEPARATION` and `PORT-STATE`. |
 | `SIM-START` | `start` fixes the start time from the configured origin and sets `now` to it, then invokes each `NotStarted` Port's `start` in frozen Slot order (`SIM-LIFECYCLE`). After every invocation returns `Ok`, every Port is `Open` and successful return is the startup commitment (`ENV-ERRORS`). On the first `Err`, the failing Port is `Ended`; startup calls `stop` exactly once on the earlier `Open` prefix, in frozen Slot order, discarding those Errors, while every later Port remains `NotStarted` and receives no method. Every Port is then `NotStarted` or `Ended` and, under `TRUST-SIM-PORT`, `TRUST-SPAWN`, and `TRUST-BLOCKING`, no Port-started run-scoped activity remains; startup fails with the original Error — effects already made stay real (A4's cleanup rule), and the return satisfies `ENV-START`. |
 | `SIM-TIME` | `now` starts at the configured origin and moves only by `next_event` advancing it to the selected arm's time; the returned candidate is stamped with `now`. Every armed time is `>= now` (`SIM-WAKEUP`) and selection takes the minimum, so stamps never decrease — realizes `ENV-TIME`. |
 | `SIM-DISPATCH` | If `ENV-LATCH` orders a pending Error before this call's handoff, `dispatch` returns it as `Err` with no Port invocation and no handoff. Otherwise, `dispatch` synchronously routes to exactly one Port's `on_command`; the invocation is where `dispatch`'s handoff commits (the **Commitment points** table), and `now` does not advance. An `Err` from `on_command` is published (`ENV-ERRORS`) and `dispatch` returns `Ok` — the invocation already committed. |
 | `SIM-WAKEUP` | Each Port has at most one revocable wakeup arm, initially disarmed, modifiable only through its own `SimCtx`: `set_next` requires `time >= now` — rejection changes nothing — and is last-call-wins; `clear_next` disarms. An arm is not an Event. |
 | `SIM-SELECT` | `next_event` checks, in order at each selection: the latch — a pending Error that `ENV-LATCH` orders before this call's consumption returns as the call's `Err`, nothing selected or consumed; no armed Port (`SIM-COMPLETION`); the step budget (`SIM-STEPS`). It then selects the armed Port with the lowest time — equal times by round-robin: the selected Slot is the first lowest-time armed Slot met scanning from the cursor in frozen Slot order, wrapping; the cursor starts at Slot 0, persists across `next_event` calls, and moves to the selected Slot's successor after every selected `step`, including one returning `None` — advances `now` to the selected arm's time, clears the arm, and calls `step`. Only `step(Some)` creates the returned candidate, and its return is the consumption commitment (`ENV-ERRORS`); `step(None)` continues selection; `step(Err)` returns that Error. Every `Err` this call returns leaves the selections already made standing as the named subordinate effects (**Commitment points** table): each one's advanced `now`, cleared arm, and spent budget. |
 | `SIM-STEPS` | Every `step` call consumes one unit of the configured step budget, fresh for each `next_event` invocation; `start`, `on_command`, and `stop` consume none. The budget is checked before selecting, advancing time, or clearing an arm; exhaustion is a typed Environment Error. |
-| `SIM-COMPLETION` | `next_event` finding no armed Port — at entry or mid-selection — is a typed Environment Error: the run has nothing left to wait for. A run ends normally through the finite-source pattern (Ports Notes). |
+| `SIM-COMPLETION` | `next_event` finding no armed Port — at entry or mid-selection — is a typed Environment Error: the run has nothing left to wait for. A run ends normally through the finite-source pattern. |
 | `SIM-SHUTDOWN` | `shutdown` realizes `ENV-SHUTDOWN`: it stops Event delivery and closes Event admission, then delivers the sim shutdown signal by invoking `stop` exactly once on every `Open` Port (`SIM-LIFECYCLE`), in frozen Slot order, while the latch remains open. Every returned Error is mapped and published; first-wins applies, and shutdown continues through the remaining `Open` Ports. After every call returns, the final observation closes the latch into the report (`ENV-LATCH`). Every Environment-accounted lifecycle is then `Ended`, so the report carries `Quiesced`; completion of Port-started activity relies on `TRUST-SPAWN`, and return from each Port call relies on `TRUST-BLOCKING`. |
 
 ### Mechanism
@@ -1267,15 +1267,15 @@ kavod/src/
   time.rs            EventIndex, Timestamp
   application.rs     Application, Outcome, Context
   port.rs            PortContract, Never, ports!
-  environment.rs     Environment, Quiescence
+  environment.rs     Environment, Quiescence, ShutdownReport
   journal.rs         Journal, JournalError
   bounded_buffer.rs  crate-internal fixed-capacity storage backing the Command
                      batch and the Journal's encode buffer
   engine/
     mod.rs           wiring only: module declarations plus public re-exports
-    engine.rs        Engine, EngineConfig, EngineExit, FatalCause, CoreError
+    engine.rs        Engine, EngineConfig, EngineExit, FatalCause, CoreError, EnvironmentFatal, EnvironmentOperation
     record.rs        record payloads, the certificate, transitions
-                     (private; RecordKind and JournalFatal re-exported)
+                     (private; RecordKind, TurnOutcome, and JournalFatal re-exported)
   live/              LivePort, LiveCtx, live Environment      (planned: Wiring)
   sim/               SimPort, SimCtx, simulated Environment   (planned: Wiring)
 ```
@@ -1322,7 +1322,7 @@ the complete trusted boundary — an obligation absent from it is enforced, not 
 | `VERIFY-JOURNAL` | A Golden-Journal suite pins every graph-required record sequence and every record byte-exactly, including each non-Fatal handler answer against its required outcome records at `classify`'s single runtime call site, and proves an encoding containing an interior newline byte is rejected as `NotAnObject` with nothing written (`RUN-GRAMMAR`, `RUN-RECORDS`, `RUN-ENFORCEMENT`, `JRN-ENCODE`). |
 | `VERIFY-FAULTS` | A fault-injection suite exercises every edge: scripted sinks for Journal failures; scripted Environments for each operation's `Err`, an `Ok` `next_event` with a decreasing timestamp, and shutdown reports carrying `Some(error)` or `{ Incomplete, None }`; and an over-emitting Application, checking the resulting `FatalCause`. For each post-`start` operation `Err`, it exercises the cross-product with a shutdown report carrying `Some(error)`, where the operation's Error remains the Fatal cause and the report's Error is discarded (A4, `RUN-FINALIZE`). It separately proves that a `start Err` performs no shutdown. |
 | `VERIFY-GRAMMAR` | A compile-fail suite proves illegal transition sequences, a skipped checkpoint, a premature `TurnCompleted(Stop)`, any caller attempt to commit `CommandsDispatched` independently of the transition that performs every handoff, an outcome disagreeing with the fixed answer, and any attempt to use `Clone`, `Copy`, or `Default` on the certificate do not compile (`RUN-GRAMMAR`, `RUN-ENFORCEMENT`); an `include!`-based fixture crate reconstructs the Engine module and attacks from its visibility position, so each failure reaches the grammar restriction rather than module privacy. |
-| `VERIFY-LIVE` | A Live lifecycle and shutdown suite proves: no `LivePort::run` begins before gate activation; failed startup cancels and joins every shell; every shell owns exactly one completion entry; a completion before shutdown remains visible at the final observation; normal return, `Err`, and test-profile unwind each make the entry `Complete` exactly once; Port code cannot reach or defer the terminal guard; shutdown raises the signal and closes fan-in while leaving the latch open; `run(Ok)` after the signal is expected and unpublished, while a typed `run(Err)` before the final close enters the report; every required Error publication precedes that shell's `Complete` transition; all waits share one deadline fixed at the initiating instant, including a duration whose addition saturates; during shutdown no join begins while an entry remains `Outstanding`; a completion concurrent with expiry and a publication concurrent with the final close are each classified by the final observation; successful shutdown returns `Quiesced` and joins every supervised thread — read as "joined", never "succeeded", under the unwinding test profile; deadline expiry without an Error returns `{ Incomplete, None }`; Error plus expiry returns `{ Incomplete, Some(error) }`; deadline expiry detaches every unjoined thread; and a post-close publication is discarded. It also verifies `LIVE-EVENTS`, `LIVE-SELECT`, `LIVE-DISPATCH`, and shipped `ENV-BOUNDS`: `offer` succeeds through exact fan-in capacity, then `Full` returns the same Event without growth, and `Closed` returns it after shutdown; time-domain exhaustion before dequeue leaves the Event queued, while successful selection stamps before dequeue and performs no fallible work afterward; `dispatch` admits the same Command exactly once when capacity remains, while a full inbox returns a typed Error with no handoff or inbox growth; fan-in and inbox occupancy never exceed configured capacity; and completion-entry and wakeup storage never grows beyond one entry per bound Slot. |
+| `VERIFY-LIVE` | A Live lifecycle and shutdown suite proves: no `LivePort::run` begins before gate activation; failed startup cancels and joins every shell; every shell owns exactly one completion entry; a completion before shutdown remains visible at the final observation; normal return, `Err`, and test-profile unwind each make the entry `Complete` exactly once; Port code cannot reach or defer the terminal guard; shutdown raises the signal and closes fan-in while leaving the latch open; `run(Ok)` after the signal is expected and unpublished, while a typed `run(Err)` before the final close enters the report; every required Error publication precedes that shell's `Complete` transition; all waits share one deadline fixed at the initiating instant, including a duration whose addition saturates; during shutdown no join begins while an entry remains `Outstanding`; a completion concurrent with expiry and a publication concurrent with the final close are each classified by the final observation; successful shutdown returns `Quiesced` and joins every supervised thread — read as "joined", never "succeeded", under the unwinding test profile; deadline expiry without an Error returns `{ Incomplete, None }`; Error plus expiry returns `{ Incomplete, Some(error) }`; deadline expiry detaches every unjoined thread; and a post-close publication is discarded. It also verifies `LIVE-EVENTS`, `LIVE-SELECT`, `LIVE-DISPATCH`, and shipped `ENV-BOUNDS`: `offer` succeeds through exact fan-in capacity, then `Full` returns the same Event without growth, and `Closed` returns it after shutdown; Events admitted in a known order are dequeued in that order; under an injected clock, an Event waking a blocked `next_event` receives a stamp no earlier than its admission instant; time-domain exhaustion before dequeue leaves the Event queued, while successful selection stamps before dequeue and performs no fallible work afterward; `dispatch` admits the same Command exactly once when capacity remains, while a full inbox returns a typed Error with no handoff or inbox growth; fan-in and inbox occupancy never exceed configured capacity; and completion-entry and wakeup storage never grows beyond one entry per bound Slot. |
 | `VERIFY-SIM` | A Sim lifecycle and shutdown suite verifies `SIM-LIFECYCLE`, `SIM-START`, and `SIM-SHUTDOWN` with per-Port call traces: all-success startup and shutdown; startup failure at every Slot position; `Err` from `on_command` and `step` followed by shutdown; and `stop` returning `Ok` or `Err` at every Slot position. It checks that startup cleanup stops only the successfully started prefix, exactly once and in frozen Slot order; the failing and not-yet-started Ports receive no `stop`; an `Ended` Port receives no later method; shutdown stops exactly the then-`Open` Ports once in frozen Slot order while the latch remains open; every `stop` Error is published before the final close, the first wins, and later Errors do not prevent remaining calls; all-`Ok` shutdown returns `{ Quiesced, None }`; and any `stop` Error returns `{ Quiesced, Some(error) }`. It also verifies `SIM-WAKEUP`, `SIM-SELECT`, `SIM-STEPS`, `SIM-COMPLETION`, and shipped `ENV-BOUNDS`: one fixed wakeup arm per Port never grows; a rejected before-`now` arm changes nothing; later `set_next` calls replace earlier arms and `clear_next` disarms them; selection follows frozen Slot order and the persistent cursor across calls, including equal-time ties and a selected `step(None)`; exact step-budget boundaries permit the configured number of calls, while exhaustion performs no selection, time advance, arm clearing, Port call, or storage growth; and no armed Port at entry or mid-selection returns the completion Error. |
 | `VERIFY-LATCH` | An Environment conformance suite proves `ENV-LATCH`'s before-call and after-return ordering constraints; for a publication overlapping an observing call, it accepts either placement and verifies that the call's result and resulting latch state agree with it. It proves that an already-pending Error wins over an operation's own pre-commitment Error, reports the latch permanently, leaves the operation's contractual effect absent, and discards the secondary Error; for an overlapping publication and such a local failure, it exercises both permitted orderings. A `next_event` blocked without input returns and reports the Error that wakes it. The suite also proves permanent first-Error reporting, final-Command simulated Error observation, the latch remaining open through graceful shutdown, a typed shutdown Error before the final close, either consistent placement for a publication racing that close, and post-close discard. Stop-path integration proves `{ Quiesced, None }` alone can reach `Stopped`, any `Some(error)` produces `Environment(Shutdown)` even with `Incomplete`, and `{ Incomplete, None }` produces `Core(ShutdownIncomplete)`. |
 
