@@ -120,9 +120,10 @@ the same way.
   the operation's contractual effect has not occurred — subordinate effects its owner
   names may have, and they stand; after it, nothing is retried, revoked, or
   rolled back.
-- **Handoff** — `dispatch`'s commitment: transfer of one Command into its destination
-  Port's ownership.
-- **Admission** — entry of a value into a Kavod-owned queue or inbox.
+- **Handoff** — `dispatch`'s commitment: transfer of one Command value into its
+  destination Port's exclusive inlet.
+- **Admission** — entry of a value into a Kavod-owned queue or inbox; this describes
+  the value's placement, not ownership of the container.
 - **Publication** — the act of offering an Error to the latch; entry succeeds only per
   `ENV-LATCH`.
 - **Latch** — the Environment's store for the first Error its own activity publishes
@@ -165,7 +166,7 @@ Everything in this document is a consequence of nine axioms.
 | A5 | Intent precedes effect | Where a record announces an action, it commits before the action begins; a completion record witnesses effects already committed. |
 | A6 | Bounded everything | Every Kavod-owned container, count, identifier, and active loop has one accounting owner and a bound checked before use. Arithmetic on counts, capacities, times, and identities is checked. |
 | A7 | Typed inside, rendered at the edge | Errors stay typed values while Kavod owns them. Text and bytes exist only at the serialization boundary. |
-| A8 | Panics are bugs | A failing user component reports a typed Error. A panic — in Kavod or user code — is a bug: the process aborts, and no exit represents it. |
+| A8 | Panics are bugs | A failing user component reports a typed Error. A panic — in Kavod or user code — is a bug: under the shipped profile the process aborts, and no exit represents it (`TRUST-ABORT`). |
 | A9 | Determinism | The Core introduces no choice of its own: under `TRUST-PURE` and `TRUST-SERIALIZE`, every Core-owned run output (A1) is a function of the build, the Application, its initial State, the configuration, and the trace. |
 
 **Failure.** A4's cleanup rule means Fatal performs no rollback: every effect that
@@ -182,7 +183,7 @@ current by flush-per-record commits.
 | ID | Guarantee |
 |---|---|
 | `NO-UNSAFE` | Kavod Core compiles under `#![forbid(unsafe_code)]`. |
-| `BOUND-STATIC` | Slot registration at construction fixes the Port set — nonempty — and the Slot order: static, not configured, and fixed nowhere else. |
+| `BOUND-STATIC` | Construction fixes the nonempty Port set and one Slot order; both remain unchanged for the Environment's lifetime. |
 | `BOUND-NONZERO` | Every configured capacity uses a nonzero type, so zero is unrepresentable. |
 
 **Bounds registry** (navigation; each bound's rules live with its owner):
@@ -969,7 +970,10 @@ impl<C: PortContract> LiveCtx<C> {
     /// Once raised, every call reports the signal; `try_recv` is the
     /// draining path.
     pub fn recv(&mut self) -> PortInput<C::Command>;
-    /// Nonblocking: pending Commands first, then the signal.
+    /// Nonblocking: returns pending Commands first, then `Shutdown`.
+    /// Once the signal is raised and the inbox is drained, every call returns
+    /// `Some(PortInput::Shutdown)`; `None` means no Command is pending and the
+    /// signal has not been raised.
     pub fn try_recv(&mut self) -> Option<PortInput<C::Command>>;
     /// Offer one Event through the Slot's frozen fan-in constructor.
     /// Never waits for future capacity; rejection returns the Event.
@@ -994,10 +998,10 @@ shutdown. `Complete` does not mean that the supervised thread was joined.
 | ID | Guarantee |
 |---|---|
 | `LIVE-THREADS` | Each bound Port runs in one supervised thread and owns its native client and all domain and protocol state. Everything crossing a Port-thread boundary — values moved in, Commands in, offered Events out, Port Errors out — is `Send + 'static`. |
-| `LIVE-EVENTS` | Event fan-in is one bounded queue. Mapping into the Application Event sum precedes admission. `offer` never waits; `Full` or `Closed` returns the Event to the offering Port, which may retry under its own pacing while observing the lifecycle, or return an Error to latch. The fan-in closes when `shutdown` raises the signal: `offer` after it is `Closed`. |
-| `LIVE-SELECT` | `next_event` waits, without busy-spinning, until the latch is pending or one Event is available; the choice between them follows `ENV-LATCH`'s publication ordering. The stamp is taken before the dequeue, and the dequeue is the consumption commitment (`ENV-ERRORS`): nothing fallible follows it. |
+| `LIVE-EVENTS` | Event fan-in is one bounded queue; dequeue order is admission order. Mapping into the Application Event sum precedes admission. `offer` never waits; `Full` or `Closed` returns the Event to the offering Port, which may retry under its own pacing while observing the lifecycle, or return an Error to latch. The fan-in closes when `shutdown` raises the signal: `offer` after it is `Closed`. |
+| `LIVE-SELECT` | `next_event` waits, without busy-spinning, until the latch is pending or one Event is available; the choice between them follows `ENV-LATCH`'s publication ordering. The stamp is taken after the wait and immediately before the dequeue, and the dequeue is the consumption commitment (`ENV-ERRORS`): nothing fallible follows it. |
 | `LIVE-TIME` | The single acceptor stamps from one monotonic clock, realizing `ENV-TIME`'s nondecrease structurally; duration conversion is checked (A6) and exhaustion is a typed Environment Error. |
-| `LIVE-DISPATCH` | Each destination Port owns one bounded Command inbox; one non-waiting admission to it is where `dispatch`'s handoff commits (the **Commitment points** table), with publication ordering governed by `ENV-LATCH`. |
+| `LIVE-DISPATCH` | Each destination Port has one bounded Command inbox owned by the Live Environment; its `LiveCtx` is the only receiving capability. One non-waiting admission to that inbox is where `dispatch`'s handoff commits (the **Commitment points** table), with publication ordering governed by `ENV-LATCH`. |
 | `LIVE-SUPERVISION` | Before the shutdown signal, `run(Err)` and `run(Ok)` completing prematurely each publish a typed Error to the latch and wake a blocked `next_event`. Raising the signal ends `Running` at one linearized instant (`LIVE-SHUTDOWN`). After that instant, `run(Ok)` is expected and stays unpublished, while `run(Err)` still publishes: `ENV-LATCH` captures it before the final close and discards it after. Every required publication precedes that shell's transition to `Complete` (`LIVE-COMPLETION`), so shutdown cannot account the shell complete while missing its Error. |
 | `LIVE-COMPLETION` | To witness the run's Quiescence under `ENV-SHUTDOWN`'s bounded quiescence policy, the Live Environment is the sole accounting owner of cumulative Live completion state. The fixed set has exactly one entry per bound Slot, matching the frozen supervisor set and order (`BOUND-STATIC`), is initialized before the start/cancel gate resolves, never grows, and is retained through shutdown. Each spawned shell exclusively owns one module-private, non-cloneable capability that changes only its Slot's entry from `Outstanding` to `Complete`, exactly once and infallibly, when that shell begins any non-aborting terminal exit: gate cancellation, return from `LivePort::run` with either result, or unwind under the test profile. While shutdown is waiting, the transition wakes it. The capability is unavailable to the Port value and `LiveCtx`. `Complete` is permanent and does not prove that the thread was joined. The fixed set is authority; any cached completed or outstanding count is only a checked derivative bounded by the set's length (A6). |
 | `LIVE-LIFECYCLE` | The shutdown signal is `LiveCtx` authority — it consumes no queue or inbox capacity and is never hidden. Once raised, every `recv` reports it ahead of that Port's queued Commands — `ENV-SHUTDOWN`'s observability in its strongest form; `try_recv` yields queued Commands first and the signal after them, which is the draining path; `lifecycle` reads it directly. |
