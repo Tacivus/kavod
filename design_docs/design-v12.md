@@ -153,7 +153,7 @@ Everything in this document is a consequence of nine axioms.
 | A1 | Single authority | Every fact has exactly one owner; every appearance outside its owner is a read-only view of it or an owner-supplied capability, and the owner defines every way the fact can change. |
 | A2 | Serial turns | One Event, one handler call, one batch at a time; a turn completes, or the run goes Fatal, before the next Event is requested. A destination Port's processing of Commands already handed off runs outside the turn. |
 | A3 | One commitment point | Every effectful operation commits at exactly one point, where its outcome becomes fixed. Work the rules give no commitment point — State mutation, a staged batch before its handoff — is its owner's private staging, standing or discarded by that owner's own rules. |
-| A4 | First failure wins | The first Error or fatal Core condition the run observes is the Fatal cause; nothing observed later replaces it. Once an operation's failure outcome is fixed, that operation's remaining work is best-effort cleanup whose Errors are discarded. Once the Fatal cause is fixed, all later run work is likewise best-effort cleanup; on a run that ends without a Fatal cause, that run-wide cleanup instead begins when the latch closes. |
+| A4 | First failure wins | The first Error or fatal Core condition the run observes is the Fatal cause; nothing observed later replaces it. Once an operation's failure outcome is fixed, that operation's remaining work is best-effort cleanup whose Errors are discarded. Once the Fatal cause is fixed, all later run work is likewise best-effort cleanup; on a run that ends without a Fatal cause, Environment- and Port-side cleanup instead begins when the latch closes. |
 | A5 | Intent precedes effect | Where a record announces an action, it commits before the action begins; a completion record witnesses effects already committed. |
 | A6 | Bounded everything | Every Kavod-owned container, count, identifier, and active loop has one accounting owner and a bound checked before use. Arithmetic on counts, capacities, times, and identities is checked. |
 | A7 | Typed inside, rendered at the edge | Errors stay typed values while Kavod owns them. Text and bytes exist only at the serialization boundary. |
@@ -577,9 +577,10 @@ retried wraps its writer.
 
 The Run composes the contracts: one Engine drives one Application against one
 Environment, evidencing every step through one Journal. Its shape is a graph. Phases
-carry the work; edges carry the records; a transition *is* a commit — the next phase is
-unreachable until the edge's record commits. This is A5 and A3 closed over
-the whole run, and the Engine enforces it at compile time (`RUN-GRAMMAR`).
+carry the work; edges carry the records; a transition *is* a commitment point — where
+the edge carries a record, the next phase is unreachable until it commits. This is A5
+and A3 closed over the whole run, and the Engine enforces it at compile time
+(`RUN-GRAMMAR`).
 
 ### API
 
@@ -587,6 +588,10 @@ the whole run, and the Engine enforces it at compile time (`RUN-GRAMMAR`).
 pub struct EngineConfig {
     pub max_commands_per_turn: NonZeroUsize,
     pub max_record_bytes: NonZeroUsize,
+}
+
+pub struct Engine<A, E, W> {
+    /* private */
 }
 
 pub enum BuildError {
@@ -613,6 +618,12 @@ pub enum RecordKind {
     CommandsDispatched,
     StopRequested,
     TurnCompleted,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub enum TurnOutcome {
+    Continue,
+    Stop,
 }
 
 pub enum EngineExit<S, AE, EE> {
@@ -656,6 +667,9 @@ pub enum EnvironmentOperation {
 pub struct JournalFatal {
     /// The kind of the record whose commit failed.
     pub record_kind: RecordKind,
+    /// `Some` with the attempted outcome exactly when `record_kind` is
+    /// `TurnCompleted`; `None` otherwise.
+    pub outcome: Option<TurnOutcome>,
     pub error: JournalError,
 }
 
@@ -715,16 +729,20 @@ any failure: drop the certificate ──▶ RUN-FINALIZE
 | `TurnOpen` | Invoke the handler once with `Context` over the batch buffer — `on_start` at index 0, `on_event` otherwise, one turn protocol (A2). Then: overflow marker set → discard the batch → `Core(CommandBoundExceeded)`, beating every `Outcome` — the Core condition outranks the returned Outcome, and a returned `Fatal` payload is discarded with the batch (A4's cleanup rule). `Outcome::Fatal(error)` → discard the batch → `Application(error)`. Otherwise remember the answer and leave: empty batch by the recordless edge, nonempty by `CommandsPrepared`. |
 | `Prepared` | Hand off each Command once, in order. `Err` at position k → `Environment(Dispatch { position: k })`: the prefix `[0, k)` stands handed off, the Command at k was not handed off — though the `Err` may be an unrelated already-latched Error ordered there by `ENV-LATCH`, not a rejection of that Command — and the suffix is discarded. |
 | `EffectsComplete` | The checkpoint (`RUN-CHECKPOINT`): the latch snapshot. `Some(error)` → `Environment(Checkpoint)`. `None` takes the recordless edge, the remembered answer fixed in the phase. |
-| `Checkpointed` | None; the fixed answer picks the only edge out. |
+| `Checkpointed` | None; the fixed answer picks which of its two edges is available. |
 | `BetweenTurns` | Take the `EventAccepted` edge. Its transition performs the index-domain check (`RUN-INDEX`): certificate index equals `u64::MAX` → `Core(IndexExhausted)`, `next_event` uncalled. Then it calls `next_event`; `Err` → `Environment(NextEvent)`. The successful return is the candidate the transition checks and records. |
 | `StopPending` | `shutdown` — it consumes the Environment — then retain the report's quiescence for every later Fatal path before inspecting its Error. The retained quiescence survives the subsequent `TurnCompleted(Stop)` commit attempt. Error `Some` → `Environment(Shutdown)` with the retained quiescence: the report's Error outranks `Incomplete` as cause. Error `None` with `Incomplete` → `Core(ShutdownIncomplete)` with the retained quiescence. Error `None` with `Quiesced` → the `TurnCompleted(Stop)` edge; failure to commit that record finalizes with the retained `Quiesced`. |
 | `Closed` | Return `EngineExit::Stopped { state }`. |
 
-**Edges** — each recorded edge's commit succeeds or fails as `Journal(JournalFatal)`
-carrying that record's kind. Work its transition performs before the commit can fail as
-the Phases and Requires rows name; `EventAccepted` alone can fail after acquiring its
-candidate as `Core(TimeRegression)`. The two recordless edges commit nothing and cannot
-fail. On any failure the certificate is dropped and `RUN-FINALIZE` runs.
+**Edges** — the rows bind record sequence and failure outcomes; a realization may fuse
+adjacent edges under one source certificate. The Requires column names either a fact
+established by the source phase or work the transition performs. Each recorded edge's
+commit succeeds or fails as `Journal(JournalFatal)` carrying that record's kind and, for
+`TurnCompleted`, its outcome. Work the transition performs before the commit can fail
+as the Phases and Requires rows name; `EventAccepted` alone can fail after acquiring its
+candidate as `Core(TimeRegression)`. The empty-batch recordless edge cannot fail. The
+checkpoint edge commits nothing and fails only as `Environment(Checkpoint)`. On any
+failure the certificate is dropped and `RUN-FINALIZE` runs.
 
 | From | Record | Requires | To |
 |---|---|---|---|
@@ -766,14 +784,14 @@ Rust record types are mechanism; `RUN-RECORDS` and the table bind the serialized
 | ID | Guarantee |
 |---|---|
 | `RUN-SERIAL` | The Engine owns the Environment and the Journal by value and is their only caller, delivering `ENV-SERIAL` by construction: one serial loop (A2), calls in the order the graph directs, and a consuming `shutdown` that makes a second lifecycle call unrepresentable. |
-| `RUN-GRAMMAR` | Records are committed only through the graph's transitions, and the graph is enforced at compile time: possession of the certificate in phase P proves the Journal holds exactly the records of the certificate's path to P, and that the certificate holds exactly the phase data fixed by the run startup and edge tables. Every transition consumes its source certificate and returns its successor only after performing the edge requirement itself and successfully committing its listed record or records, if any. Within `RUN-ENFORCEMENT`'s boundary, a transition requirement is never a caller-supplied witness that can be forgotten, reused, contradicted, or forged: it is the phase itself or work the transition performs. An out-of-order record, a record whose kind disagrees with its payload, a `TurnCompleted` outcome disagreeing with the phase's fixed answer, a caller-supplied index, start time, or candidate, an accepted Event, index, or time disagreeing with its acceptance record, a skipped checkpoint, a `CommandsDispatched` without every handoff, a `TurnCompleted(Stop)` without a clean report, or a duplicated or fabricated certificate is unrepresentable. The certificate does not implement `Clone`, `Copy`, or `Default`. |
-| `RUN-ENFORCEMENT` | `RUN-GRAMMAR`'s enforcement boundary is exact. Three points remain runtime: the index arithmetic behind `accept_event`, backed by one always-on assertion that a freshly minted certificate has the start index, and the answer and batch the Engine passes from the turn it just ran to the single call sites of `classify` and the batch transition. `classify` consumes the answer and the `TurnOpen` certificate into one of two non-cloneable, answer-typed refinements of that phase; after that call no transition accepts an answer. The batch transitions always-on assert empty or nonempty as their branch requires (`ASSERT-INVARIANTS`). Dropping a certificate and committing nothing remains expressible as the Fatal path, so omission of a required record is test-enforced; the wire format is also test-enforced. Certificate, phase, and transition types are module-private; every other illegal state listed by `RUN-GRAMMAR` is unrepresentable within that boundary. |
+| `RUN-GRAMMAR` | Records are committed only through the graph's transitions, and the graph is enforced at compile time: possession of the certificate in phase P proves the Journal holds exactly the records of the certificate's path to P, and that the certificate holds exactly the phase data fixed by the run startup and edge tables. Every transition consumes its source certificate and returns its successor only after performing the edge requirement itself and successfully committing its listed record or records, if any. To any caller outside `RUN-ENFORCEMENT`'s boundary, a transition requirement is never a caller-supplied witness that can be forgotten, reused, contradicted, or forged: it is the phase itself or work the transition performs. An out-of-order record, a record whose kind disagrees with its payload, a `TurnCompleted` outcome disagreeing with the phase's fixed answer, a caller-supplied index, start time, or candidate, an accepted Event, index, or time disagreeing with its acceptance record, a skipped checkpoint, a `CommandsDispatched` without every handoff, a `TurnCompleted(Stop)` without a clean report, or a duplicated or fabricated certificate is unrepresentable to such a caller. This compile-time claim excludes the three runtime points, in-module transition conduct, and record omission by dropping, all of which `RUN-ENFORCEMENT` names as runtime- or test-enforced. The certificate does not implement `Clone`, `Copy`, or `Default`. |
+| `RUN-ENFORCEMENT` | `RUN-GRAMMAR`'s enforcement boundary is exact. Three points remain runtime: the index arithmetic behind `accept_event`, whose domain check and overflow panic are fixed by `RUN-INDEX`, and the answer and batch the Engine passes from the turn it just ran to the single call sites of `classify` and the batch transition. One always-on assertion checks the induction base: the `Initial` certificate stores prospective index 0. `classify` consumes the answer and the `TurnOpen` certificate into one of two non-cloneable, answer-typed refinements of that phase; after that call no transition accepts an answer. The batch transitions always-on assert empty or nonempty as their branch requires (`ASSERT-INVARIANTS`). In-module transition conduct remains expressible in ordinary code, and dropping a certificate and committing nothing remains expressible as the Fatal path, so required operation and record sequences are test-enforced; the wire format is also test-enforced. Certificate, phase, and transition types are module-private; every other illegal state listed by `RUN-GRAMMAR` is unrepresentable to callers outside that boundary. |
 | `RUN-RECORDS` | A record is one flat JSON object — its top-level members are exactly its row's fields, in table order; values may nest, the top level may not. `record_kind` comes first, a bare tag string naming the kind; then `index`, the index of the turn the record belongs to — for `EventAccepted`, the newly accepted turn's. `outcome` is a bare tag string. `schema_version` is 1. `RunStarted` is the only possible first record, so every nonempty Journal begins with a versioned record. |
-| `RUN-INDEX` | The certificate's index is the latest accepted turn's ordinal: 0 for the start turn, advancing exactly when `EventAccepted` commits. The bound is the index domain itself, checked before `next_event`: at certificate index `u64::MAX` the run ends `Core(IndexExhausted)` with no candidate consumed. Overflow past that check is an invariant panic. |
+| `RUN-INDEX` | The `Initial` certificate's stored 0 is prospective. Thereafter the certificate's index is the latest accepted turn's ordinal: 0 once `RunStarted` commits, advancing exactly when `EventAccepted` commits. The bound is the index domain itself, checked before `next_event`: at certificate index `u64::MAX` the run ends `Core(IndexExhausted)` with no candidate consumed. Overflow past that check is an invariant panic. |
 | `RUN-CHECKPOINT` | Every turn that reaches `EffectsComplete` takes the latch snapshot (`take_error`) exactly once — after its last handoff, before its completion record; a turn that goes Fatal earlier takes none. A pending Error there is `Environment(Checkpoint)` Fatal. On the Continue path a later publication stays pending for the next observing operation (`ENV-LATCH`); on the Stop path the next and final latch observation is shutdown's close, and the `StopPending` row is decisive on its report. |
 | `RUN-FINALIZE` | Fatal finalization runs exactly once: fix the first-observed cause (A4); fix quiescence — `start` returned Ok and the Environment is unconsumed → call `shutdown`, take the report's quiescence, and discard the report's Error (A4: a cause exists); consumed, exactly when `StopPending` ran → use the report quiescence retained by that state, including after failure to commit `TurnCompleted(Stop)`; `start` returned `Err` → `Quiesced` (`ENV-START`); return `EngineExit::Fatal { state, cause, quiescence }`. |
 | `DET-RUN` | Within one Environment type: the same build (toolchain and full dependency set, `serde_json` included), Application, initial State, configuration, and trace reproduce the same handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and Core-owned payload — equal outright when the Error values erased from the trace also correspond. |
-| `DET-ENV` | Across Environment types, under `DET-RUN`'s premises with only the Environment type free: equal traces produce equal handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and payload — the `EngineExit` variant, `FatalCause` variant, `EnvironmentOperation` with its `position`, `RecordKind`, `JournalError` variant and `SinkOperation`, `CoreError` with its payloads, and `Quiescence`. Only Error values inside the exit may differ; they are erased from the trace. The row binds where equal traces exist: a failure shape only one Environment type can produce has no cross-type comparison, and the conformance suite compares the expressible overlap. |
+| `DET-ENV` | Across Environment types, under `DET-RUN`'s premises with only the Environment type free: equal traces produce equal handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and payload — the `EngineExit` variant, `FatalCause` variant, `EnvironmentOperation` with its `position`, `RecordKind`, `TurnOutcome`, `JournalError` variant and `SinkOperation`, `CoreError` with its payloads, and `Quiescence`. Only Error values inside the exit may differ; they are erased from the trace. The row binds where equal traces exist: a failure shape only one Environment type can produce has no cross-type comparison, and the conformance suite compares the expressible overlap. |
 
 ### Enforcement
 
@@ -828,12 +846,14 @@ sequence, which is unchanged, as are the failure outcomes: a `CommandsPrepared` 
 failure precedes any handoff; `Err` at k keeps the prefix semantics and discards the
 undelivered suffix; a `CommandsDispatched` commit failure follows every handoff.
 
-One payload struct per record, each deriving `Serialize`, its first field a kind-typed
-zero-sized value supplied by the shared `RecordPayload` trait — the serialized tag and
-a `JournalFatal`'s kind have one source, and a kind/payload mismatch is unconstructible
-even in-module. `classify` fixes the answer marker before either batch transition;
-`TurnOutcome` is chosen by the transition exposed by that marker, never its caller. A
-record's `index` is the certificate's own arithmetic. `run_started` takes no index or
+One payload struct per record derives `Serialize`; its first field is a kind-typed
+zero-sized value whose shared hand-written `Serialize` implementation emits the tag
+supplied by `RecordPayload` — the serialized tag and a `JournalFatal`'s kind have one
+source, and a kind/payload mismatch is unconstructible even in-module. `classify` fixes
+the answer marker before either batch transition; `TurnOutcome` is chosen by the
+transition exposed by that marker, never its caller. The same value supplies a
+`TurnCompleted` payload and, if its commit fails, `JournalFatal.outcome`. A record's
+`index` is the certificate's own arithmetic. `run_started` takes no index or
 time argument: its payload reads both from the `Initial` certificate. `accept_event`'s
 only argument is the Environment: it obtains the candidate itself, and its payload
 carries that Event, its returned time, and the derived next index. Those same index and
@@ -847,11 +867,12 @@ perform is the edge's.
 - **Affinity, not linearity.** Dropping a certificate and committing nothing
   type-checks — that is the Fatal path by design — so a record *omitted* where the
   graph requires one is caught by golden-Journal tests, never the compiler.
-- **Three points stay runtime.** The index arithmetic behind `accept_event`, backed
-  by one always-on assert — a freshly minted certificate sits at the start index —
-  and the two values the Engine passes from the turn it just ran: the answer to
-  `classify` and the actual reusable buffer to the batch transition, one call site
-  each. Everything else in `RUN-GRAMMAR`'s list is unrepresentable.
+- **Three points stay runtime.** The index arithmetic behind `accept_event` is
+  guarded by `RUN-INDEX`'s domain check; overflow past it is an invariant panic. One
+  always-on assert checks the induction base: the `Initial` certificate stores
+  prospective index 0. The other two values are the answer passed to `classify` and
+  the actual reusable buffer passed to the batch transition, one call site each.
+  Every other caller-facing illegal state in `RUN-GRAMMAR`'s list is unrepresentable.
 - **Residual always-on asserts:** `dispatch_batch` rejects an empty buffer; the
   recordless batch edge asserts the buffer it bypasses is empty — a nonempty batch
   there is a bug, not a silent drop.
@@ -877,9 +898,10 @@ their effects; `CommandsDispatched` and `TurnCompleted` witness completed ones.
 observed, never where it was caused: under `ENV-LATCH` an already-latched Error
 surfaces at the next observing operation, so in a concurrent Environment the cause may
 lie in any earlier turn since the last snapshot. Records and exits localize
-observation; localizing the cause is Port evidence. Both shipped Environments check the
-latch before `next_event` selection and `dispatch` handoff, so an Error pending when
-either call begins returns first. A publication overlapping either call can differ: if
+observation; localizing the cause is Port evidence. Under `ENV-LATCH`, a publication
+completed before a `next_event` or `dispatch` call is ordered ahead of that call's
+observation point, so the pending Error returns first. A publication overlapping either
+call can differ: if
 the operation's own pre-commitment Error fixes first, it is returned, and the
 publication ordered after it stays pending and leaves only through finalizing shutdown,
 where its Error is discarded (`RUN-FINALIZE`).
@@ -1282,10 +1304,10 @@ the complete trusted boundary — an obligation absent from it is enforced, not 
 
 | ID | Guarantee |
 |---|---|
-| `VERIFY-CONFORMANCE` | A conformance trace suite runs against both Environments and compares every Core-owned discriminant and payload in `DET-ENV`'s list; run against a bespoke Environment, the same suite is its certification (`TRUST-ENV`). It compares the expressible overlap: a failure shape only one Environment type can produce has no cross-type case. |
+| `VERIFY-CONFORMANCE` | A conformance trace suite checks every scripted Environment call against the graph, including each Command handoff, then runs against both Environments and compares every Core-owned discriminant and payload in `DET-ENV`'s list; run against a bespoke Environment, the same suite is its certification (`TRUST-ENV`). It compares the expressible overlap: a failure shape only one Environment type can produce has no cross-type case. |
 | `VERIFY-JOURNAL` | A Golden-Journal suite pins every graph-required record sequence and every record byte-exactly, and proves an encoding containing an interior newline byte is rejected as `NotAnObject` with nothing written (`RUN-GRAMMAR`, `RUN-RECORDS`, `RUN-ENFORCEMENT`, `JRN-ENCODE`). |
 | `VERIFY-FAULTS` | A fault-injection suite exercises every edge: scripted sinks for Journal failures and scripted Environments for each operation's `Err` and for a shutdown report carrying `Some(error)`, checking the resulting `FatalCause`; this includes their cross-product, where the operation's Error remains the Fatal cause and the report's Error is discarded (A4, `RUN-FINALIZE`). |
-| `VERIFY-GRAMMAR` | A compile-fail suite proves illegal transition sequences, a skipped checkpoint, a premature `TurnCompleted(Stop)`, any caller attempt to commit `CommandsDispatched` independently of the fused batch transition, an outcome disagreeing with the fixed answer, and any attempt to use `Clone`, `Copy`, or `Default` on the certificate do not compile (`RUN-GRAMMAR`, `RUN-ENFORCEMENT`); it lives where the module-private grammar types are visible. |
+| `VERIFY-GRAMMAR` | A compile-fail suite proves illegal transition sequences, a skipped checkpoint, a premature `TurnCompleted(Stop)`, any caller attempt to commit `CommandsDispatched` independently of the transition that performs every handoff, an outcome disagreeing with the fixed answer, and any attempt to use `Clone`, `Copy`, or `Default` on the certificate do not compile (`RUN-GRAMMAR`, `RUN-ENFORCEMENT`); it lives where the module-private grammar types are visible. |
 | `VERIFY-LIVE` | A Live lifecycle and shutdown suite proves: no `LivePort::run` begins before gate activation; failed startup cancels and joins every shell; every shell owns exactly one completion entry; a completion before shutdown remains visible at the final observation; normal return, `Err`, and test-profile unwind each make the entry `Complete` exactly once; Port code cannot reach or defer the terminal guard; shutdown raises the signal and closes fan-in while leaving the latch open; `run(Ok)` after the signal is expected and unpublished, while a typed `run(Err)` before the final close enters the report; every required Error publication precedes that shell's `Complete` transition; all waits share one deadline fixed at the initiating instant, including a duration whose addition saturates; during shutdown no join begins while an entry remains `Outstanding`; a completion concurrent with expiry and a publication concurrent with the final close are each classified by the final observation; successful shutdown returns `Quiesced` and joins every supervised thread — read as "joined", never "succeeded", under the unwinding test profile; deadline expiry without an Error returns `{ Incomplete, None }`; Error plus expiry returns `{ Incomplete, Some(error) }`; deadline expiry detaches every unjoined thread; and a post-close publication is discarded. |
 | `VERIFY-SIM` | A Sim lifecycle and shutdown suite verifies `SIM-LIFECYCLE`, `SIM-START`, and `SIM-SHUTDOWN` with per-Port call traces: all-success startup and shutdown; startup failure at every Slot position; `Err` from `on_command` and `step` followed by shutdown; and `stop` returning `Ok` or `Err` at every Slot position. It checks that startup cleanup stops only the successfully started prefix, exactly once and in frozen Slot order; the failing and not-yet-started Ports receive no `stop`; an `Ended` Port receives no later method; shutdown stops exactly the then-`Open` Ports once in frozen Slot order while the latch remains open; every `stop` Error is published before the final close, the first wins, and later Errors do not prevent remaining calls; all-`Ok` shutdown returns `{ Quiesced, None }`; and any `stop` Error returns `{ Quiesced, Some(error) }`. |
 | `VERIFY-LATCH` | An Environment conformance suite proves `ENV-LATCH`'s before-call and after-return ordering constraints; for a publication overlapping an observing call, it accepts either placement and verifies that the call's result and resulting latch state agree with it. It proves that an already-pending Error wins over an operation's own pre-commitment Error, reports the latch permanently, leaves the operation's contractual effect absent, and discards the secondary Error; for an overlapping publication and such a local failure, it exercises both permitted orderings. A `next_event` blocked without input returns and reports the Error that wakes it. The suite also proves permanent first-Error reporting, final-Command simulated Error observation, the latch remaining open through graceful shutdown, a typed shutdown Error before the final close, either consistent placement for a publication racing that close, and post-close discard. Stop-path integration proves `{ Quiesced, None }` alone can reach `Stopped`, any `Some(error)` produces `Environment(Shutdown)` even with `Incomplete`, and `{ Incomplete, None }` produces `Core(ShutdownIncomplete)`. |
