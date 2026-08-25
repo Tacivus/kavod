@@ -28,14 +28,16 @@ Four forms bind:
 4. **Obligation rows** — the rows of the Obligations table, each with an ID: trusted
    rules, upheld by the named party and checked by the stated means.
 
-Everything else is prose, and prose has exactly three jobs: **define** a term, **derive** a
-consequence from the rules, or **justify** a rule so it is not relitigated. A definition
-binds vocabulary — the Glossary is its home — and creates no obligation by itself. Test any
-sentence by deleting it: if an implementer obligation changes, the sentence was a rule in
-the wrong clothes — give it an ID or move it; if nothing changes and it does none of the
-three jobs, cut it.
+Everything else is prose, and prose has exactly four jobs: **define** a term, **derive** a
+consequence from the rules, **justify** a rule so it is not relitigated, or illustrate
+**Mechanism**. A definition binds vocabulary — the Glossary is its home — and creates no
+obligation by itself. Mechanism illustrates one replaceable realization of the binding
+rules. It creates no obligation and is never authority over an API block, guarantee row,
+binding table, or obligation row. Test any sentence by deleting it: if an implementer
+obligation changes, the sentence was a rule in the wrong clothes — give it an ID or move
+it; if nothing changes and it does none of the four jobs, cut it.
 
-Placement rules, for every future edit:
+Placement rules, for this document and every future edit:
 
 - **The Run owns interaction.** If a fact can be tested against one component alone, it
   lives in that component's section. If it says when an operation is called, what its
@@ -43,8 +45,9 @@ Placement rules, for every future edit:
 - **Citations point backward.** Section order is dependency order; a fact that needs a
   forward reference is in the wrong section. Navigation pointers are exempt: the
   Glossary's citations, the open-section notice, the bounds registry, the ownership map,
-  the invariant index, a contract's pointer to its shipped implementations, and trust
-  marks pointing into the Obligations table.
+  the invariant index, a contract's pointer to its shipped implementations, trust marks
+  pointing into the Obligations table, and `VERIFY-*` enforcement marks pointing into the
+  Enforced verification table.
 - **Cite IDs.** Never section numbers, here or in tests.
 - **Implementation sections realize the contract.** A Live or Simulated guarantee
   either names the Environment-contract row it realizes or defines that
@@ -66,6 +69,11 @@ a required test target and by its passing result.
 Enforcement has an order: **unrepresentable beats asserted beats tested.** Where ownership
 or a certificate can carry a rule, it must. The first available tier owns the rule's
 enforcement.
+
+| ID | Enforcement definition |
+|---|---|
+| `ASSERT-INVARIANTS` | The asserted tier consists only of always-on, constant-time assertions that panic on violation; a debug-only assertion is not enforcement. Every asserted invariant has an owning guarantee and a named assertion site. |
+| `BOUND-LOOPS` | Every Kavod-owned active loop is nonrecursive and enforced by its owner and bound: the run by the index domain, dispatch by batch length, Environment work by its owned budgets, Journal writing by record length. A blocking wait is not an active loop and implies no elapsed-time bound; work inside user code is trusted to be bounded (`TRUST-BLOCKING`). |
 
 ## 1. Glossary
 
@@ -164,20 +172,16 @@ Everything in this document is a consequence of nine axioms.
 reached its commitment point stays real. Consequences of this appear once, at each
 effect's owner, and are derivable everywhere else.
 
-**Panics.** Kavod ships with `panic = "abort"` and relies on unwinding nowhere in
-shipped code; test code may catch panics under the test profile, which unwinds. After a
-panic the evidence is the Journal's committed records, kept current by
-flush-per-record commits. The abort profile in the final binary is a trusted obligation
-(Obligations table).
+**Panics.** Under `TRUST-ABORT`, Kavod ships with `panic = "abort"` and relies on
+unwinding nowhere in shipped code; test code may catch panics under the test profile,
+which unwinds. After a panic the evidence is the Journal's committed records, kept
+current by flush-per-record commits.
 
 **Guarantees**
 
 | ID | Guarantee |
 |---|---|
-| `ASSERT-INVARIANTS` | Every assertion used to enforce a Kavod invariant is always-on and constant-time and panics on violation (A8); a debug-only assertion is not enforcement. |
-| `BOUND-LOOPS` | Every Kavod-owned active loop is bounded and nonrecursive: the run by the index domain, dispatch by batch length, Environment work by its owned budgets, Journal writing by record length. A blocking wait is not an active loop and implies no elapsed-time bound; work inside user code is trusted to be bounded (`TRUST-BLOCKING`). |
 | `NO-UNSAFE` | Kavod Core compiles under `#![forbid(unsafe_code)]`. |
-| `NO-UNWIND` | Shipped code relies on unwinding nowhere; the shipped profile aborts on panic. The final binary's abort profile is trusted (`TRUST-ABORT`). |
 | `BOUND-STATIC` | Slot registration at construction fixes the Port set — nonempty — and the Slot order: static, not configured, and fixed nowhere else. |
 | `BOUND-NONZERO` | Every configured capacity uses a nonzero type, so zero is unrepresentable. |
 
@@ -332,7 +336,7 @@ pub trait PortContract {
     type Command: Serialize;
 }
 
-/// Kavod-owned uninhabited type for absent directions.
+/// Kavod-owned uninhabited type for absent directions; implements `Serialize`.
 pub enum Never {}
 
 kavod::ports!(
@@ -349,7 +353,7 @@ kavod::ports!(
 
 | ID | Guarantee |
 |---|---|
-| `PORT-STATE` | A Port exclusively owns its mutable domain, protocol, and native state; wiring and the Environment relay its values, routing by the Slot sum's discriminant alone and never reading the payload. Processing after a Command's handoff belongs to the destination Port. |
+| `PORT-STATE` | A Port exclusively owns its mutable domain, protocol, and native state; wiring and the Environment relay its values, routing by the Slot sum's discriminant alone and never reading the payload (`TRUST-ROUTING`; `TRUST-ENV` for a bespoke Environment). Processing after a Command's handoff belongs to the destination Port. |
 | `PORT-SUMS` | The Slot-qualified Event and Command sums are closed and type-checked against their Contracts at the wiring: applying the frozen fan-in constructors and the fan-out match proves payload agreement for every variant. Distinct Slots of one Contract are distinct variants; that a hand-written sum's variants are exactly the bound Slots rides `PORT-ROUTING`'s trusted obligation. |
 | `PORT-ROUTING` | Fan-in is one frozen variant constructor per inhabited Event direction; fan-out is one hand-written exhaustive destination match. The compiler proves exhaustiveness and payload agreement; each arm naming its semantically correct Slot is trusted (`TRUST-ROUTING`). Each Environment's Error sum carries one mapped variant per Slot's Port Error, at that Environment's own mapping site, placed finally when Wiring closes. |
 
@@ -463,7 +467,7 @@ its own (`ENV-ERRORS`) — and the returned value is the caller's only witness o
 | `ENV-TIME` | One Environment authority — the single Event acceptor — stamps `Timestamp` on `start` and every `next_event`, and owns the count's origin and meaning. Stamped times never decrease across the run; equal stamps are valid. |
 | `ENV-SHUTDOWN` | `shutdown` first raises the shutdown signal, stops Event delivery, and closes Event admission. From the signal's initiating instant every Port has a means to observe it immediately, regardless of Commands already handed off but not yet processed; how an implementation orders the signal against those Commands is its Port-facing API. That instant begins the graceful-shutdown window. Throughout the window the latch remains open while the Environment performs its shutdown work and waits according to its run-scoped-activity accounting. The bounded policy applies only to waiting for activity still accounted outstanding, not to reclaiming activity already accounted complete; such reclamation remains subject to `TRUST-BLOCKING`. Already-handed-off residue is the destination Port's to drain or abandon (`PORT-STATE`), and the Environment itself initiates no further externally consequential work after raising the signal. When every unit is accounted complete or the wait bound expires, one final observation fixes quiescence and closes the latch into the report (`ENV-LATCH`). A publication ordered before that close follows the latch's ordinary first-wins rules; one ordered after it is discarded. |
 | `ENV-SEPARATION` | The Environment orchestrates Ports and only that: Port domain state belongs to Ports (`PORT-STATE`), and handler invocation belongs to the Run. |
-| `ENV-BOUNDS` | Every operation preserves the Environment's own declared bounds — the registry's rows for the shipped implementations; a bespoke implementation declares its own. |
+| `ENV-BOUNDS` | Every operation preserves the Environment's own declared bounds — the registry's rows for the shipped implementations; a bespoke implementation declares its own. `VERIFY-LIVE` and `VERIFY-SIM` pin the shipped bounds; a bespoke implementation upholds its declared bounds under `TRUST-ENV`. |
 
 ### Notes
 
@@ -522,7 +526,7 @@ pub enum SinkOperation { Write, Flush }
 | ID | Guarantee |
 |---|---|
 | `JRN-FORMAT` | One record is one single-line serde JSON object plus one newline; line order is the sequence. `max_record_bytes` bounds the encoded object of every committed record; the newline is stored beyond it. |
-| `JRN-ENCODE` | Encoding completes in the reusable bounded buffer before any byte of that record reaches the sink. The encoded bytes are classified as one single-line JSON object exactly by starting with `{`, ending with `}`, and containing no newline byte; any other result is `NotAnObject`. After that classification the newline is appended; no room for it is `BoundExceeded`. `Encode`, `NotAnObject`, and `BoundExceeded` write nothing and poison nothing. The bounded buffer's zero-progress rejection is `BoundExceeded`; every other encode failure is `Encode`. |
+| `JRN-ENCODE` | Encoding completes in the reusable bounded buffer before any byte of that record reaches the sink. The encode region is exactly `max_record_bytes + 1` bytes; construction computes that size with `max_record_bytes.checked_add(1)`, whose overflow is `MaxBytesTooLarge`. The encoded bytes are classified as one single-line JSON object exactly by starting with `{`, ending with `}`, and containing no newline byte; any other result is `NotAnObject`. A completed non-object of `max_record_bytes + 1` bytes is therefore `NotAnObject`; an object of that size leaves no room for the newline and is `BoundExceeded`. After that classification the newline is appended; no room for it is `BoundExceeded`. `Encode`, `NotAnObject`, and `BoundExceeded` write nothing and poison nothing. The bounded buffer's zero-progress rejection is `BoundExceeded`; every other encode failure is `Encode`. |
 | `JRN-COMMIT` | Only a successful flush commits a record. Bytes past the last committed record are an uncertain suffix, even if they form complete lines — after a sink failure, and equally after any end of the process that arrives before a flush, an abort included. |
 | `JRN-POISON` | Writing uses a loop bounded by record length and retries only a short successful write. Any sink failure permanently poisons the Journal, mapped to its typed Error: a write or flush Error as returned, zero progress as `WriteZero`, an over-reported count as `InvalidData`; `Interrupted` is never retried. A poisoned Journal performs no further sink operation; `commit` on it is a precondition violation and panics (A8). |
 | `JRN-SINK` | `W: std::io::Write` is the whole persistence abstraction. A sink is fresh for one run or positioned immediately after a newline, exclusively owned by the Journal, and stores exactly the bytes given — the sink owner's obligation (`TRUST-SINK`). The contract ends at successful flush; durability beyond it, and writer destructor behavior, belong to the sink's owner. |
@@ -544,9 +548,7 @@ The following table is a nonbinding realization of `JRN-ENCODE`, `JRN-COMMIT`, a
 | 5 | Write the buffer with a loop bounded by record length that retries only short successful writes: `Err` (including `Interrupted`), `Ok(0)` as `WriteZero`, and an over-reported count as `InvalidData` each poison and return `Sink { operation: Write, .. }` (`JRN-POISON`). |
 | 6 | Flush. Failure → poison, `Sink { operation: Flush, .. }`. Success commits (`JRN-COMMIT`). |
 
-`new` computes `max_record_bytes.checked_add(1)` to size the buffer for the object plus
-the newline; overflow — only at `usize::MAX` — is `MaxBytesTooLarge` (A6). A failed
-reservation is `AllocationFailed`, carrying the reservation Error.
+A failed reservation is `AllocationFailed`, carrying the reservation Error.
 
 ### Notes
 
@@ -785,12 +787,12 @@ Rust record types are mechanism; `RUN-RECORDS` and the table bind the serialized
 |---|---|
 | `RUN-SERIAL` | The Engine owns the Environment and the Journal by value and is their only caller, delivering `ENV-SERIAL` by construction: one serial loop (A2), calls in the order the graph directs, and a consuming `shutdown` that makes a second lifecycle call unrepresentable. |
 | `RUN-GRAMMAR` | Records are committed only through the graph's transitions, and the graph is enforced at compile time: possession of the certificate in phase P proves the Journal holds exactly the records of the certificate's path to P, and that the certificate holds exactly the phase data fixed by the run startup and edge tables. Every transition consumes its source certificate and returns its successor only after performing the edge requirement itself and successfully committing its listed record or records, if any. To any caller outside `RUN-ENFORCEMENT`'s boundary, a transition requirement is never a caller-supplied witness that can be forgotten, reused, contradicted, or forged: it is the phase itself or work the transition performs. An out-of-order record, a record whose kind disagrees with its payload, a `TurnCompleted` outcome disagreeing with the phase's fixed answer, a caller-supplied index, start time, or candidate, an accepted Event, index, or time disagreeing with its acceptance record, a skipped checkpoint, a `CommandsDispatched` without every handoff, a `TurnCompleted(Stop)` without a clean report, or a duplicated or fabricated certificate is unrepresentable to such a caller. This compile-time claim excludes the three runtime points, in-module transition conduct, and record omission by dropping, all of which `RUN-ENFORCEMENT` names as runtime- or test-enforced. The certificate does not implement `Clone`, `Copy`, or `Default`. |
-| `RUN-ENFORCEMENT` | `RUN-GRAMMAR`'s enforcement boundary is exact. Three points remain runtime: the index arithmetic behind `accept_event`, whose domain check and overflow panic are fixed by `RUN-INDEX`, and the answer and batch the Engine passes from the turn it just ran to the single call sites of `classify` and the batch transition. One always-on assertion checks the induction base: the `Initial` certificate stores prospective index 0. `classify` consumes the answer and the `TurnOpen` certificate into one of two non-cloneable, answer-typed refinements of that phase; after that call no transition accepts an answer. The batch transitions always-on assert empty or nonempty as their branch requires (`ASSERT-INVARIANTS`). In-module transition conduct remains expressible in ordinary code, and dropping a certificate and committing nothing remains expressible as the Fatal path, so required operation and record sequences are test-enforced; the wire format is also test-enforced. Certificate, phase, and transition types are module-private; every other illegal state listed by `RUN-GRAMMAR` is unrepresentable to callers outside that boundary. |
+| `RUN-ENFORCEMENT` | `RUN-GRAMMAR`'s enforcement boundary is exact. Three points remain runtime: the index arithmetic behind `accept_event`, whose domain check and overflow panic are fixed by `RUN-INDEX`, and the answer and batch the Engine passes from the turn it just ran to the single call sites of `classify` and the batch transition. One always-on assertion checks the induction base: the `Initial` certificate stores prospective index 0. `classify` consumes the answer and the `TurnOpen` certificate into one of two non-cloneable, answer-typed refinements of that phase; after that call no transition accepts an answer. The answer at that call site and its resulting outcome are pinned by `VERIFY-JOURNAL`. The batch transitions always-on assert empty or nonempty as their branch requires (`ASSERT-INVARIANTS`). In-module transition conduct remains expressible in ordinary code, and dropping a certificate and committing nothing remains expressible as the Fatal path, so required operation and record sequences are test-enforced; the wire format is also test-enforced. Certificate, phase, and transition types are module-private; every other illegal state listed by `RUN-GRAMMAR` is unrepresentable to callers outside that boundary. |
 | `RUN-RECORDS` | A record is one flat JSON object — its top-level members are exactly its row's fields, in table order; values may nest, the top level may not. `record_kind` comes first, a bare tag string naming the kind; then `index`, the index of the turn the record belongs to — for `EventAccepted`, the newly accepted turn's. `outcome` is a bare tag string. `schema_version` is 1. `RunStarted` is the only possible first record, so every nonempty Journal begins with a versioned record. |
 | `RUN-INDEX` | The `Initial` certificate's stored 0 is prospective. Thereafter the certificate's index is the latest accepted turn's ordinal: 0 once `RunStarted` commits, advancing exactly when `EventAccepted` commits. The bound is the index domain itself, checked before `next_event`: at certificate index `u64::MAX` the run ends `Core(IndexExhausted)` with no candidate consumed. Overflow past that check is an invariant panic. |
 | `RUN-CHECKPOINT` | Every turn that reaches `EffectsComplete` takes the latch snapshot (`take_error`) exactly once — after its last handoff, before its completion record; a turn that goes Fatal earlier takes none. A pending Error there is `Environment(Checkpoint)` Fatal. On the Continue path a later publication stays pending for the next observing operation (`ENV-LATCH`); on the Stop path the next and final latch observation is shutdown's close, and the `StopPending` row is decisive on its report. |
-| `RUN-FINALIZE` | Fatal finalization runs exactly once: fix the first-observed cause (A4); fix quiescence — `start` returned Ok and the Environment is unconsumed → call `shutdown`, take the report's quiescence, and discard the report's Error (A4: a cause exists); consumed, exactly when `StopPending` ran → use the report quiescence retained by that state, including after failure to commit `TurnCompleted(Stop)`; `start` returned `Err` → `Quiesced` (`ENV-START`); return `EngineExit::Fatal { state, cause, quiescence }`. |
-| `DET-RUN` | Within one Environment type: the same build (toolchain and full dependency set, `serde_json` included), Application, initial State, configuration, and trace reproduce the same handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and Core-owned payload — equal outright when the Error values erased from the trace also correspond. |
+| `RUN-FINALIZE` | Fatal finalization runs exactly once: fix the first-observed cause (A4); fix quiescence — `start` returned Ok and the Environment is unconsumed → call `shutdown` (`TRUST-BLOCKING`), take the report's quiescence, and discard the report's Error (A4: a cause exists); consumed, exactly when `StopPending` ran → use the report quiescence retained by that state, including after failure to commit `TurnCompleted(Stop)`; `start` returned `Err` → `Quiesced` (`ENV-START`); return `EngineExit::Fatal { state, cause, quiescence }`. |
+| `DET-RUN` | Within one Environment type, under `TRUST-PURE` and `TRUST-SERIALIZE`: the same build (toolchain and full dependency set, `serde_json` included), Application, initial State, configuration, and trace reproduce the same handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and Core-owned payload — equal outright when the Error values erased from the trace also correspond (`VERIFY-CONFORMANCE`). |
 | `DET-ENV` | Across Environment types, under `DET-RUN`'s premises with only the Environment type free: equal traces produce equal handler calls, State transitions, Command intent, and Journal bytes through the last committed record, and exits equal in every Core-owned discriminant and payload — the `EngineExit` variant, `FatalCause` variant, `EnvironmentOperation` with its `position`, `RecordKind`, `TurnOutcome`, `JournalError` variant and `SinkOperation`, `CoreError` with its payloads, and `Quiescence`. Only Error values inside the exit may differ; they are erased from the trace. The row binds where equal traces exist: a failure shape only one Environment type can produce has no cross-type comparison, and the conformance suite compares the expressible overlap. |
 
 ### Enforcement
@@ -1085,7 +1087,7 @@ contract promises no in-process recovery from that trusted nontermination.
 
 *Justify:* the shell-owned guard's normal and `Err` behavior is what shipped code uses;
 its unwind behavior exists only under the unwinding test profile and does not make
-shipped code rely on unwinding (`NO-UNWIND`). Because neither the Port nor `LiveCtx` can
+shipped code rely on unwinding (`TRUST-ABORT`). Because neither the Port nor `LiveCtx` can
 reach the guard, only Kavod's module-private shell could forget it; lifecycle tests pin
 that implementation boundary. `LIVE-START` needs no deadline while joining canceled
 shells because its gate proves that no Port code ran. The shutdown deadline bounds Port
@@ -1143,14 +1145,14 @@ pub enum SimCtxError {
 | ID | Guarantee |
 |---|---|
 | `SIM-STATE` | Each simulated Port owns all of its simulated domain state; the Environment holds no shared model and runs no concurrency. |
-| `SIM-START` | `start` fixes the start time from the configured origin and sets `now` to it, then invokes each `NotStarted` Port's `start` in frozen Slot order (`SIM-LIFECYCLE`). After every invocation returns `Ok`, every Port is `Open` and successful return is the startup commitment (`ENV-ERRORS`). On the first `Err`, the failing Port is `Ended`; startup calls `stop` exactly once on the earlier `Open` prefix, in frozen Slot order, discarding those Errors, while every later Port remains `NotStarted` and receives no method. Every Port is then `NotStarted` or `Ended` and, under `TRUST-SIM-PORT` and `TRUST-SPAWN`, no Port-started run-scoped activity remains; startup fails with the original Error — effects already made stay real (A4's cleanup rule), and the return satisfies `ENV-START`. |
+| `SIM-START` | `start` fixes the start time from the configured origin and sets `now` to it, then invokes each `NotStarted` Port's `start` in frozen Slot order (`SIM-LIFECYCLE`). After every invocation returns `Ok`, every Port is `Open` and successful return is the startup commitment (`ENV-ERRORS`). On the first `Err`, the failing Port is `Ended`; startup calls `stop` exactly once on the earlier `Open` prefix, in frozen Slot order, discarding those Errors, while every later Port remains `NotStarted` and receives no method. Every Port is then `NotStarted` or `Ended` and, under `TRUST-SIM-PORT`, `TRUST-SPAWN`, and `TRUST-BLOCKING`, no Port-started run-scoped activity remains; startup fails with the original Error — effects already made stay real (A4's cleanup rule), and the return satisfies `ENV-START`. |
 | `SIM-TIME` | `now` starts at the configured origin and moves only by `next_event` advancing it to the selected arm's time; the returned candidate is stamped with `now`. Every armed time is `>= now` (`SIM-WAKEUP`) and selection takes the minimum, so stamps never decrease — realizes `ENV-TIME`. |
 | `SIM-DISPATCH` | If `ENV-LATCH` orders a pending Error before this call's handoff, `dispatch` returns it as `Err` with no Port invocation and no handoff. Otherwise, `dispatch` synchronously routes to exactly one Port's `on_command`; the invocation is where `dispatch`'s handoff commits (the **Commitment points** table), and `now` does not advance. An `Err` from `on_command` is published (`ENV-ERRORS`) and `dispatch` returns `Ok` — the invocation already committed. |
 | `SIM-WAKEUP` | Each Port has at most one revocable wakeup arm, initially disarmed, modifiable only through its own `SimCtx`: `set_next` requires `time >= now` — rejection changes nothing — and is last-call-wins; `clear_next` disarms. An arm is not an Event. |
 | `SIM-SELECT` | `next_event` checks, in order at each selection: the latch — a pending Error that `ENV-LATCH` orders before this call's consumption returns as the call's `Err`, nothing selected or consumed; no armed Port (`SIM-COMPLETION`); the step budget (`SIM-STEPS`). It then selects the armed Port with the lowest time — equal times by round-robin: the selected Slot is the first lowest-time armed Slot met scanning from the cursor in frozen Slot order, wrapping; the cursor starts at Slot 0, persists across `next_event` calls, and moves to the selected Slot's successor after every selected `step`, including one returning `None` — advances `now` to the selected arm's time, clears the arm, and calls `step`. Only `step(Some)` creates the returned candidate, and its return is the consumption commitment (`ENV-ERRORS`); `step(None)` continues selection; `step(Err)` returns that Error. Every `Err` this call returns leaves the selections already made standing as the named subordinate effects (**Commitment points** table): each one's advanced `now`, cleared arm, and spent budget. |
 | `SIM-STEPS` | Every `step` call consumes one unit of the configured step budget, fresh for each `next_event` invocation; `start`, `on_command`, and `stop` consume none. The budget is checked before selecting, advancing time, or clearing an arm; exhaustion is a typed Environment Error. |
 | `SIM-COMPLETION` | `next_event` finding no armed Port — at entry or mid-selection — is a typed Environment Error: the run has nothing left to wait for. A run ends normally through the finite-source pattern (Ports Notes). |
-| `SIM-SHUTDOWN` | `shutdown` realizes `ENV-SHUTDOWN`: it stops Event delivery and closes Event admission, then delivers the sim shutdown signal by invoking `stop` exactly once on every `Open` Port (`SIM-LIFECYCLE`), in frozen Slot order, while the latch remains open. Every returned Error is mapped and published; first-wins applies, and shutdown continues through the remaining `Open` Ports. After every call returns, the final observation closes the latch into the report (`ENV-LATCH`). Every Environment-accounted lifecycle is then `Ended`, so the report carries `Quiesced`; completion of Port-started activity relies on `TRUST-SPAWN`. |
+| `SIM-SHUTDOWN` | `shutdown` realizes `ENV-SHUTDOWN`: it stops Event delivery and closes Event admission, then delivers the sim shutdown signal by invoking `stop` exactly once on every `Open` Port (`SIM-LIFECYCLE`), in frozen Slot order, while the latch remains open. Every returned Error is mapped and published; first-wins applies, and shutdown continues through the remaining `Open` Ports. After every call returns, the final observation closes the latch into the report (`ENV-LATCH`). Every Environment-accounted lifecycle is then `Ended`, so the report carries `Quiesced`; completion of Port-started activity relies on `TRUST-SPAWN`, and return from each Port call relies on `TRUST-BLOCKING`. |
 
 ### Mechanism
 
@@ -1189,6 +1191,11 @@ rests on `TRUST-SPAWN`.
 *Derive:* on the Stop path the checkpoint precedes `SIM-SHUTDOWN`, but each `stop` runs
 before the final close. The report therefore carries the first `stop` Error published
 during shutdown, if any, and otherwise carries `None`.
+
+*Derive:* if a `stop` call violates `TRUST-BLOCKING` by never terminating,
+`SIM-START`'s cleanup or `SIM-SHUTDOWN` remains blocked and produces neither an
+operation result nor an `EngineExit`; the contract promises no in-process recovery from
+that trusted nontermination.
 
 *Derive:* replay is user wiring: a fixed or recorded trace presented by a user-written
 `SimPort`, or a bespoke `Environment` built on `Timestamp::from_nanos`, with `DET-RUN`
@@ -1247,8 +1254,8 @@ ordering authority; a nonempty Port set (`BOUND-STATIC`); nonzero configured bou
 
 One crate, `kavod`, no feature gates — both Environments are std-only. Dependencies:
 `serde` (with `derive`) and `serde_json`. `ports!` is `macro_rules!`, so no proc-macro
-crate exists. This section is mechanism except the public item names, which the API
-blocks own.
+crate exists. This section is mechanism except the guarantee below and the public item
+names, which the API blocks own.
 
 ```
 kavod/src/
@@ -1269,9 +1276,11 @@ kavod/src/
   sim/               SimPort, SimCtx, simulated Environment   (planned: Wiring)
 ```
 
-Every public item is reachable at a path without repeated segments — the engine
-module's `mod.rs` re-exports its children's public items rather than exposing the
-child modules.
+### Guarantees
+
+| ID | Guarantee |
+|---|---|
+| `CRATE-EXPORTS` | Every public item is reachable at a path without repeated segments. The engine module's `mod.rs` re-exports its children's public items rather than exposing the child modules, so no repeated-segment path exists. |
 
 ## 12. Obligations & verification
 
@@ -1285,10 +1294,10 @@ the complete trusted boundary — an obligation absent from it is enforced, not 
 |---|---|---|---|
 | `TRUST-PURE` | Handlers, State, and every Event and Command payload type — `Drop` impls included — carry no hidden authority (clocks, entropy, IO, globals, concurrency order, Environment dependence beyond `Context` and the delivered Event) and no aliased mutability; Ports share no state; all run-varying data lives in State | Application author | Two runs against the same scripted Environment and sink → identical Journal bytes and `DET-RUN`-equal exits |
 | `TRUST-SIM-PORT` | Simulated Ports are deterministic, do bounded `step` work, and carry no hidden authority | Sim Port author | Repeatability tests |
-| `TRUST-ENV` | A bespoke Environment — one Kavod does not ship — upholds every Environment-contract row | Environment author | The conformance trace suite run against it |
+| `TRUST-ENV` | A bespoke Environment — one Kavod does not ship — upholds every Environment-contract row | Environment author | `VERIFY-CONFORMANCE`; `VERIFY-LATCH`; review of bounds and every other property no execution trace can witness |
 | `TRUST-BLOCKING` | User code — `initial_state`, handlers, Ports, serializers, writers, callbacks, destructors — is bounded and reports Errors instead of panicking | Their authors | Review; A8 defines the blast radius when violated |
-| `TRUST-ABORT` | The final binary builds with `panic = "abort"` | Build/deployment configuration | Build profile review |
-| `TRUST-ROUTING` | One-to-one Slot routing and per-Slot Error mapping (`PORT-ROUTING`) | Wiring author | Per-Slot tests |
+| `TRUST-ABORT` | Shipped code relies on unwinding nowhere, and the final binary builds with `panic = "abort"` | Kavod implementer; build/deployment configuration | Code review; CI build-profile check |
+| `TRUST-ROUTING` | One-to-one Slot routing and per-Slot Error mapping (`PORT-ROUTING`), with routing reading only the Slot sum's discriminant and never a routed payload (`PORT-STATE`) | Wiring author | Per-Slot tests; review |
 | `TRUST-KEY` | Every externally consequential Command carries a stable business key, and its destination Port uses it to recognize a repeated or uncertain external effect | Application author; Port author | Per-Slot tests |
 | `TRUST-SERIALIZE` | `Serialize` impls are deterministic, side-effect-free, bounded, nonpanicking, with stable map order | Payload authors | Golden-Journal tests |
 | `TRUST-LIFECYCLE` | Live Port blocking points observe the lifecycle and cooperate with shutdown | Live Port author | Shutdown tests under load |
@@ -1304,12 +1313,13 @@ the complete trusted boundary — an obligation absent from it is enforced, not 
 
 | ID | Guarantee |
 |---|---|
-| `VERIFY-CONFORMANCE` | A conformance trace suite checks every scripted Environment call against the graph, including each Command handoff, then runs against both Environments and compares every Core-owned discriminant and payload in `DET-ENV`'s list; run against a bespoke Environment, the same suite is its certification (`TRUST-ENV`). It compares the expressible overlap: a failure shape only one Environment type can produce has no cross-type case. |
-| `VERIFY-JOURNAL` | A Golden-Journal suite pins every graph-required record sequence and every record byte-exactly, and proves an encoding containing an interior newline byte is rejected as `NotAnObject` with nothing written (`RUN-GRAMMAR`, `RUN-RECORDS`, `RUN-ENFORCEMENT`, `JRN-ENCODE`). |
-| `VERIFY-FAULTS` | A fault-injection suite exercises every edge: scripted sinks for Journal failures and scripted Environments for each operation's `Err` and for a shutdown report carrying `Some(error)`, checking the resulting `FatalCause`; this includes their cross-product, where the operation's Error remains the Fatal cause and the report's Error is discarded (A4, `RUN-FINALIZE`). |
-| `VERIFY-GRAMMAR` | A compile-fail suite proves illegal transition sequences, a skipped checkpoint, a premature `TurnCompleted(Stop)`, any caller attempt to commit `CommandsDispatched` independently of the transition that performs every handoff, an outcome disagreeing with the fixed answer, and any attempt to use `Clone`, `Copy`, or `Default` on the certificate do not compile (`RUN-GRAMMAR`, `RUN-ENFORCEMENT`); it lives where the module-private grammar types are visible. |
-| `VERIFY-LIVE` | A Live lifecycle and shutdown suite proves: no `LivePort::run` begins before gate activation; failed startup cancels and joins every shell; every shell owns exactly one completion entry; a completion before shutdown remains visible at the final observation; normal return, `Err`, and test-profile unwind each make the entry `Complete` exactly once; Port code cannot reach or defer the terminal guard; shutdown raises the signal and closes fan-in while leaving the latch open; `run(Ok)` after the signal is expected and unpublished, while a typed `run(Err)` before the final close enters the report; every required Error publication precedes that shell's `Complete` transition; all waits share one deadline fixed at the initiating instant, including a duration whose addition saturates; during shutdown no join begins while an entry remains `Outstanding`; a completion concurrent with expiry and a publication concurrent with the final close are each classified by the final observation; successful shutdown returns `Quiesced` and joins every supervised thread — read as "joined", never "succeeded", under the unwinding test profile; deadline expiry without an Error returns `{ Incomplete, None }`; Error plus expiry returns `{ Incomplete, Some(error) }`; deadline expiry detaches every unjoined thread; and a post-close publication is discarded. |
-| `VERIFY-SIM` | A Sim lifecycle and shutdown suite verifies `SIM-LIFECYCLE`, `SIM-START`, and `SIM-SHUTDOWN` with per-Port call traces: all-success startup and shutdown; startup failure at every Slot position; `Err` from `on_command` and `step` followed by shutdown; and `stop` returning `Ok` or `Err` at every Slot position. It checks that startup cleanup stops only the successfully started prefix, exactly once and in frozen Slot order; the failing and not-yet-started Ports receive no `stop`; an `Ended` Port receives no later method; shutdown stops exactly the then-`Open` Ports once in frozen Slot order while the latch remains open; every `stop` Error is published before the final close, the first wins, and later Errors do not prevent remaining calls; all-`Ok` shutdown returns `{ Quiesced, None }`; and any `stop` Error returns `{ Quiesced, Some(error) }`. |
+| `VERIFY-CONTEXT` | A Context suite verifies `APP-EMIT`, `APP-OVERFLOW`, and `APP-STATE`: Commands append in call order through exact capacity; the first over-bound `emit` stores nothing and sets the overflow marker; every later emission stores nothing; each fresh handler starts with an empty buffer and clear marker; and State mutations stand on every Fatal path. |
+| `VERIFY-CONFORMANCE` | A conformance trace suite checks every scripted Environment call against the graph, including each Command handoff. Within each Environment type, it runs every scripted trace twice and compares every value in `DET-RUN`'s list. Across the two shipped Environments it compares every Core-owned discriminant and payload in `DET-ENV`'s list; run against a bespoke Environment, the same suite is its certification (`TRUST-ENV`). It compares the expressible cross-type overlap: a failure shape only one Environment type can produce has no cross-type case. |
+| `VERIFY-JOURNAL` | A Golden-Journal suite pins every graph-required record sequence and every record byte-exactly, including each non-Fatal handler answer against its required outcome records at `classify`'s single runtime call site, and proves an encoding containing an interior newline byte is rejected as `NotAnObject` with nothing written (`RUN-GRAMMAR`, `RUN-RECORDS`, `RUN-ENFORCEMENT`, `JRN-ENCODE`). |
+| `VERIFY-FAULTS` | A fault-injection suite exercises every edge: scripted sinks for Journal failures; scripted Environments for each operation's `Err`, an `Ok` `next_event` with a decreasing timestamp, and shutdown reports carrying `Some(error)` or `{ Incomplete, None }`; and an over-emitting Application, checking the resulting `FatalCause`. For each post-`start` operation `Err`, it exercises the cross-product with a shutdown report carrying `Some(error)`, where the operation's Error remains the Fatal cause and the report's Error is discarded (A4, `RUN-FINALIZE`). It separately proves that a `start Err` performs no shutdown. |
+| `VERIFY-GRAMMAR` | A compile-fail suite proves illegal transition sequences, a skipped checkpoint, a premature `TurnCompleted(Stop)`, any caller attempt to commit `CommandsDispatched` independently of the transition that performs every handoff, an outcome disagreeing with the fixed answer, and any attempt to use `Clone`, `Copy`, or `Default` on the certificate do not compile (`RUN-GRAMMAR`, `RUN-ENFORCEMENT`); an `include!`-based fixture crate reconstructs the Engine module and attacks from its visibility position, so each failure reaches the grammar restriction rather than module privacy. |
+| `VERIFY-LIVE` | A Live lifecycle and shutdown suite proves: no `LivePort::run` begins before gate activation; failed startup cancels and joins every shell; every shell owns exactly one completion entry; a completion before shutdown remains visible at the final observation; normal return, `Err`, and test-profile unwind each make the entry `Complete` exactly once; Port code cannot reach or defer the terminal guard; shutdown raises the signal and closes fan-in while leaving the latch open; `run(Ok)` after the signal is expected and unpublished, while a typed `run(Err)` before the final close enters the report; every required Error publication precedes that shell's `Complete` transition; all waits share one deadline fixed at the initiating instant, including a duration whose addition saturates; during shutdown no join begins while an entry remains `Outstanding`; a completion concurrent with expiry and a publication concurrent with the final close are each classified by the final observation; successful shutdown returns `Quiesced` and joins every supervised thread — read as "joined", never "succeeded", under the unwinding test profile; deadline expiry without an Error returns `{ Incomplete, None }`; Error plus expiry returns `{ Incomplete, Some(error) }`; deadline expiry detaches every unjoined thread; and a post-close publication is discarded. It also verifies `LIVE-EVENTS`, `LIVE-SELECT`, `LIVE-DISPATCH`, and shipped `ENV-BOUNDS`: `offer` succeeds through exact fan-in capacity, then `Full` returns the same Event without growth, and `Closed` returns it after shutdown; time-domain exhaustion before dequeue leaves the Event queued, while successful selection stamps before dequeue and performs no fallible work afterward; `dispatch` admits the same Command exactly once when capacity remains, while a full inbox returns a typed Error with no handoff or inbox growth; fan-in and inbox occupancy never exceed configured capacity; and completion-entry and wakeup storage never grows beyond one entry per bound Slot. |
+| `VERIFY-SIM` | A Sim lifecycle and shutdown suite verifies `SIM-LIFECYCLE`, `SIM-START`, and `SIM-SHUTDOWN` with per-Port call traces: all-success startup and shutdown; startup failure at every Slot position; `Err` from `on_command` and `step` followed by shutdown; and `stop` returning `Ok` or `Err` at every Slot position. It checks that startup cleanup stops only the successfully started prefix, exactly once and in frozen Slot order; the failing and not-yet-started Ports receive no `stop`; an `Ended` Port receives no later method; shutdown stops exactly the then-`Open` Ports once in frozen Slot order while the latch remains open; every `stop` Error is published before the final close, the first wins, and later Errors do not prevent remaining calls; all-`Ok` shutdown returns `{ Quiesced, None }`; and any `stop` Error returns `{ Quiesced, Some(error) }`. It also verifies `SIM-WAKEUP`, `SIM-SELECT`, `SIM-STEPS`, `SIM-COMPLETION`, and shipped `ENV-BOUNDS`: one fixed wakeup arm per Port never grows; a rejected before-`now` arm changes nothing; later `set_next` calls replace earlier arms and `clear_next` disarms them; selection follows frozen Slot order and the persistent cursor across calls, including equal-time ties and a selected `step(None)`; exact step-budget boundaries permit the configured number of calls, while exhaustion performs no selection, time advance, arm clearing, Port call, or storage growth; and no armed Port at entry or mid-selection returns the completion Error. |
 | `VERIFY-LATCH` | An Environment conformance suite proves `ENV-LATCH`'s before-call and after-return ordering constraints; for a publication overlapping an observing call, it accepts either placement and verifies that the call's result and resulting latch state agree with it. It proves that an already-pending Error wins over an operation's own pre-commitment Error, reports the latch permanently, leaves the operation's contractual effect absent, and discards the secondary Error; for an overlapping publication and such a local failure, it exercises both permitted orderings. A `next_event` blocked without input returns and reports the Error that wakes it. The suite also proves permanent first-Error reporting, final-Command simulated Error observation, the latch remaining open through graceful shutdown, a typed shutdown Error before the final close, either consistent placement for a publication racing that close, and post-close discard. Stop-path integration proves `{ Quiesced, None }` alone can reach `Stopped`, any `Some(error)` produces `Environment(Shutdown)` even with `Incomplete`, and `{ Incomplete, None }` produces `Core(ShutdownIncomplete)`. |
 
 ## Appendix A. Invariant index
@@ -1318,6 +1328,7 @@ Navigation only.
 
 | ID | Section |
 |---|---|
+| `ASSERT-INVARIANTS`, `BOUND-LOOPS` | Reading this document |
 | `APP-CONTEXT`, `APP-EMIT`, `APP-OVERFLOW`, `APP-FUTURE`, `APP-STATE` | Application contract |
 | `PORT-STATE`, `PORT-SUMS`, `PORT-ROUTING` | Port contract |
 | `ENV-SERIAL`, `ENV-START`, `ENV-ERRORS`, `ENV-LATCH`, `ENV-TIME`, `ENV-SHUTDOWN`, `ENV-SEPARATION`, `ENV-BOUNDS` | Environment contract |
@@ -1325,6 +1336,7 @@ Navigation only.
 | `RUN-SERIAL`, `RUN-GRAMMAR`, `RUN-ENFORCEMENT`, `RUN-RECORDS`, `RUN-INDEX`, `RUN-CHECKPOINT`, `RUN-FINALIZE`, `DET-RUN`, `DET-ENV` | The Run |
 | `LIVE-THREADS`, `LIVE-EVENTS`, `LIVE-SELECT`, `LIVE-TIME`, `LIVE-DISPATCH`, `LIVE-SUPERVISION`, `LIVE-COMPLETION`, `LIVE-LIFECYCLE`, `LIVE-START`, `LIVE-SHUTDOWN` | Live Environment |
 | `SIM-STATE`, `SIM-LIFECYCLE`, `SIM-START`, `SIM-TIME`, `SIM-DISPATCH`, `SIM-WAKEUP`, `SIM-SELECT`, `SIM-STEPS`, `SIM-COMPLETION`, `SIM-SHUTDOWN` | Simulated Environment |
-| A1–A9, `ASSERT-INVARIANTS`, `BOUND-LOOPS`, `NO-UNSAFE`, `NO-UNWIND`, `BOUND-STATIC`, `BOUND-NONZERO` | Laws |
-| `VERIFY-CONFORMANCE`, `VERIFY-JOURNAL`, `VERIFY-FAULTS`, `VERIFY-GRAMMAR`, `VERIFY-LIVE`, `VERIFY-SIM`, `VERIFY-LATCH` | Obligations & verification |
+| A1–A9, `NO-UNSAFE`, `BOUND-STATIC`, `BOUND-NONZERO` | Laws |
+| `CRATE-EXPORTS` | Crate layout |
+| `VERIFY-CONTEXT`, `VERIFY-CONFORMANCE`, `VERIFY-JOURNAL`, `VERIFY-FAULTS`, `VERIFY-GRAMMAR`, `VERIFY-LIVE`, `VERIFY-SIM`, `VERIFY-LATCH` | Obligations & verification |
 | `TRUST-PURE`, `TRUST-SIM-PORT`, `TRUST-ENV`, `TRUST-BLOCKING`, `TRUST-ABORT`, `TRUST-ROUTING`, `TRUST-KEY`, `TRUST-SERIALIZE`, `TRUST-LIFECYCLE`, `TRUST-DRAIN`, `TRUST-SPAWN`, `TRUST-EXIT`, `TRUST-SIZING`, `TRUST-INBOX`, `TRUST-SINK`, `TRUST-MEMORY` (trusted) | Obligations & verification |
