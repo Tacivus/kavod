@@ -83,7 +83,7 @@ that's the row it pins.
 - [x] C10 · Context / Outcome / trait
 
 **D — Port**
-- [ ] C11 · PortContract, Never, `ports!`
+- [x] C11 · PortContract, Never, `ports!`
 - [ ] C12 · downstream macro test
 
 **E — Environment + latch**
