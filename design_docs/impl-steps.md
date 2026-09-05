@@ -1,18 +1,18 @@
 # Kavod Core — Build Steps
 
 This is the doc you work from. 57 steps, in order, each one sitting (~100–160 lines
-including tests). The reference material lives in `impl-plan-v12.md` — you only open
-it when a step says so: **the probe code** (compiling templates to copy, section 2),
-**the nine wiring decisions** (section 1a, need your approval), and the verification
-maps. The design rules themselves are in `design-v12.md`; when a test cites an ID,
+including the listed tests — rule 4's additions push past that, and should). The
+reference material lives in `impl-plan-v12.md` — you only open it when a step says
+so: **the probe code** (compiling templates to copy, section 2), **the nine wiring
+decisions** (section 1a, need your approval), and the verification maps. The design rules themselves are in `design-v12.md`; when a test cites an ID,
 that's the row it pins.
 
 ## The rules — all of them
 
 1. **Work in order.** A step is done when `cargo test` and
-   `cargo clippy --all-targets -- -D warnings` are green and the step's listed tests
-   pass. Then tick the box and stop or continue — the crate is always in a finished
-   state between steps.
+   `cargo clippy --all-targets -- -D warnings` are green and the step's tests — the
+   listed ones and the ones rule 4 asks you to add — pass. Then tick the box and
+   stop or continue — the crate is always in a finished state between steps.
 2. **Code is final.** Later steps *add* to files. If you feel the need to rewrite an
    earlier step's code, stop — something's off; check the plan doc's risk list.
 3. **Every test** goes in the file it tests, inside `#[cfg(test)] mod tests`, in a
@@ -44,12 +44,24 @@ that's the row it pins.
    is the `Design Doc:` line, verbatim; the `Invariant:` sentence is yours to write.
    A test listed without a citation gets the `Invariant:` line alone. Files under
    `tests/` are cross-file suites — same shape, own file.
-4. **New src file → two lines in `lib.rs`:** `mod x;` plus `pub use` for its public
+4. **The listed tests are a floor, not a target.** They pin what the design says;
+   they are not the measure of what this code has to survive. Write every other test
+   that pins real behavior in what the step just built — boundaries at zero, one,
+   capacity and one past it; every arm of every enum; every error path; every order
+   two operations can happen in; and what still holds after a failure. The goal is a
+   system that survives contact with reality, not one that matches a document. Three
+   things keep this from sprawling: search the later steps before adding, and skip
+   anything already listed there; stay inside the subject the step is building; and
+   give an unlisted test the `Invariant:` line alone, since most of them pin behavior
+   no design row names. If one of these tests fails, that is the point of writing it
+   — fix the step's own code, or, when the failure contradicts the design or an
+   earlier step, stop and report it.
+5. **New src file → two lines in `lib.rs`:** `mod x;` plus `pub use` for its public
    items (everything public is re-exported flat at the crate root; module files stay
    private). Not repeated in each step.
-5. **Assertions are always-on** — `assert!`/`expect`, never `debug_assert!`, panic
+6. **Assertions are always-on** — `assert!`/`expect`, never `debug_assert!`, panic
    message naming the invariant (like the example above).
-6. **⛔ steps** need the nine wiring decisions approved first (`impl-plan-v12.md`
+7. **⛔ steps** need the nine wiring decisions approved first (`impl-plan-v12.md`
    §1a). Every unmarked step can start right now.
 
 ## Progress
