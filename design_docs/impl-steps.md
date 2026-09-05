@@ -80,7 +80,7 @@ that's the row it pins.
 - [x] C9 · fault matrix (tests only)
 
 **C — Application**
-- [ ] C10 · Context / Outcome / trait
+- [x] C10 · Context / Outcome / trait
 
 **D — Port**
 - [ ] C11 · PortContract, Never, `ports!`
