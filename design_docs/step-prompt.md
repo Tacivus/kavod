@@ -125,7 +125,8 @@ Files touched; the listed tests by name; the hardening tests by name, each with 
 edge case it covers, called out separately; the result of both commands; and anything
 in the step's text that turned out to be wrong, ambiguous, or impossible as written.
 
-{NOTES}
+Notes: 
+
 ````
 
 ## Review
@@ -167,7 +168,14 @@ Answer each of these with the evidence that settles it:
    `debug_assert!`?
 8. Run `cargo test` and `cargo clippy --all-targets -- -D warnings` yourself.
 
-Finish with PASS, or a numbered list of what must change and why. Don't edit the
-code. Don't suggest improvements the step didn't ask for — the question is whether
-this step's goals are met, not whether the code could be nicer.
+Finish with PASS, or a numbered list of what must change and why.
+
+On PASS, and only on PASS, print the commit message last, on a line of its own:
+`{STEP}: ` followed by the step's heading text with the line count dropped and the
+first letter lowercased. C1's heading, `### C1 · Crate skeleton and the time types
+(~120 lines)`, gives `C1: crate skeleton and the time types`.
+
+Don't edit the code and don't commit — the message is for me to use. Don't suggest
+improvements the step didn't ask for either; the question is whether this step's
+goals are met, not whether the code could be nicer.
 ````

@@ -68,7 +68,7 @@ that's the row it pins.
 
 **A — Foundations**
 - [x] C1 · time types
-- [ ] C2 · bounded buffer
+- [x] C2 · bounded buffer
 - [ ] C3 · buffer as `io::Write`
 
 **B — Journal**
