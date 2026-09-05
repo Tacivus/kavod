@@ -88,7 +88,7 @@ that's the row it pins.
 
 **E — Environment + latch**
 - [x] C13 · Environment trait
-- [ ] C14 · latch
+- [x] C14 · latch
 
 **F — Record grammar**
 - [ ] C15 · engine skeleton + exit types
