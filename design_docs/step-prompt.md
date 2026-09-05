@@ -1,4 +1,9 @@
-# Step prompt
+# Step prompts
+
+Two templates: one to build a step, one for a second session to review it. Replace
+`{STEP}` in either.
+
+## Build
 
 One template, every step. Replace `{STEP}` with the step ID (`C4`) and `{NOTES}`
 with anything specific to today, or delete that line. Everything conditional is
@@ -122,4 +127,46 @@ edge case it covers, called out separately; the result of both commands; and any
 in the step's text that turned out to be wrong, ambiguous, or impossible as written.
 
 {NOTES}
+````
+
+## Review
+
+For a fresh session that did not write the code. It reports; it doesn't fix.
+
+````
+Review step {STEP} of the Kavod core build. You didn't write it, and the
+implementer's own report is not evidence — check everything yourself.
+
+Look at the change, then the spec:
+
+    git show $(git log -1 --format=%H --grep "^{STEP}:")
+
+If that comes back empty the step isn't committed yet — read `git diff` and
+`git status` instead.
+
+- The `### {STEP} ·` block in `design_docs/impl-steps.md`, the `## Part` preamble
+  above it, and the rules block at the top of that file.
+- Every ID the step's tests cite: `grep -n '`THE-ID`' design_docs/design-v12.md` and
+  read the row yourself.
+
+Answer each of these with the evidence that settles it:
+
+1. Does every listed test exist under the exact name given, and pass?
+2. Does each test actually pin the row it cites? Read the row, then the test body. A
+   test that passes without exercising the row's behavior is the main thing to catch.
+3. Is each `Invariant:` sentence true, plain English, and free of IDs — would someone
+   who has never opened the design doc understand it?
+4. Did anything change outside the files the step says to Create or Edit? Was any
+   earlier step's code rewritten rather than extended?
+5. Are the unlisted hardening tests real coverage — boundaries, error paths,
+   orderings, state after failure — or restatements of the listed ones?
+6. What edge case in this step's code is still untested? Name it concretely, or say
+   none.
+7. Are the assertions always-on, with messages naming the invariant they protect? Any
+   `debug_assert!`?
+8. Run `cargo test` and `cargo clippy --all-targets -- -D warnings` yourself.
+
+Finish with PASS, or a numbered list of what must change and why. Don't edit the
+code. Don't suggest improvements the step didn't ask for — the question is whether
+this step's goals are met, not whether the code could be nicer.
 ````
