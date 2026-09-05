@@ -72,7 +72,7 @@ that's the row it pins.
 - [x] C3 · buffer as `io::Write`
 
 **B — Journal**
-- [ ] C4 · types + construction
+- [x] C4 · types + construction
 - [ ] C5 · bounded encode
 - [ ] C6 · classify + newline
 - [ ] C7 · sink write loop
