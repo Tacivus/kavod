@@ -84,7 +84,7 @@ that's the row it pins.
 
 **D — Port**
 - [x] C11 · PortContract, Never, `ports!`
-- [ ] C12 · downstream macro test
+- [x] C12 · downstream macro test
 
 **E — Environment + latch**
 - [ ] C13 · Environment trait
