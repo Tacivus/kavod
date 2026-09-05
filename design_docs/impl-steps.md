@@ -87,7 +87,7 @@ that's the row it pins.
 - [x] C12 · downstream macro test
 
 **E — Environment + latch**
-- [ ] C13 · Environment trait
+- [x] C13 · Environment trait
 - [ ] C14 · latch
 
 **F — Record grammar**
