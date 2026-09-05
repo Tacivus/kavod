@@ -74,7 +74,7 @@ that's the row it pins.
 **B — Journal**
 - [x] C4 · types + construction
 - [x] C5 · bounded encode
-- [ ] C6 · classify + newline
+- [x] C6 · classify + newline
 - [ ] C7 · sink write loop
 - [ ] C8 · commit + poison
 - [ ] C9 · fault matrix (tests only)

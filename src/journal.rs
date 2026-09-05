@@ -81,11 +81,53 @@ impl<W: io::Write> Journal<W> {
             }
         })
     }
+
+    #[allow(dead_code, reason = "used by Journal::commit in a later build step")]
+    fn encode_line<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError> {
+        self.encode_raw(record)?;
+
+        let encoded = self.region.as_slice();
+        if encoded.first() != Some(&b'{')
+            || encoded.last() != Some(&b'}')
+            || encoded.contains(&b'\n')
+        {
+            return Err(JournalError::NotAnObject);
+        }
+
+        self.region
+            .try_push(b'\n')
+            .map_err(|_| JournalError::BoundExceeded)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct LineCountingWriter {
+        write_calls: usize,
+        flush_calls: usize,
+    }
+
+    impl io::Write for LineCountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.write_calls += 1;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_calls += 1;
+            Ok(())
+        }
+    }
+
+    fn line_journal(max_record_bytes: usize) -> Journal<LineCountingWriter> {
+        let max_record_bytes = NonZeroUsize::new(max_record_bytes)
+            .expect("a line-encoding test bound must be nonzero");
+        Journal::new(LineCountingWriter::default(), max_record_bytes)
+            .expect("a small line-encoding region must be reservable")
+    }
 
     mod journal_construction {
         use super::*;
@@ -411,6 +453,443 @@ mod tests {
             assert!(
                 !journal.is_poisoned(),
                 "recovery after a serializer failure must leave the Journal unpoisoned"
+            );
+        }
+    }
+
+    mod journal_object_validation {
+        use super::*;
+        use serde_json::value::RawValue;
+
+        /// Invariant: a valid JSON object is buffered as exactly one object followed
+        /// by exactly one newline, without touching the sink.
+        /// Design Doc: JRN-FORMAT
+        #[test]
+        fn object_plus_newline_is_the_encoded_line() {
+            let encoded_object = br#"{"ready":true}"#;
+            let mut journal = line_journal(encoded_object.len());
+
+            journal
+                .encode_line(&serde_json::json!({"ready": true}))
+                .expect("a fitting single-line object must encode");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                br#"{"ready":true}
+"#,
+                "the encoded line must contain exactly the object and its newline"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "line encoding must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "line encoding must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "successful line encoding must not poison the Journal"
+            );
+        }
+
+        /// Invariant: an otherwise valid JSON object containing a literal newline
+        /// byte is rejected before the sink is touched.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn interior_newline_is_not_an_object() {
+            let raw = RawValue::from_string(String::from("{\"a\":\n1}"))
+                .expect("JSON permits a literal newline between tokens");
+            let mut journal = line_journal(raw.get().len());
+
+            let error = journal
+                .encode_line(&raw)
+                .expect_err("an object with a literal newline must be rejected");
+
+            assert!(
+                matches!(error, JournalError::NotAnObject),
+                "a literal newline in encoded bytes must return NotAnObject"
+            );
+            assert_eq!(
+                journal.region.as_slice(),
+                raw.get().as_bytes(),
+                "newline rejection must leave the classified bytes without appending a newline"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "newline rejection must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "newline rejection must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "newline rejection must not poison the Journal"
+            );
+        }
+
+        /// Invariant: a completed top-level JSON value that is not an object is
+        /// rejected even when it fills all available line-encoding space.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn non_object_top_level_is_rejected() {
+            let mut journal = line_journal(1);
+
+            let error = journal
+                .encode_line(&42_u8)
+                .expect_err("a top-level number must be rejected");
+
+            assert!(
+                matches!(error, JournalError::NotAnObject),
+                "a full non-object must return NotAnObject before newline capacity is checked"
+            );
+            assert_eq!(
+                journal.region.as_slice(),
+                b"42",
+                "non-object rejection must not append a newline"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "non-object rejection must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "non-object rejection must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "non-object rejection must not poison the Journal"
+            );
+        }
+
+        /// Invariant: nulls, booleans, numbers, strings, and arrays are all rejected
+        /// because none is a top-level JSON object.
+        #[test]
+        fn every_non_object_json_kind_is_rejected() {
+            let mut journal = line_journal(32);
+            let non_objects = [
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(7),
+                serde_json::json!("text"),
+                serde_json::json!([1, 2]),
+            ];
+
+            for value in non_objects {
+                let error = journal
+                    .encode_line(&value)
+                    .expect_err("every non-object JSON kind must be rejected");
+                assert!(
+                    matches!(error, JournalError::NotAnObject),
+                    "every non-object JSON kind must return NotAnObject"
+                );
+            }
+
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "repeated non-object rejection must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "repeated non-object rejection must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "repeated non-object rejection must not poison the Journal"
+            );
+        }
+
+        /// Invariant: a newline in an ordinary string is escaped in the JSON bytes
+        /// and therefore remains a valid single-line object.
+        #[test]
+        fn ordinary_string_newline_is_escaped_and_allowed() {
+            let expected_object = br#"{"message":"first\nsecond"}"#;
+            let mut journal = line_journal(expected_object.len());
+
+            journal
+                .encode_line(&serde_json::json!({"message": "first\nsecond"}))
+                .expect("an escaped string newline must remain a valid object");
+
+            let mut expected_line = expected_object.to_vec();
+            expected_line.push(b'\n');
+            assert_eq!(
+                journal.region.as_slice(),
+                expected_line,
+                "an ordinary string newline must be represented by escaped bytes"
+            );
+            assert!(
+                !journal.region.as_slice()[..expected_object.len()].contains(&b'\n'),
+                "the encoded object must contain no literal newline byte"
+            );
+        }
+
+        /// Invariant: rejecting an object with a literal newline leaves the Journal
+        /// able to encode a later valid object in the same bounded region.
+        #[test]
+        fn valid_object_encodes_after_rejected_non_object() {
+            let raw = RawValue::from_string(String::from("{\"a\":\n1}"))
+                .expect("JSON permits a literal newline between tokens");
+            let mut journal = line_journal(raw.get().len());
+
+            let error = journal
+                .encode_line(&raw)
+                .expect_err("the literal-newline object must be rejected");
+            assert!(
+                matches!(error, JournalError::NotAnObject),
+                "the recovery setup must reach NotAnObject"
+            );
+            journal
+                .encode_line(&serde_json::json!({}))
+                .expect("a valid object must encode after classification failure");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}\n",
+                "recovery must replace the rejected bytes with the later valid line"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "classification failure and recovery must leave the sink untouched"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "classification failure and recovery must leave the Journal unpoisoned"
+            );
+        }
+    }
+
+    mod journal_newline_reservation {
+        use super::*;
+        use serde_json::value::RawValue;
+
+        /// Invariant: a valid object that fills the complete encode region is
+        /// rejected because no reserved byte remains for its newline.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn object_of_region_size_has_no_newline_room() {
+            let mut journal = line_journal(1);
+
+            let error = journal
+                .encode_line(&serde_json::json!({}))
+                .expect_err("an object filling the region must leave no newline room");
+
+            assert!(
+                matches!(error, JournalError::BoundExceeded),
+                "an object with no newline room must return BoundExceeded"
+            );
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}",
+                "a failed newline append must preserve the complete object bytes"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "a missing newline slot must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "a missing newline slot must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a missing newline slot must not poison the Journal"
+            );
+        }
+
+        /// Invariant: an object exactly at the configured record-byte maximum fits
+        /// together with its separately reserved newline byte.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn encode_at_exactly_max_bytes_completes() {
+            let mut journal = line_journal(2);
+
+            journal
+                .encode_line(&serde_json::json!({}))
+                .expect("an object exactly at the configured maximum must fit");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}\n",
+                "an exact-maximum object must retain the separately reserved newline"
+            );
+            assert_eq!(
+                journal.region.len(),
+                journal.region.capacity(),
+                "an exact-maximum object plus newline must fill the encode region"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "exact-boundary line encoding must leave the sink untouched"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "exact-boundary line encoding must leave the Journal unpoisoned"
+            );
+        }
+
+        /// Invariant: encoding a line after a prior line filled the bounded region
+        /// replaces the prior bytes and succeeds without growing the region.
+        #[test]
+        fn consecutive_exact_maximum_lines_reuse_full_region() {
+            let mut journal = line_journal(7);
+            let region_capacity = journal.region.capacity();
+
+            journal
+                .encode_line(&serde_json::json!({"a": 0}))
+                .expect("the first exact-maximum object must encode");
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{\"a\":0}\n",
+                "the first exact-maximum line must fill the region"
+            );
+            assert_eq!(
+                journal.region.len(),
+                region_capacity,
+                "the first exact-maximum line must leave the region full"
+            );
+
+            journal
+                .encode_line(&serde_json::json!({"b": 1}))
+                .expect("the second exact-maximum object must encode after a full line");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{\"b\":1}\n",
+                "the second line must replace every byte of the first line"
+            );
+            assert_eq!(
+                journal.region.capacity(),
+                region_capacity,
+                "consecutive full lines must not grow the bounded region"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "consecutive line encoding must leave the sink untouched"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "consecutive successful line encodes must leave the Journal unpoisoned"
+            );
+        }
+
+        /// Invariant: failing to append a newline leaves the bounded region reusable
+        /// for a later object whose object bytes fit within the configured maximum.
+        #[test]
+        fn valid_object_encodes_after_missing_newline_room() {
+            let region_sized_object = RawValue::from_string(String::from("{ }"))
+                .expect("an object may contain insignificant interior whitespace");
+            let mut journal = line_journal(2);
+
+            let error = journal
+                .encode_line(&region_sized_object)
+                .expect_err("a three-byte object must fill the three-byte region");
+            assert!(
+                matches!(error, JournalError::BoundExceeded),
+                "the recovery setup must fail while appending the newline"
+            );
+            journal
+                .encode_line(&serde_json::json!({}))
+                .expect("a maximum-sized object must encode after newline failure");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}\n",
+                "recovery must replace the prior object with the later valid line"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "newline failure and recovery must leave the sink untouched"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "newline failure and recovery must leave the Journal unpoisoned"
+            );
+        }
+    }
+
+    mod journal_line_errors {
+        use super::*;
+
+        struct LineAlwaysFails;
+
+        impl Serialize for LineAlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "intentional line serializer failure",
+                ))
+            }
+        }
+
+        /// Invariant: a record that exceeds the raw encode region reports the bound
+        /// failure without touching the sink and does not prevent a later valid line.
+        #[test]
+        fn raw_bound_failure_leaves_journal_reusable() {
+            let mut journal = line_journal(2);
+
+            let error = journal
+                .encode_line(&serde_json::json!({"oversized": true}))
+                .expect_err("the oversized object must exceed the raw encode region");
+            assert!(
+                matches!(error, JournalError::BoundExceeded),
+                "a raw encode overflow must propagate BoundExceeded"
+            );
+            journal
+                .encode_line(&serde_json::json!({}))
+                .expect("a valid object must encode after a raw bound failure");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}\n",
+                "recovery must clear the oversized prefix before encoding the valid line"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "raw bound failure and recovery must leave the sink untouched"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "raw bound failure and recovery must not flush the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "raw bound failure and recovery must leave the Journal unpoisoned"
+            );
+        }
+
+        /// Invariant: a serializer error is returned without touching the sink and
+        /// leaves the bounded region able to encode a later valid line.
+        #[test]
+        fn serializer_failure_leaves_journal_reusable() {
+            let mut journal = line_journal(2);
+
+            let error = journal
+                .encode_line(&LineAlwaysFails)
+                .expect_err("the deliberately failing serializer must fail");
+            assert!(
+                matches!(error, JournalError::Encode(_)),
+                "a serializer-originated line failure must propagate Encode"
+            );
+            journal
+                .encode_line(&serde_json::json!({}))
+                .expect("a valid object must encode after a serializer failure");
+
+            assert_eq!(
+                journal.region.as_slice(),
+                b"{}\n",
+                "recovery must clear serializer-failure state before encoding the valid line"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "serializer failure and recovery must leave the sink untouched"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "serializer failure and recovery must not flush the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "serializer failure and recovery must leave the Journal unpoisoned"
             );
         }
     }
