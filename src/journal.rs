@@ -198,7 +198,7 @@ mod tests {
         Flush(io::Result<()>),
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     enum SinkCall {
         Write(Vec<u8>),
         Flush,
@@ -207,6 +207,8 @@ mod tests {
     struct ScriptedSink {
         results: VecDeque<ScriptedResult>,
         calls: Vec<SinkCall>,
+        accepted_bytes: Vec<u8>,
+        committed_len: usize,
     }
 
     impl ScriptedSink {
@@ -214,14 +216,24 @@ mod tests {
             Self {
                 results: results.into_iter().collect(),
                 calls: Vec::new(),
+                accepted_bytes: Vec::new(),
+                committed_len: 0,
             }
+        }
+
+        fn committed_bytes(&self) -> &[u8] {
+            &self.accepted_bytes[..self.committed_len]
+        }
+
+        fn uncertain_suffix(&self) -> &[u8] {
+            &self.accepted_bytes[self.committed_len..]
         }
     }
 
     impl io::Write for ScriptedSink {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.calls.push(SinkCall::Write(bytes.to_vec()));
-            match self
+            let result = match self
                 .results
                 .pop_front()
                 .expect("every scripted sink call must have a result")
@@ -230,12 +242,22 @@ mod tests {
                 ScriptedResult::Flush(_) => {
                     panic!("a scripted write call must consume a write result")
                 }
+            };
+
+            match result {
+                Ok(count) => {
+                    if count <= bytes.len() {
+                        self.accepted_bytes.extend_from_slice(&bytes[..count]);
+                    }
+                    Ok(count)
+                }
+                Err(error) => Err(error),
             }
         }
 
         fn flush(&mut self) -> io::Result<()> {
             self.calls.push(SinkCall::Flush);
-            match self
+            let result = match self
                 .results
                 .pop_front()
                 .expect("every scripted sink call must have a result")
@@ -244,17 +266,32 @@ mod tests {
                 ScriptedResult::Write(_) => {
                     panic!("a scripted flush call must consume a flush result")
                 }
+            };
+
+            match result {
+                Ok(()) => {
+                    self.committed_len = self.accepted_bytes.len();
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
         }
+    }
+
+    fn scripted_journal(
+        max_record_bytes: usize,
+        results: impl IntoIterator<Item = ScriptedResult>,
+    ) -> Journal<ScriptedSink> {
+        let max_record_bytes =
+            NonZeroUsize::new(max_record_bytes).expect("a scripted Journal bound must be nonzero");
+        Journal::new(ScriptedSink::new(results), max_record_bytes)
+            .expect("a small scripted Journal region must be reservable")
     }
 
     fn scripted_line_journal(
         results: impl IntoIterator<Item = ScriptedResult>,
     ) -> Journal<ScriptedSink> {
-        let max_record_bytes =
-            NonZeroUsize::new(2).expect("two must be a valid nonzero record bound");
-        let mut journal = Journal::new(ScriptedSink::new(results), max_record_bytes)
-            .expect("the minimum object line region must be reservable");
+        let mut journal = scripted_journal(2, results);
         journal
             .encode_line(&serde_json::json!({}))
             .expect("the minimum JSON object must fit its exact record bound");
@@ -1565,6 +1602,527 @@ mod tests {
             );
 
             let _ = journal.commit(&serde_json::json!({}));
+        }
+    }
+
+    mod journal_commit_boundaries {
+        use super::*;
+
+        /// Invariant: bytes from a record remain outside the committed prefix until
+        /// its flush succeeds, even when the complete line reached the sink.
+        /// Design Doc: JRN-COMMIT
+        #[test]
+        fn only_successful_flush_advances_the_committed_boundary() {
+            let mut journal = scripted_journal(
+                7,
+                [
+                    ScriptedResult::Write(Ok(b"{\"a\":1}\n".len())),
+                    ScriptedResult::Flush(Ok(())),
+                    ScriptedResult::Write(Ok(b"{\"b\":2}\n".len())),
+                    ScriptedResult::Flush(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "scripted second flush failure",
+                    ))),
+                ],
+            );
+
+            assert!(
+                journal.writer.committed_bytes().is_empty(),
+                "a fresh sink must have an empty committed prefix"
+            );
+            journal
+                .commit(&serde_json::json!({"a": 1}))
+                .expect("the first successful flush must commit its record");
+            assert_eq!(
+                journal.writer.committed_bytes(),
+                b"{\"a\":1}\n",
+                "a successful first flush must advance the boundary through its line"
+            );
+            assert!(
+                journal.writer.uncertain_suffix().is_empty(),
+                "a successful first flush must leave no uncertain suffix"
+            );
+
+            let error = journal
+                .commit(&serde_json::json!({"b": 2}))
+                .expect_err("the second record must remain uncommitted when its flush fails");
+
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Flush,
+                        ..
+                    }
+                ),
+                "a failed second flush must return a Flush sink error"
+            );
+            assert_eq!(
+                journal.writer.accepted_bytes, b"{\"a\":1}\n{\"b\":2}\n",
+                "both complete lines must remain visible in the sink's accepted bytes"
+            );
+            assert_eq!(
+                journal.writer.committed_bytes(),
+                b"{\"a\":1}\n",
+                "a failed second flush must preserve the prior committed boundary"
+            );
+            assert_eq!(
+                journal.writer.uncertain_suffix(),
+                b"{\"b\":2}\n",
+                "the complete line preceding a failed flush must be an uncertain suffix"
+            );
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{\"a\":1}\n".to_vec()),
+                    SinkCall::Flush,
+                    SinkCall::Write(b"{\"b\":2}\n".to_vec()),
+                    SinkCall::Flush,
+                ],
+                "each record must be written before its corresponding flush"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "the boundary trace must consume exactly its four scripted results"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "the failed second flush must poison the Journal"
+            );
+        }
+
+        /// Invariant: a write failure in a later record cannot move the boundary
+        /// past records whose flushes previously succeeded.
+        #[test]
+        fn partial_second_write_failure_preserves_the_prior_boundary() {
+            let mut journal = scripted_journal(
+                7,
+                [
+                    ScriptedResult::Write(Ok(b"{\"a\":1}\n".len())),
+                    ScriptedResult::Flush(Ok(())),
+                    ScriptedResult::Write(Ok(b"{\"b\":2}".len())),
+                    ScriptedResult::Write(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "scripted final-byte failure",
+                    ))),
+                ],
+            );
+            journal
+                .commit(&serde_json::json!({"a": 1}))
+                .expect("the first record must establish a committed boundary");
+
+            let error = journal
+                .commit(&serde_json::json!({"b": 2}))
+                .expect_err("the final byte of the second record must fail");
+
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        ..
+                    }
+                ),
+                "a final-byte write failure must remain classified as Write"
+            );
+            assert_eq!(
+                journal.writer.committed_bytes(),
+                b"{\"a\":1}\n",
+                "a partial later write must not move the prior committed boundary"
+            );
+            assert_eq!(
+                journal.writer.uncertain_suffix(),
+                b"{\"b\":2}",
+                "the accepted portion of the failed record must remain uncertain"
+            );
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{\"a\":1}\n".to_vec()),
+                    SinkCall::Flush,
+                    SinkCall::Write(b"{\"b\":2}\n".to_vec()),
+                    SinkCall::Write(b"\n".to_vec()),
+                ],
+                "the failed record must stop after attempting its final remaining byte"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "the partial second-record failure must poison the Journal"
+            );
+        }
+
+        /// Invariant: a later record rejected by its first write leaves both the
+        /// prior committed prefix intact and the uncertain suffix empty.
+        #[test]
+        fn first_write_failure_after_commit_leaves_no_uncertain_suffix() {
+            let mut journal = scripted_journal(
+                7,
+                [
+                    ScriptedResult::Write(Ok(b"{\"a\":1}\n".len())),
+                    ScriptedResult::Flush(Ok(())),
+                    ScriptedResult::Write(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "scripted clean second-record failure",
+                    ))),
+                ],
+            );
+            journal
+                .commit(&serde_json::json!({"a": 1}))
+                .expect("the first record must establish a committed boundary");
+
+            let error = journal
+                .commit(&serde_json::json!({"b": 2}))
+                .expect_err("the first write of the second record must fail");
+
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        ..
+                    }
+                ),
+                "a clean second-record failure must remain classified as Write"
+            );
+            assert_eq!(
+                journal.writer.accepted_bytes,
+                b"{\"a\":1}\n",
+                "a failed first write must contribute no bytes after the prior record"
+            );
+            assert_eq!(
+                journal.writer.committed_bytes(),
+                b"{\"a\":1}\n",
+                "a failed first write must preserve the prior committed boundary"
+            );
+            assert!(
+                journal.writer.uncertain_suffix().is_empty(),
+                "a failed first write must leave no uncertain suffix"
+            );
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{\"a\":1}\n".to_vec()),
+                    SinkCall::Flush,
+                    SinkCall::Write(b"{\"b\":2}\n".to_vec()),
+                ],
+                "the clean failure must stop after the second record's first write call"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "the clean-failure trace must consume exactly its three scripted results"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "the clean second-record failure must poison the Journal"
+            );
+        }
+
+        /// Invariant: completing a line through short writes does not commit it
+        /// when the immediately following flush fails.
+        #[test]
+        fn flush_failure_after_short_writes_leaves_a_complete_uncertain_line() {
+            let mut journal = scripted_journal(
+                2,
+                [
+                    ScriptedResult::Write(Ok(1)),
+                    ScriptedResult::Write(Ok(1)),
+                    ScriptedResult::Write(Ok(1)),
+                    ScriptedResult::Flush(Err(io::Error::other(
+                        "scripted flush after short writes",
+                    ))),
+                ],
+            );
+
+            let error = journal
+                .commit(&serde_json::json!({}))
+                .expect_err("the flush after complete short writes must fail");
+
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Flush,
+                        ..
+                    }
+                ),
+                "a flush failure after short writes must remain classified as Flush"
+            );
+            assert!(
+                journal.writer.committed_bytes().is_empty(),
+                "a first-record flush failure must leave the committed boundary at zero"
+            );
+            assert_eq!(
+                journal.writer.uncertain_suffix(),
+                b"{}\n",
+                "the complete short-written line must remain an uncertain suffix"
+            );
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{}\n".to_vec()),
+                    SinkCall::Write(b"}\n".to_vec()),
+                    SinkCall::Write(b"\n".to_vec()),
+                    SinkCall::Flush,
+                ],
+                "flush must occur once and only after every short write completes"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "the short-write flush failure must consume its complete script"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "the failed flush after short writes must poison the Journal"
+            );
+        }
+    }
+
+    mod journal_sink_matrix {
+        use super::*;
+
+        struct FailureCase {
+            name: &'static str,
+            results: Vec<ScriptedResult>,
+            expected_operation: SinkOperation,
+            expected_kind: io::ErrorKind,
+            expected_calls: Vec<SinkCall>,
+            expected_accepted: Option<&'static [u8]>,
+        }
+
+        /// Invariant: every possible write or flush failure permanently poisons the
+        /// Journal, and a later commit reaches neither operation a second time.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn every_sink_failure_poisons_exactly_once() {
+            let full_line = SinkCall::Write(b"{}\n".to_vec());
+            let remaining_after_one = SinkCall::Write(b"}\n".to_vec());
+            let cases = [
+                FailureCase {
+                    name: "returned write error",
+                    results: vec![
+                        ScriptedResult::Write(Err(io::Error::other("scripted write error"))),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::Other,
+                    expected_calls: vec![full_line.clone()],
+                    expected_accepted: Some(b""),
+                },
+                FailureCase {
+                    name: "interrupted write",
+                    results: vec![
+                        ScriptedResult::Write(Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "scripted interruption",
+                        ))),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::Interrupted,
+                    expected_calls: vec![full_line.clone()],
+                    expected_accepted: Some(b""),
+                },
+                FailureCase {
+                    name: "zero-progress write",
+                    results: vec![ScriptedResult::Write(Ok(0)), ScriptedResult::Write(Ok(3))],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::WriteZero,
+                    expected_calls: vec![full_line.clone()],
+                    expected_accepted: Some(b""),
+                },
+                FailureCase {
+                    name: "over-reported first write",
+                    results: vec![ScriptedResult::Write(Ok(4)), ScriptedResult::Write(Ok(3))],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::InvalidData,
+                    expected_calls: vec![full_line.clone()],
+                    expected_accepted: None,
+                },
+                FailureCase {
+                    name: "error after a partial write",
+                    results: vec![
+                        ScriptedResult::Write(Ok(1)),
+                        ScriptedResult::Write(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "scripted error after progress",
+                        ))),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::BrokenPipe,
+                    expected_calls: vec![full_line.clone(), remaining_after_one.clone()],
+                    expected_accepted: Some(b"{"),
+                },
+                FailureCase {
+                    name: "zero progress after a partial write",
+                    results: vec![
+                        ScriptedResult::Write(Ok(1)),
+                        ScriptedResult::Write(Ok(0)),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::WriteZero,
+                    expected_calls: vec![full_line.clone(), remaining_after_one.clone()],
+                    expected_accepted: Some(b"{"),
+                },
+                FailureCase {
+                    name: "over-report after a partial write",
+                    results: vec![
+                        ScriptedResult::Write(Ok(1)),
+                        ScriptedResult::Write(Ok(3)),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Write,
+                    expected_kind: io::ErrorKind::InvalidData,
+                    expected_calls: vec![full_line.clone(), remaining_after_one.clone()],
+                    expected_accepted: None,
+                },
+                FailureCase {
+                    name: "returned flush error",
+                    results: vec![
+                        ScriptedResult::Write(Ok(3)),
+                        ScriptedResult::Flush(Err(io::Error::other("scripted flush error"))),
+                        ScriptedResult::Write(Ok(3)),
+                    ],
+                    expected_operation: SinkOperation::Flush,
+                    expected_kind: io::ErrorKind::Other,
+                    expected_calls: vec![full_line, SinkCall::Flush],
+                    expected_accepted: Some(b"{}\n"),
+                },
+            ];
+
+            for case in cases {
+                let mut journal = scripted_journal(2, case.results);
+
+                let error = journal
+                    .commit(&serde_json::json!({}))
+                    .expect_err("every scripted sink failure must fail its commit");
+                match error {
+                    JournalError::Sink { operation, error } => {
+                        assert_eq!(
+                            operation, case.expected_operation,
+                            "{} must preserve the failing sink operation",
+                            case.name
+                        );
+                        assert_eq!(
+                            error.kind(),
+                            case.expected_kind,
+                            "{} must preserve or assign the required error kind",
+                            case.name
+                        );
+                    }
+                    _ => panic!("{} must return a typed sink error", case.name),
+                }
+                assert!(
+                    journal.is_poisoned(),
+                    "{} must poison the Journal before returning",
+                    case.name
+                );
+                assert_eq!(
+                    journal.writer.calls, case.expected_calls,
+                    "{} must stop at exactly the failing sink call",
+                    case.name
+                );
+                if let Some(expected_accepted) = case.expected_accepted {
+                    assert_eq!(
+                        journal.writer.accepted_bytes, expected_accepted,
+                        "{} must retain exactly the valid reported write prefixes",
+                        case.name
+                    );
+                }
+                assert_eq!(
+                    journal.writer.results.len(),
+                    1,
+                    "{} must leave the post-failure sentinel result untouched",
+                    case.name
+                );
+
+                let accepted_before_retry = journal.writer.accepted_bytes.clone();
+                let retry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = journal.commit(&serde_json::json!({}));
+                }));
+
+                assert!(
+                    retry.is_err(),
+                    "{} must make a later commit fail at the poison precondition",
+                    case.name
+                );
+                assert_eq!(
+                    journal.writer.calls, case.expected_calls,
+                    "{} must permit no sink call after poisoning",
+                    case.name
+                );
+                assert_eq!(
+                    journal.writer.accepted_bytes, accepted_before_retry,
+                    "{} must accept no additional bytes after poisoning",
+                    case.name
+                );
+                assert_eq!(
+                    journal.writer.results.len(),
+                    1,
+                    "{} must consume no scripted result after poisoning",
+                    case.name
+                );
+            }
+        }
+
+        /// Invariant: the sink receives each complete encoded line followed by only
+        /// its unwritten suffixes, in record order, with a flush after each line.
+        /// Design Doc: JRN-SINK, TRUST-SINK
+        #[test]
+        fn the_sink_receives_exact_bytes_in_call_order() {
+            let mut journal = scripted_journal(
+                7,
+                [
+                    ScriptedResult::Write(Ok(2)),
+                    ScriptedResult::Write(Ok(3)),
+                    ScriptedResult::Write(Ok(3)),
+                    ScriptedResult::Flush(Ok(())),
+                    ScriptedResult::Write(Ok(8)),
+                    ScriptedResult::Flush(Ok(())),
+                ],
+            );
+
+            journal
+                .commit(&serde_json::json!({"a": 1}))
+                .expect("short writes followed by a flush must commit the first record");
+            journal
+                .commit(&serde_json::json!({"b": 2}))
+                .expect("a complete write followed by a flush must commit the second record");
+
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{\"a\":1}\n".to_vec()),
+                    SinkCall::Write(b"a\":1}\n".to_vec()),
+                    SinkCall::Write(b"1}\n".to_vec()),
+                    SinkCall::Flush,
+                    SinkCall::Write(b"{\"b\":2}\n".to_vec()),
+                    SinkCall::Flush,
+                ],
+                "the sink must receive exact unwritten suffixes and flushes in call order"
+            );
+            assert_eq!(
+                journal.writer.accepted_bytes, b"{\"a\":1}\n{\"b\":2}\n",
+                "the memory sink must store exactly every valid reported prefix"
+            );
+            assert_eq!(
+                journal.writer.committed_bytes(),
+                b"{\"a\":1}\n{\"b\":2}\n",
+                "both successfully flushed lines must lie within the committed boundary"
+            );
+            assert!(
+                journal.writer.uncertain_suffix().is_empty(),
+                "two successful flushes must leave no uncertain suffix"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "the exact-byte trace must consume every scripted result"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "successful exact-byte delivery must leave the Journal unpoisoned"
+            );
         }
     }
 }

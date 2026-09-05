@@ -77,7 +77,7 @@ that's the row it pins.
 - [x] C6 · classify + newline
 - [x] C7 · sink write loop
 - [x] C8 · commit + poison
-- [ ] C9 · fault matrix (tests only)
+- [x] C9 · fault matrix (tests only)
 
 **C — Application**
 - [ ] C10 · Context / Outcome / trait
