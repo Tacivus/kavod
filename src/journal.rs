@@ -67,6 +67,28 @@ impl<W: io::Write> Journal<W> {
         self.poisoned
     }
 
+    /// Encodes, writes, and flushes one JSON Lines record.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a prior sink failure poisoned the Journal.
+    pub fn commit<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError> {
+        assert!(
+            !self.poisoned,
+            "JRN-POISON: a poisoned Journal cannot commit another record"
+        );
+
+        self.encode_line(record)?;
+        self.write_line()?;
+        self.writer.flush().map_err(|error| {
+            self.poisoned = true;
+            JournalError::Sink {
+                operation: SinkOperation::Flush,
+                error,
+            }
+        })
+    }
+
     #[allow(
         dead_code,
         reason = "used by Journal line encoding in the next build step"
@@ -1270,6 +1292,279 @@ mod tests {
                 !journal.is_poisoned(),
                 "a complete write must not poison the Journal"
             );
+        }
+    }
+
+    mod journal_commit {
+        use super::*;
+
+        struct CommitAlwaysFails;
+
+        impl Serialize for CommitAlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "intentional commit serializer failure",
+                ))
+            }
+        }
+
+        /// Invariant: a record becomes committed only after the sink receives the
+        /// exact encoded line and successfully flushes it.
+        /// Design Doc: JRN-COMMIT
+        #[test]
+        fn successful_flush_commits_exactly_the_line() {
+            let mut journal = scripted_line_journal([
+                ScriptedResult::Write(Ok(b"{}\n".len())),
+                ScriptedResult::Flush(Ok(())),
+            ]);
+
+            journal
+                .commit(&serde_json::json!({}))
+                .expect("a complete write followed by a successful flush must commit");
+
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec()), SinkCall::Flush],
+                "a successful commit must write exactly one encoded line before flushing"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "a successful commit must consume exactly its write and flush results"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a successful commit must leave the Journal ready for another record"
+            );
+        }
+
+        /// Invariant: if flushing fails, the written line remains an uncertain
+        /// suffix and the commit reports the flush error instead of succeeding.
+        /// Design Doc: JRN-COMMIT
+        #[test]
+        fn flush_failure_is_sink_flush_and_uncommitted() {
+            let mut journal = scripted_line_journal([
+                ScriptedResult::Write(Ok(b"{}\n".len())),
+                ScriptedResult::Flush(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "scripted flush failure",
+                ))),
+            ]);
+
+            let error = journal
+                .commit(&serde_json::json!({}))
+                .expect_err("a failed flush must leave the record uncommitted");
+
+            match error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        SinkOperation::Flush,
+                        "a flush failure must identify the failed operation as Flush"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe,
+                        "a flush failure must preserve the sink's error kind"
+                    );
+                    assert_eq!(
+                        error.to_string(),
+                        "scripted flush failure",
+                        "a flush failure must preserve the sink's returned error"
+                    );
+                }
+                _ => panic!("a flush failure must return a typed sink error"),
+            }
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec()), SinkCall::Flush],
+                "a failed flush must leave the preceding written line as an uncertain suffix"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "a failed flush must consume exactly its write and flush results"
+            );
+        }
+
+        /// Invariant: every write or flush error observed while committing a record
+        /// permanently marks the Journal as unusable.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn sink_error_poisons_permanently() {
+            let mut write_failure = scripted_line_journal([
+                ScriptedResult::Write(Err(io::Error::other("scripted write failure"))),
+                ScriptedResult::Flush(Ok(())),
+            ]);
+
+            let write_error = write_failure
+                .commit(&serde_json::json!({}))
+                .expect_err("a write error must fail the commit");
+            assert!(
+                matches!(
+                    write_error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        ..
+                    }
+                ),
+                "a write error must remain classified as a failed Write operation"
+            );
+            assert!(
+                write_failure.is_poisoned(),
+                "a write error must poison the Journal before returning"
+            );
+            assert_eq!(
+                write_failure.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "a write error must prevent the commit from attempting a flush"
+            );
+            assert_eq!(
+                write_failure.writer.results.len(),
+                1,
+                "a write error must leave the unused flush result untouched"
+            );
+
+            let mut flush_failure = scripted_line_journal([
+                ScriptedResult::Write(Ok(b"{}\n".len())),
+                ScriptedResult::Flush(Err(io::Error::other("scripted flush failure"))),
+            ]);
+
+            let flush_error = flush_failure
+                .commit(&serde_json::json!({}))
+                .expect_err("a flush error must fail the commit");
+            assert!(
+                matches!(
+                    flush_error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Flush,
+                        ..
+                    }
+                ),
+                "a flush error must remain classified as a failed Flush operation"
+            );
+            assert!(
+                flush_failure.is_poisoned(),
+                "a flush error must poison the Journal before returning"
+            );
+            assert_eq!(
+                flush_failure.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec()), SinkCall::Flush],
+                "a flush error must occur only after the complete line is written"
+            );
+        }
+
+        /// Invariant: encoding failures never call the sink or poison the Journal,
+        /// and the same Journal can subsequently commit a valid record.
+        #[test]
+        fn every_encode_error_skips_sink_and_allows_later_commit() {
+            let mut journal = scripted_line_journal([
+                ScriptedResult::Write(Ok(b"{}\n".len())),
+                ScriptedResult::Flush(Ok(())),
+            ]);
+
+            let serializer_error = journal
+                .commit(&CommitAlwaysFails)
+                .expect_err("the deliberately failing serializer must fail the commit");
+            assert!(
+                matches!(serializer_error, JournalError::Encode(_)),
+                "a serializer failure during commit must return Encode"
+            );
+            assert!(
+                journal.writer.calls.is_empty(),
+                "a serializer failure during commit must not call the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a serializer failure during commit must not poison the Journal"
+            );
+
+            let object_error = journal
+                .commit(&0_u8)
+                .expect_err("a top-level number must fail the commit");
+            assert!(
+                matches!(object_error, JournalError::NotAnObject),
+                "a non-object commit must return NotAnObject"
+            );
+            assert!(
+                journal.writer.calls.is_empty(),
+                "a non-object commit must not call the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a non-object commit must not poison the Journal"
+            );
+
+            let bound_error = journal
+                .commit(&serde_json::json!({"oversized": true}))
+                .expect_err("an oversized object must fail the commit");
+            assert!(
+                matches!(bound_error, JournalError::BoundExceeded),
+                "an oversized commit must return BoundExceeded"
+            );
+            assert!(
+                journal.writer.calls.is_empty(),
+                "an oversized commit must not call the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "an oversized commit must not poison the Journal"
+            );
+
+            journal
+                .commit(&serde_json::json!({}))
+                .expect("a valid record must commit after every recoverable encode error");
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec()), SinkCall::Flush],
+                "recovery must write and flush only the later valid record"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a successful recovery commit must leave the Journal unpoisoned"
+            );
+        }
+    }
+
+    mod journal_poisoning {
+        use super::*;
+
+        /// Invariant: once a Journal has been poisoned, committing to it panics
+        /// before performing another sink operation.
+        /// Design Doc: JRN-POISON, A8
+        #[test]
+        #[should_panic(expected = "JRN-POISON")]
+        fn commit_on_poisoned_journal_panics() {
+            let mut journal = scripted_line_journal([ScriptedResult::Write(Err(
+                io::Error::other("scripted write failure"),
+            ))]);
+
+            let error = journal
+                .commit(&serde_json::json!({}))
+                .expect_err("a real sink failure must poison the Journal");
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        ..
+                    }
+                ),
+                "the poisoning setup must fail during the sink write"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "a real sink failure must poison the Journal before the retry"
+            );
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "the poisoning setup must perform exactly one sink operation"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "the sink must have no scripted result available to a poisoned retry"
+            );
+
+            let _ = journal.commit(&serde_json::json!({}));
         }
     }
 }

@@ -76,7 +76,7 @@ that's the row it pins.
 - [x] C5 · bounded encode
 - [x] C6 · classify + newline
 - [x] C7 · sink write loop
-- [ ] C8 · commit + poison
+- [x] C8 · commit + poison
 - [ ] C9 · fault matrix (tests only)
 
 **C — Application**
