@@ -110,8 +110,7 @@ DONE MEANS
 
 both green, every listed test present and passing under the name it gives, and the
 hardening tests written and passing too. Then tick {STEP}'s box in the Progress list
-in `impl-steps.md`, commit with the subject line `{STEP}: <what the step built>`, and
-stop.
+in `impl-steps.md` and stop. Don't commit — leave the work in the tree for me.
 
 IF THE STEP FIGHTS YOU
 
@@ -139,10 +138,11 @@ implementer's own report is not evidence — check everything yourself.
 
 Look at the change, then the spec:
 
-    git show $(git log -1 --format=%H --grep "^{STEP}:")
+    git status
+    git diff
 
-If that comes back empty the step isn't committed yet — read `git diff` and
-`git status` instead.
+The step is uncommitted by design, so that diff plus any untracked files it lists is
+the whole change. `git diff HEAD` picks up anything already staged.
 
 - The `### {STEP} ·` block in `design_docs/impl-steps.md`, the `## Part` preamble
   above it, and the rules block at the top of that file.
@@ -157,7 +157,8 @@ Answer each of these with the evidence that settles it:
 3. Is each `Invariant:` sentence true, plain English, and free of IDs — would someone
    who has never opened the design doc understand it?
 4. Did anything change outside the files the step says to Create or Edit? Was any
-   earlier step's code rewritten rather than extended?
+   earlier step's code rewritten rather than extended? The ticked box in
+   `impl-steps.md` is expected; anything else in that file is not.
 5. Are the unlisted hardening tests real coverage — boundaries, error paths,
    orderings, state after failure — or restatements of the listed ones?
 6. What edge case in this step's code is still untested? Name it concretely, or say

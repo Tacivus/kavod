@@ -67,7 +67,7 @@ that's the row it pins.
 ## Progress
 
 **A — Foundations**
-- [ ] C1 · time types
+- [x] C1 · time types
 - [ ] C2 · bounded buffer
 - [ ] C3 · buffer as `io::Write`
 
