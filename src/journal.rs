@@ -98,11 +98,52 @@ impl<W: io::Write> Journal<W> {
             .try_push(b'\n')
             .map_err(|_| JournalError::BoundExceeded)
     }
+
+    #[allow(dead_code, reason = "used by Journal::commit in the next build step")]
+    fn write_line(&mut self) -> Result<(), JournalError> {
+        let mut offset = 0;
+
+        while offset < self.region.len() {
+            let remaining = &self.region.as_slice()[offset..];
+            let remaining_len = remaining.len();
+
+            match self.writer.write(remaining) {
+                Ok(0) => {
+                    self.poisoned = true;
+                    return Err(JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        error: io::ErrorKind::WriteZero.into(),
+                    });
+                }
+                Ok(count) if count > remaining_len => {
+                    self.poisoned = true;
+                    return Err(JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        error: io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "sink reported writing more bytes than provided",
+                        ),
+                    });
+                }
+                Ok(count) => offset += count,
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        error,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[derive(Default)]
     struct LineCountingWriter {
@@ -127,6 +168,75 @@ mod tests {
             .expect("a line-encoding test bound must be nonzero");
         Journal::new(LineCountingWriter::default(), max_record_bytes)
             .expect("a small line-encoding region must be reservable")
+    }
+
+    enum ScriptedResult {
+        Write(io::Result<usize>),
+        #[allow(dead_code, reason = "used by Journal flush tests in later build steps")]
+        Flush(io::Result<()>),
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum SinkCall {
+        Write(Vec<u8>),
+        Flush,
+    }
+
+    struct ScriptedSink {
+        results: VecDeque<ScriptedResult>,
+        calls: Vec<SinkCall>,
+    }
+
+    impl ScriptedSink {
+        fn new(results: impl IntoIterator<Item = ScriptedResult>) -> Self {
+            Self {
+                results: results.into_iter().collect(),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl io::Write for ScriptedSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls.push(SinkCall::Write(bytes.to_vec()));
+            match self
+                .results
+                .pop_front()
+                .expect("every scripted sink call must have a result")
+            {
+                ScriptedResult::Write(result) => result,
+                ScriptedResult::Flush(_) => {
+                    panic!("a scripted write call must consume a write result")
+                }
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.calls.push(SinkCall::Flush);
+            match self
+                .results
+                .pop_front()
+                .expect("every scripted sink call must have a result")
+            {
+                ScriptedResult::Flush(result) => result,
+                ScriptedResult::Write(_) => {
+                    panic!("a scripted flush call must consume a flush result")
+                }
+            }
+        }
+    }
+
+    fn scripted_line_journal(
+        results: impl IntoIterator<Item = ScriptedResult>,
+    ) -> Journal<ScriptedSink> {
+        let max_record_bytes =
+            NonZeroUsize::new(2).expect("two must be a valid nonzero record bound");
+        let mut journal = Journal::new(ScriptedSink::new(results), max_record_bytes)
+            .expect("the minimum object line region must be reservable");
+        journal
+            .encode_line(&serde_json::json!({}))
+            .expect("the minimum JSON object must fit its exact record bound");
+        journal
     }
 
     mod journal_construction {
@@ -890,6 +1000,275 @@ mod tests {
             assert!(
                 !journal.is_poisoned(),
                 "serializer failure and recovery must leave the Journal unpoisoned"
+            );
+        }
+    }
+
+    mod journal_sink_writes {
+        use super::*;
+
+        /// Invariant: each positive partial write advances through the unwritten
+        /// suffix until the complete encoded line reaches the sink in order.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn short_successful_writes_are_retried_to_completion() {
+            let mut journal = scripted_line_journal([
+                ScriptedResult::Write(Ok(1)),
+                ScriptedResult::Write(Ok(1)),
+                ScriptedResult::Write(Ok(1)),
+            ]);
+
+            journal
+                .write_line()
+                .expect("positive partial writes must complete the encoded line");
+
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{}\n".to_vec()),
+                    SinkCall::Write(b"}\n".to_vec()),
+                    SinkCall::Write(b"\n".to_vec()),
+                ],
+                "each short write must be followed by exactly the remaining suffix"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "successful completion must consume each required write result"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "successful short writes must not poison the Journal"
+            );
+        }
+
+        /// Invariant: an interrupted sink write is returned immediately and
+        /// permanently disables the Journal without attempting another write.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn interrupted_write_poisons_without_retry() {
+            let mut journal = scripted_line_journal([
+                ScriptedResult::Write(Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "scripted interruption",
+                ))),
+                ScriptedResult::Write(Ok(3)),
+            ]);
+
+            let error = journal
+                .write_line()
+                .expect_err("an interrupted write must fail immediately");
+
+            match error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        SinkOperation::Write,
+                        "an interrupted write must identify the failed operation as Write"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted,
+                        "an interrupted write must preserve the sink's error kind"
+                    );
+                    assert_eq!(
+                        error.to_string(),
+                        "scripted interruption",
+                        "an interrupted write must preserve the sink's returned error"
+                    );
+                }
+                _ => panic!("an interrupted write must return a typed sink error"),
+            }
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "an interrupted write must make exactly one sink call"
+            );
+            assert_eq!(
+                journal.writer.results.len(),
+                1,
+                "an interrupted write must not consume a retry result"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "an interrupted write must poison the Journal before returning"
+            );
+        }
+
+        /// Invariant: a sink write that accepts no bytes is reported as a write-zero
+        /// failure and permanently disables the Journal without retrying.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn zero_progress_maps_to_write_zero() {
+            let mut journal =
+                scripted_line_journal([ScriptedResult::Write(Ok(0)), ScriptedResult::Write(Ok(3))]);
+
+            let error = journal
+                .write_line()
+                .expect_err("a zero-progress write must fail immediately");
+
+            match error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        SinkOperation::Write,
+                        "a zero-progress write must identify the failed operation as Write"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::WriteZero,
+                        "a zero-progress write must map to WriteZero"
+                    );
+                }
+                _ => panic!("a zero-progress write must return a typed sink error"),
+            }
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "a zero-progress write must make exactly one sink call"
+            );
+            assert_eq!(
+                journal.writer.results.len(),
+                1,
+                "a zero-progress write must not consume a retry result"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "a zero-progress write must poison the Journal before returning"
+            );
+        }
+
+        /// Invariant: a sink claiming to accept more than the offered suffix is
+        /// reported as invalid data and permanently disables the Journal.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn over_reported_count_maps_to_invalid_data() {
+            let mut journal =
+                scripted_line_journal([ScriptedResult::Write(Ok(4)), ScriptedResult::Write(Ok(3))]);
+
+            let error = journal
+                .write_line()
+                .expect_err("an over-reported write count must fail immediately");
+
+            match error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        SinkOperation::Write,
+                        "an over-reported count must identify the failed operation as Write"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData,
+                        "an over-reported count must map to InvalidData"
+                    );
+                }
+                _ => panic!("an over-reported count must return a typed sink error"),
+            }
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "an over-reported count must make exactly one sink call"
+            );
+            assert_eq!(
+                journal.writer.results.len(),
+                1,
+                "an over-reported count must not consume a retry result"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "an over-reported count must poison the Journal before returning"
+            );
+        }
+
+        /// Invariant: after a partial write, a count larger than the unwritten
+        /// suffix is rejected even when it is no larger than the original line.
+        #[test]
+        fn over_reported_count_is_measured_against_remaining_suffix() {
+            let mut journal =
+                scripted_line_journal([ScriptedResult::Write(Ok(1)), ScriptedResult::Write(Ok(3))]);
+
+            let error = journal
+                .write_line()
+                .expect_err("a count larger than the remaining suffix must fail");
+
+            match error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        SinkOperation::Write,
+                        "a suffix over-report must identify the failed operation as Write"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData,
+                        "a count larger than the remaining suffix must map to InvalidData"
+                    );
+                }
+                _ => panic!("a count larger than the remaining suffix must return a sink error"),
+            }
+            assert_eq!(
+                journal.writer.calls,
+                [
+                    SinkCall::Write(b"{}\n".to_vec()),
+                    SinkCall::Write(b"}\n".to_vec()),
+                ],
+                "a suffix over-report must occur after advancing by the accepted prefix"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "a suffix over-report must consume exactly the two attempted writes"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "a count larger than the remaining suffix must poison the Journal"
+            );
+        }
+
+        /// Invariant: an empty encoded region completes without invoking or
+        /// poisoning the sink because there are no bytes to persist.
+        #[test]
+        fn empty_line_completes_without_sink_calls() {
+            let max_record_bytes =
+                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
+            let mut journal = Journal::new(ScriptedSink::new([]), max_record_bytes)
+                .expect("the minimum encode region must be reservable");
+
+            journal
+                .write_line()
+                .expect("an empty encoded region must require no sink operation");
+
+            assert!(
+                journal.writer.calls.is_empty(),
+                "an empty encoded region must not call the sink"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "an empty encoded region must not poison the Journal"
+            );
+        }
+
+        /// Invariant: a sink accepting the complete encoded line finishes after one
+        /// write and leaves the Journal ready for further work.
+        #[test]
+        fn complete_write_finishes_without_retry() {
+            let mut journal = scripted_line_journal([ScriptedResult::Write(Ok(b"{}\n".len()))]);
+
+            journal
+                .write_line()
+                .expect("a complete sink write must finish successfully");
+
+            assert_eq!(
+                journal.writer.calls,
+                [SinkCall::Write(b"{}\n".to_vec())],
+                "a complete write must call the sink exactly once with the full line"
+            );
+            assert!(
+                journal.writer.results.is_empty(),
+                "a complete write must consume exactly its one scripted result"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "a complete write must not poison the Journal"
             );
         }
     }
