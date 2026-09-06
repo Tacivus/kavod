@@ -1121,6 +1121,10 @@ mod tests {
 
         const RUN_STARTED_AT_ZERO: &[u8] =
             b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+        const COMMANDS_PREPARED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"CommandsPrepared\",\"index\":0,\"commands\":[10,20]}\n";
+        const COMMANDS_DISPATCHED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"CommandsDispatched\",\"index\":0}\n";
         type DispatchResult<C, A> = Result<
             Certificate<ScriptedWriter<C>, EffectsComplete<A>>,
             FatalCause<(), &'static str>,
@@ -1184,6 +1188,18 @@ mod tests {
                 Err(FatalCause::Environment(fatal)) => fatal,
                 Err(_) => panic!("a scripted dispatch failure must remain the fatal cause"),
                 Ok(_) => panic!("a scripted dispatch failure must prevent phase advancement"),
+            }
+        }
+
+        fn direct_continue_turn<W: io::Write>(
+            writer: W,
+            max_record_bytes: usize,
+        ) -> Certificate<W, TurnOpen<answer::Continue>> {
+            Certificate {
+                journal: certificate_journal(writer, max_record_bytes),
+                index: EventIndex::new(0),
+                last_time: Timestamp::from_nanos(0),
+                _phase: PhantomData,
             }
         }
 
@@ -1585,6 +1601,98 @@ mod tests {
             commands
                 .try_push(1)
                 .expect("the rejected empty batch must remain reusable");
+        }
+
+        /// Invariant: a prepared-command record that exactly fills the configured
+        /// record capacity commits before the first handoff, and the shorter
+        /// dispatched-command record then commits after the last.
+        #[test]
+        fn prepared_record_succeeds_at_exact_record_capacity() {
+            let calls = scripted_calls();
+            let mut bytes = Vec::new();
+            let certificate = direct_continue_turn(&mut bytes, COMMANDS_PREPARED_AT_ZERO.len() - 1);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            for command in [10, 20] {
+                commands
+                    .try_push(command)
+                    .expect("each command through exact capacity must fit");
+            }
+
+            let effects_complete =
+                match certificate.dispatch_batch::<_, _, ()>(&mut environment, &mut commands) {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a CommandsPrepared record at exact capacity must commit"),
+                };
+
+            drop(effects_complete);
+            assert_eq!(
+                bytes,
+                [COMMANDS_PREPARED_AT_ZERO, COMMANDS_DISPATCHED_AT_ZERO].concat(),
+                "an exact-capacity CommandsPrepared record must commit its complete line and leave room for the shorter CommandsDispatched record"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::Dispatch(10), ScriptedCall::Dispatch(20)],
+                "an exact-capacity intent record must be followed by every handoff in order"
+            );
+            assert!(
+                commands.is_empty(),
+                "a successful exact-capacity batch must drain every command"
+            );
+        }
+
+        /// Invariant: a prepared-command record one byte beyond capacity fails
+        /// without output, hands off no command, and leaves the complete batch
+        /// intact.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn prepared_record_one_byte_past_capacity_hands_off_nothing() {
+            let calls = scripted_calls();
+            let mut bytes = Vec::new();
+            let certificate = direct_continue_turn(&mut bytes, COMMANDS_PREPARED_AT_ZERO.len() - 2);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            for command in [10, 20] {
+                commands
+                    .try_push(command)
+                    .expect("each command through exact capacity must fit");
+            }
+
+            let fatal = match certificate
+                .dispatch_batch::<_, _, ()>(&mut environment, &mut commands)
+            {
+                Err(FatalCause::Journal(fatal)) => fatal,
+                Err(_) => panic!("an oversized CommandsPrepared record must be a Journal fatal"),
+                Ok(_) => panic!("a CommandsPrepared record beyond capacity must fail"),
+            };
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::CommandsPrepared,
+                "an oversized CommandsPrepared record must retain its record kind"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "an oversized CommandsPrepared record must not carry a turn outcome"
+            );
+            assert!(
+                matches!(fatal.error, JournalError::BoundExceeded),
+                "a CommandsPrepared record one byte past capacity must report BoundExceeded"
+            );
+            assert!(
+                bytes.is_empty(),
+                "an oversized CommandsPrepared record must fail before writing any sink bytes"
+            );
+            assert!(
+                calls.borrow().is_empty(),
+                "an oversized CommandsPrepared record must precede every Environment handoff"
+            );
+            assert_eq!(
+                commands.as_slice(),
+                &[10, 20],
+                "an oversized CommandsPrepared record must leave the complete batch intact"
+            );
         }
     }
 

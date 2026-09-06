@@ -306,6 +306,65 @@ mod tests {
                 "returning a local error must not make an empty latch pending"
             );
         }
+
+        /// Invariant: returning an operation's local Error from an empty latch does
+        /// not report it, so the next published Error becomes pending and leaves
+        /// through the close.
+        /// Design Doc: ENV-LATCH
+        #[test]
+        fn a_local_error_leaves_the_latch_open_for_a_later_publication() {
+            let local_drops = Rc::new(Cell::new(0));
+            let later_drops = Rc::new(Cell::new(0));
+            let discarded_drops = Rc::new(Cell::new(0));
+            let mut latch = Latch::new();
+
+            let winner = latch.resolve_local_error(TrackedError {
+                name: "local",
+                drops: Rc::clone(&local_drops),
+            });
+            latch.publish(TrackedError {
+                name: "later",
+                drops: Rc::clone(&later_drops),
+            });
+
+            assert_eq!(
+                winner.name, "local",
+                "an empty latch must return the operation's local error"
+            );
+            assert_eq!(
+                local_drops.get(),
+                0,
+                "the returned local error must remain owned by the caller"
+            );
+            assert!(
+                latch.is_pending(),
+                "a publication after a returned local error must make the still-open latch pending"
+            );
+
+            let report = latch.close_into_report(Quiescence::Quiesced);
+            let reported = report
+                .error
+                .expect("the close must return the publication that followed the local error");
+            assert_eq!(
+                reported.name, "later",
+                "the later publication must leave the latch through the report"
+            );
+            assert_eq!(
+                later_drops.get(),
+                0,
+                "the reported error must remain owned by the report's receiver"
+            );
+
+            latch.publish(TrackedError {
+                name: "discarded",
+                drops: Rc::clone(&discarded_drops),
+            });
+            assert_eq!(
+                discarded_drops.get(),
+                1,
+                "a publication after the close must be discarded immediately"
+            );
+        }
     }
 
     mod latch_observation {

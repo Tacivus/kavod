@@ -814,6 +814,36 @@ mod tests {
                 "classification failure and recovery must leave the Journal unpoisoned"
             );
         }
+
+        /// Invariant: a non-object value too long for the encode region is rejected
+        /// as a bound failure, not as a non-object, because the bound is checked
+        /// before the object shape.
+        /// Design Doc: JRN-ENCODE
+        #[test]
+        fn an_overrunning_non_object_is_bound_exceeded_before_classification() {
+            let mut journal = line_journal(1);
+
+            let error = journal
+                .encode_line(&123_u8)
+                .expect_err("a three-byte number cannot fit a two-byte region");
+
+            assert!(
+                matches!(error, JournalError::BoundExceeded),
+                "an overrunning non-object must report the bound before its shape"
+            );
+            assert_eq!(
+                journal.writer.write_calls, 0,
+                "an overrunning non-object must not call the sink's write operation"
+            );
+            assert_eq!(
+                journal.writer.flush_calls, 0,
+                "an overrunning non-object must not call the sink's flush operation"
+            );
+            assert!(
+                !journal.is_poisoned(),
+                "an overrunning non-object must not poison the Journal"
+            );
+        }
     }
 
     mod journal_newline_reservation {
