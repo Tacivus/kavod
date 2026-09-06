@@ -1,5 +1,5 @@
 use crate::bounded_buffer::BoundedBuffer;
-use crate::environment::Environment;
+use crate::environment::{Environment, Quiescence};
 use crate::journal::{Journal, JournalError};
 use crate::time::{EventIndex, Timestamp};
 use serde::{Serialize, Serializer};
@@ -439,6 +439,48 @@ impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
             },
             None,
         )?;
+        Ok(self.advance())
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write> Certificate<W, StopPending> {
+    #[allow(
+        clippy::type_complexity,
+        reason = "the close failure carries its typed cause and retained shutdown quiescence"
+    )]
+    pub(super) fn close<E: Environment, AE>(
+        mut self,
+        environment: E,
+    ) -> Result<Certificate<W, Closed>, (super::FatalCause<AE, E::Error>, Quiescence)> {
+        let report = environment.shutdown();
+        let retained_quiescence = report.quiescence;
+
+        if let Some(error) = report.error {
+            return Err((
+                super::FatalCause::Environment(super::EnvironmentFatal {
+                    error,
+                    operation: super::EnvironmentOperation::Shutdown,
+                }),
+                retained_quiescence,
+            ));
+        }
+        if retained_quiescence == Quiescence::Incomplete {
+            return Err((
+                super::FatalCause::Core(super::CoreError::ShutdownIncomplete),
+                retained_quiescence,
+            ));
+        }
+
+        self.commit(
+            &TurnCompletedRecord {
+                record_kind: Kind::new(),
+                index: self.index,
+                outcome: TurnOutcome::Stop,
+            },
+            Some(TurnOutcome::Stop),
+        )
+        .map_err(|fatal| (super::FatalCause::Journal(fatal), retained_quiescence))?;
         Ok(self.advance())
     }
 }
@@ -2131,6 +2173,324 @@ mod tests {
                 stop_bytes.is_empty(),
                 "an oversized Stop request must write no partial bytes"
             );
+        }
+    }
+
+    mod stop_closing {
+        use super::*;
+
+        const TURN_COMPLETED_STOP_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"TurnCompleted\",\"index\":0,\"outcome\":\"Stop\"}\n";
+
+        fn stop_pending<W: io::Write>(
+            writer: W,
+            max_record_bytes: usize,
+            index: u64,
+            last_time: u64,
+        ) -> Certificate<W, StopPending> {
+            Certificate {
+                journal: certificate_journal(writer, max_record_bytes),
+                index: EventIndex::new(index),
+                last_time: Timestamp::from_nanos(last_time),
+                _phase: PhantomData,
+            }
+        }
+
+        /// Invariant: a clean shutdown report is followed by exactly one Stop
+        /// completion record before the certificate enters its closed phase.
+        /// Design Doc: the Edges table, by name
+        #[test]
+        fn a_clean_report_commits_turn_completed_stop() {
+            let calls = record_calls();
+            let certificate = stop_pending(ScriptedWriter::new(Rc::clone(&calls), None), 128, 0, 9);
+            let environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+
+            let closed = match certificate.close::<_, ()>(environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a clean shutdown report must close the certificate"),
+            };
+            fn require_closed<W: io::Write>(_certificate: &Certificate<W, Closed>) {}
+            require_closed(&closed);
+            assert_eq!(
+                closed.index.as_u64(),
+                0,
+                "closing must preserve the completed turn's event index"
+            );
+            assert_eq!(
+                closed.last_time,
+                Timestamp::from_nanos(9),
+                "closing must preserve the completed turn's logical time"
+            );
+            drop(closed);
+
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::Shutdown,
+                    ScriptedCall::RecordCommitted(TURN_COMPLETED_STOP_AT_ZERO.to_vec()),
+                ],
+                "a clean close must consume the Environment before committing TurnCompleted(Stop)"
+            );
+        }
+
+        /// Invariant: when an incomplete shutdown report also contains an error,
+        /// the error is the fatal cause and the incomplete account is retained.
+        /// Design Doc: the StopPending phase row, by name
+        #[test]
+        fn a_report_error_outranks_incomplete() {
+            let calls = record_calls();
+            let certificate = stop_pending(ScriptedWriter::new(Rc::clone(&calls), None), 128, 0, 0);
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.shutdown_report = crate::environment::ShutdownReport {
+                quiescence: Quiescence::Incomplete,
+                error: Some("shutdown failure"),
+            };
+
+            let fatal = certificate.close::<_, ()>(environment);
+
+            match fatal {
+                Err((super::super::super::FatalCause::Environment(fatal), quiescence)) => {
+                    assert_eq!(
+                        fatal.operation,
+                        super::super::super::EnvironmentOperation::Shutdown,
+                        "a shutdown report error must identify the shutdown operation"
+                    );
+                    assert_eq!(
+                        fatal.error, "shutdown failure",
+                        "a shutdown fatal must preserve the report's error"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Incomplete,
+                        "a shutdown fatal must retain the report's incomplete account"
+                    );
+                }
+                Err(_) => panic!("a report error must remain an Environment shutdown fatal"),
+                Ok(_) => panic!("a report error must prevent the closed phase"),
+            }
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::Shutdown],
+                "an erroneous shutdown report must prevent the completion record"
+            );
+        }
+
+        /// Invariant: an incomplete shutdown account without an error is a Core
+        /// shutdown-incomplete fatal carrying that same account.
+        /// Design Doc: the StopPending phase row, by name
+        #[test]
+        fn incomplete_without_error_is_shutdown_incomplete() {
+            let calls = record_calls();
+            let certificate = stop_pending(ScriptedWriter::new(Rc::clone(&calls), None), 128, 0, 0);
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.shutdown_report = crate::environment::ShutdownReport {
+                quiescence: Quiescence::Incomplete,
+                error: None,
+            };
+
+            let fatal = certificate.close::<_, ()>(environment);
+
+            assert!(
+                matches!(
+                    fatal,
+                    Err((
+                        super::super::super::FatalCause::Core(
+                            super::super::super::CoreError::ShutdownIncomplete
+                        ),
+                        Quiescence::Incomplete
+                    ))
+                ),
+                "an incomplete error-free report must retain Incomplete on a ShutdownIncomplete fatal"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::Shutdown],
+                "an incomplete shutdown report must prevent the completion record"
+            );
+        }
+
+        /// Invariant: if the Stop completion record cannot commit after clean
+        /// shutdown, the Journal fatal retains the report's quiesced account.
+        /// Design Doc: RUN-FINALIZE
+        #[test]
+        fn commit_failure_after_a_clean_report_retains_quiesced() {
+            let calls = record_calls();
+            let certificate =
+                stop_pending(ScriptedWriter::new(Rc::clone(&calls), Some(0)), 128, 0, 0);
+            let environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+
+            let fatal = certificate.close::<_, ()>(environment);
+
+            match fatal {
+                Err((super::super::super::FatalCause::Journal(fatal), quiescence)) => {
+                    assert_eq!(
+                        fatal.record_kind,
+                        RecordKind::TurnCompleted,
+                        "a failed Stop completion must identify TurnCompleted"
+                    );
+                    assert_eq!(
+                        fatal.outcome,
+                        Some(TurnOutcome::Stop),
+                        "a failed Stop completion must retain its fixed Stop outcome"
+                    );
+                    assert!(
+                        matches!(
+                            fatal.error,
+                            JournalError::Sink {
+                                operation: crate::journal::SinkOperation::Flush,
+                                ..
+                            }
+                        ),
+                        "the scripted Stop completion failure must remain a flush error"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "a Stop completion failure must retain the clean report's quiescence"
+                    );
+                }
+                Err(_) => panic!("a Stop completion commit failure must remain a Journal fatal"),
+                Ok(_) => panic!("a failed Stop completion commit must return no closed phase"),
+            }
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::Shutdown],
+                "a failed Stop completion must occur after shutdown and commit no record"
+            );
+        }
+
+        /// Invariant: an error-bearing report remains a shutdown fatal even when
+        /// every unit of run-scoped activity is accounted complete.
+        #[test]
+        fn a_quiesced_report_error_is_shutdown_fatal() {
+            let calls = record_calls();
+            let certificate = stop_pending(Vec::new(), 128, 0, 0);
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.shutdown_report = crate::environment::ShutdownReport {
+                quiescence: Quiescence::Quiesced,
+                error: Some("late shutdown failure"),
+            };
+
+            let fatal = certificate.close::<_, ()>(environment);
+
+            match fatal {
+                Err((super::super::super::FatalCause::Environment(fatal), quiescence)) => {
+                    assert_eq!(
+                        fatal.operation,
+                        super::super::super::EnvironmentOperation::Shutdown,
+                        "an error-bearing quiesced report must identify shutdown"
+                    );
+                    assert_eq!(
+                        fatal.error, "late shutdown failure",
+                        "an error-bearing quiesced report must preserve its error"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "an error-bearing quiesced report must retain Quiesced"
+                    );
+                }
+                Err(_) => panic!("a quiesced report error must remain an Environment fatal"),
+                Ok(_) => panic!("a quiesced report error must prevent the closed phase"),
+            }
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::Shutdown],
+                "an error-bearing quiesced report must consume the Environment exactly once"
+            );
+        }
+
+        /// Invariant: a Stop completion record commits when its JSON exactly fills
+        /// the configured record capacity.
+        #[test]
+        fn completion_record_succeeds_at_exact_capacity() {
+            let mut bytes = Vec::new();
+            let certificate = stop_pending(&mut bytes, TURN_COMPLETED_STOP_AT_ZERO.len() - 1, 0, 0);
+            let environment = ScriptedEnvironment::<u8>::new(record_calls(), None);
+
+            let closed = match certificate.close::<_, ()>(environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("an exact-capacity Stop completion must commit"),
+            };
+            drop(closed);
+
+            assert_eq!(
+                bytes, TURN_COMPLETED_STOP_AT_ZERO,
+                "an exact-capacity Stop completion must write its complete JSON line"
+            );
+        }
+
+        /// Invariant: a Stop completion record one byte beyond capacity fails
+        /// without output while preserving clean-shutdown quiescence.
+        #[test]
+        fn completion_record_one_byte_past_capacity_retains_quiesced() {
+            let mut bytes = Vec::new();
+            let certificate = stop_pending(&mut bytes, TURN_COMPLETED_STOP_AT_ZERO.len() - 2, 0, 0);
+            let environment = ScriptedEnvironment::<u8>::new(record_calls(), None);
+
+            let fatal = certificate.close::<_, ()>(environment);
+
+            match fatal {
+                Err((super::super::super::FatalCause::Journal(fatal), quiescence)) => {
+                    assert_eq!(
+                        fatal.outcome,
+                        Some(TurnOutcome::Stop),
+                        "an over-capacity Stop completion must retain its fixed outcome"
+                    );
+                    assert!(
+                        matches!(fatal.error, JournalError::BoundExceeded),
+                        "a Stop completion one byte beyond capacity must report BoundExceeded"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "an over-capacity Stop completion must retain clean-shutdown quiescence"
+                    );
+                }
+                Err(_) => panic!("an over-capacity Stop completion must remain a Journal fatal"),
+                Ok(_) => panic!("an over-capacity Stop completion must return no closed phase"),
+            }
+            assert!(
+                bytes.is_empty(),
+                "an over-capacity Stop completion must write no partial output"
+            );
+        }
+
+        /// Invariant: closing preserves event index in both the completion record
+        /// and closed certificate, and preserves logical time at zero, one, and the
+        /// largest representable value.
+        #[test]
+        fn closing_preserves_index_and_time_boundaries() {
+            for value in [0, 1, u64::MAX] {
+                let mut bytes = Vec::new();
+                let certificate = stop_pending(&mut bytes, 128, value, value);
+                let environment = ScriptedEnvironment::<u8>::new(record_calls(), None);
+
+                let closed = match certificate.close::<_, ()>(environment) {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a boundary-valued Stop completion must close"),
+                };
+
+                assert_eq!(
+                    closed.index.as_u64(),
+                    value,
+                    "closing must preserve a boundary-valued event index"
+                );
+                assert_eq!(
+                    closed.last_time.as_nanos(),
+                    value,
+                    "closing must preserve a boundary-valued logical time"
+                );
+                drop(closed);
+                assert_eq!(
+                    bytes,
+                    format!(
+                        "{{\"record_kind\":\"TurnCompleted\",\"index\":{value},\"outcome\":\"Stop\"}}\n"
+                    )
+                    .into_bytes(),
+                    "a Stop completion record must preserve its boundary-valued event index"
+                );
+            }
         }
     }
 
