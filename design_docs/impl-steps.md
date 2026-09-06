@@ -102,7 +102,7 @@ that's the row it pins.
 - [x] C23 · `close`
 
 **G — Engine**
-- [ ] C24 · `Engine::new`
+- [x] C24 · `Engine::new`
 - [ ] C25 · turn helper
 - [ ] C26 · finalize helper
 - [ ] C27 · `Engine::run`

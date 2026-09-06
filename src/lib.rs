@@ -10,8 +10,8 @@ mod port;
 mod time;
 pub use application::{Application, Context, Outcome};
 pub use engine::{
-    BuildError, CoreError, EngineConfig, EngineExit, EnvironmentFatal, EnvironmentOperation,
-    FatalCause, JournalFatal, RecordKind, TurnOutcome,
+    BuildError, CoreError, Engine, EngineConfig, EngineExit, EnvironmentFatal,
+    EnvironmentOperation, FatalCause, JournalFatal, RecordKind, TurnOutcome,
 };
 pub use environment::{Environment, Quiescence, ShutdownReport};
 pub use journal::{Journal, JournalBuildError, JournalError, SinkOperation};

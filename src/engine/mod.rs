@@ -6,7 +6,7 @@ mod engine;
 mod record;
 
 pub use engine::{
-    BuildError, CoreError, EngineConfig, EngineExit, EnvironmentFatal, EnvironmentOperation,
-    FatalCause,
+    BuildError, CoreError, Engine, EngineConfig, EngineExit, EnvironmentFatal,
+    EnvironmentOperation, FatalCause,
 };
 pub use record::{JournalFatal, RecordKind, TurnOutcome};
