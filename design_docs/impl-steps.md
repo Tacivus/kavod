@@ -113,7 +113,7 @@ that's the row it pins.
 - [x] C30 · golden suite 1
 - [x] C31 · golden suite 2
 - [x] C32 · fault suite 1
-- [ ] C33 · fault suite 2
+- [x] C33 · fault suite 2
 - [ ] C34 · conformance
 - [ ] C35 · compile-fail fixture
 
