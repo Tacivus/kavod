@@ -109,7 +109,7 @@ that's the row it pins.
 - [x] C28 · loop behavior (tests only)
 
 **H — Core suites**
-- [ ] C29 · tests/support harness
+- [x] C29 · tests/support harness
 - [ ] C30 · golden suite 1
 - [ ] C31 · golden suite 2
 - [ ] C32 · fault suite 1
