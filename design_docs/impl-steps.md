@@ -97,7 +97,7 @@ that's the row it pins.
 - [x] C18 · certificate + `run_started`
 - [x] C19 · `classify` + `no_commands`
 - [x] C20 · `dispatch_batch`
-- [ ] C21 · checkpoint + completion records
+- [x] C21 · checkpoint + completion records
 - [ ] C22 · `accept_event`
 - [ ] C23 · `close`
 

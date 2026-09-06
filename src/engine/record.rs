@@ -346,6 +346,53 @@ impl<W: io::Write, A> Certificate<W, TurnOpen<A>> {
 }
 
 #[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write, A> Certificate<W, EffectsComplete<A>> {
+    pub(super) fn checkpoint<E: Environment, AE>(
+        self,
+        environment: &mut E,
+    ) -> Result<Certificate<W, Checkpointed<A>>, super::FatalCause<AE, E::Error>> {
+        match environment.take_error() {
+            Some(error) => Err(super::FatalCause::Environment(super::EnvironmentFatal {
+                error,
+                operation: super::EnvironmentOperation::Checkpoint,
+            })),
+            None => Ok(self.advance()),
+        }
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write> Certificate<W, Checkpointed<answer::Continue>> {
+    pub(super) fn complete_continue(
+        mut self,
+    ) -> Result<Certificate<W, BetweenTurns>, JournalFatal> {
+        self.commit(
+            &TurnCompletedRecord {
+                record_kind: Kind::new(),
+                index: self.index,
+                outcome: TurnOutcome::Continue,
+            },
+            Some(TurnOutcome::Continue),
+        )?;
+        Ok(self.advance())
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
+    pub(super) fn request_stop(mut self) -> Result<Certificate<W, StopPending>, JournalFatal> {
+        self.commit(
+            &StopRequestedRecord {
+                record_kind: Kind::new(),
+                index: self.index,
+            },
+            None,
+        )?;
+        Ok(self.advance())
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, Initial> {
     pub(super) fn mint(journal: Journal<W>, start_time: Timestamp) -> Self {
         let certificate = Self {
@@ -511,6 +558,53 @@ mod tests {
                 .push(ScriptedCall::RecordCommitted(record));
             Ok(())
         }
+    }
+
+    fn record_calls<C>() -> ScriptedCalls<C> {
+        Rc::new(RefCell::new(Vec::new()))
+    }
+
+    fn scripted_turn_open<C>(
+        calls: ScriptedCalls<C>,
+        start_time: Timestamp,
+    ) -> Certificate<ScriptedWriter<C>, TurnOpen> {
+        let certificate = Certificate::mint(
+            certificate_journal(ScriptedWriter::new(calls, None), 512),
+            start_time,
+        );
+        match certificate.run_started() {
+            Ok(certificate) => certificate,
+            Err(_) => panic!("a C21 transition fixture must commit RunStarted"),
+        }
+    }
+
+    fn scripted_continue_effects<C>(
+        calls: ScriptedCalls<C>,
+        start_time: Timestamp,
+    ) -> Certificate<ScriptedWriter<C>, EffectsComplete<answer::Continue>> {
+        let turn_open = match scripted_turn_open(calls, start_time).classify(TurnOutcome::Continue)
+        {
+            ClassifiedTurn::Continue(certificate) => certificate,
+            ClassifiedTurn::Stop(_) => {
+                panic!("a Continue answer must produce the Continue-typed phase")
+            }
+        };
+        let commands = BoundedBuffer::<C>::new(0).expect("a zero-capacity C21 batch must reserve");
+        turn_open.no_commands(&commands)
+    }
+
+    fn scripted_stop_effects<C>(
+        calls: ScriptedCalls<C>,
+        start_time: Timestamp,
+    ) -> Certificate<ScriptedWriter<C>, EffectsComplete<answer::Stop>> {
+        let turn_open = match scripted_turn_open(calls, start_time).classify(TurnOutcome::Stop) {
+            ClassifiedTurn::Stop(certificate) => certificate,
+            ClassifiedTurn::Continue(_) => {
+                panic!("a Stop answer must produce the Stop-typed phase")
+            }
+        };
+        let commands = BoundedBuffer::<C>::new(0).expect("a zero-capacity C21 batch must reserve");
+        turn_open.no_commands(&commands)
     }
 
     mod certificate_minting {
@@ -1473,6 +1567,519 @@ mod tests {
             commands
                 .try_push(1)
                 .expect("the rejected empty batch must remain reusable");
+        }
+    }
+
+    mod turn_checkpoint {
+        use super::*;
+        use crate::{EnvironmentOperation, FatalCause};
+
+        const RUN_STARTED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+        const TURN_COMPLETED_CONTINUE_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"TurnCompleted\",\"index\":0,\"outcome\":\"Continue\"}\n";
+
+        /// Invariant: every effects-complete turn observes the Environment error
+        /// latch once after effects finish and before its completion record commits.
+        /// Design Doc: RUN-CHECKPOINT
+        #[test]
+        fn the_snapshot_is_taken_exactly_once() {
+            let calls = record_calls();
+            let effects_complete =
+                scripted_continue_effects(Rc::clone(&calls), Timestamp::from_nanos(0));
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+
+            let checkpointed = match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("an empty error latch must permit checkpointing"),
+            };
+            let between_turns = match checkpointed.complete_continue() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("the completion record must commit after checkpointing"),
+            };
+            drop(between_turns);
+
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::TakeError,
+                    ScriptedCall::RecordCommitted(TURN_COMPLETED_CONTINUE_AT_ZERO.to_vec()),
+                ],
+                "checkpointing must take exactly one snapshot between effects and completion"
+            );
+        }
+
+        /// Invariant: after a nonempty command batch, the error-latch snapshot
+        /// occurs after every handoff and its dispatched record, but before turn
+        /// completion is recorded.
+        #[test]
+        fn a_dispatched_batch_checkpoints_after_the_last_handoff() {
+            let calls = record_calls();
+            let turn_open = match scripted_turn_open(Rc::clone(&calls), Timestamp::from_nanos(0))
+                .classify(TurnOutcome::Continue)
+            {
+                ClassifiedTurn::Continue(certificate) => certificate,
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must produce the Continue-typed phase")
+                }
+            };
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            commands.try_push(4).expect("the first command must fit");
+            commands.try_push(5).expect("the second command must fit");
+
+            let effects_complete =
+                match turn_open.dispatch_batch::<_, _, ()>(&mut environment, &mut commands) {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("both commands must dispatch successfully"),
+                };
+            let checkpointed = match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("an empty error latch must permit checkpointing"),
+            };
+            let between_turns = match checkpointed.complete_continue() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("completion must commit after the dispatched checkpoint"),
+            };
+            drop(between_turns);
+
+            assert!(
+                commands.is_empty(),
+                "the dispatched checkpoint path must leave the command batch drained"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsPrepared\",\"index\":0,\"commands\":[4,5]}\n"
+                            .to_vec(),
+                    ),
+                    ScriptedCall::Dispatch(4),
+                    ScriptedCall::Dispatch(5),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsDispatched\",\"index\":0}\n".to_vec(),
+                    ),
+                    ScriptedCall::TakeError,
+                    ScriptedCall::RecordCommitted(TURN_COMPLETED_CONTINUE_AT_ZERO.to_vec()),
+                ],
+                "the checkpoint snapshot must follow the final handoff and dispatched record before completion"
+            );
+        }
+
+        /// Invariant: a pending Environment error at the checkpoint ends the turn
+        /// without returning a certificate that could commit a completion record.
+        /// Design Doc: RUN-CHECKPOINT
+        #[test]
+        fn a_pending_error_is_checkpoint_fatal_and_consumes_the_certificate() {
+            let calls = record_calls();
+            let effects_complete =
+                scripted_continue_effects(Rc::clone(&calls), Timestamp::from_nanos(0));
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.pending_error = Some("pending checkpoint failure");
+
+            let fatal = match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Err(FatalCause::Environment(fatal)) => fatal,
+                Err(_) => panic!("a pending latch error must remain an Environment fatal"),
+                Ok(_) => panic!("a pending latch error must prevent phase advancement"),
+            };
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Checkpoint,
+                "a pending checkpoint error must identify the checkpoint operation"
+            );
+            assert_eq!(
+                fatal.error, "pending checkpoint failure",
+                "a checkpoint fatal must preserve the pending Environment error"
+            );
+            assert_eq!(
+                environment.pending_error, None,
+                "a checkpoint fatal must consume the Environment's pending error"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::TakeError,
+                ],
+                "a pending checkpoint error must append no completion record"
+            );
+        }
+
+        /// Invariant: a clean latch snapshot preserves the certificate's accepted
+        /// index and logical time for either fixed turn answer.
+        #[test]
+        fn a_clean_snapshot_preserves_state_for_both_answers() {
+            let continue_calls = record_calls();
+            let continue_effects =
+                scripted_continue_effects(Rc::clone(&continue_calls), Timestamp::from_nanos(0));
+            let mut continue_environment =
+                ScriptedEnvironment::<u8>::new(Rc::clone(&continue_calls), None);
+            let continue_checkpointed =
+                match continue_effects.checkpoint::<_, ()>(&mut continue_environment) {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a clean Continue checkpoint must advance"),
+                };
+
+            assert_eq!(
+                continue_checkpointed.index.as_u64(),
+                0,
+                "a Continue checkpoint must preserve event index zero"
+            );
+            assert_eq!(
+                continue_checkpointed.last_time,
+                Timestamp::from_nanos(0),
+                "a Continue checkpoint must preserve logical time zero"
+            );
+            assert_eq!(
+                &*continue_calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::TakeError,
+                ],
+                "a clean Continue checkpoint must commit no record"
+            );
+
+            let stop_calls = record_calls();
+            let stop_effects =
+                scripted_stop_effects(Rc::clone(&stop_calls), Timestamp::from_nanos(u64::MAX));
+            let mut stop_environment = ScriptedEnvironment::<u8>::new(Rc::clone(&stop_calls), None);
+            let stop_checkpointed = match stop_effects.checkpoint::<_, ()>(&mut stop_environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a clean Stop checkpoint must advance"),
+            };
+
+            assert_eq!(
+                stop_checkpointed.index.as_u64(),
+                0,
+                "a Stop checkpoint must preserve event index zero"
+            );
+            assert_eq!(
+                stop_checkpointed.last_time,
+                Timestamp::from_nanos(u64::MAX),
+                "a Stop checkpoint must preserve the maximum logical time"
+            );
+            assert_eq!(
+                stop_calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| matches!(call, ScriptedCall::TakeError))
+                    .count(),
+                1,
+                "a clean Stop checkpoint must take exactly one latch snapshot"
+            );
+        }
+
+        /// Invariant: a pending error on a Stop turn is consumed without writing a
+        /// completion or shutdown-intent record.
+        #[test]
+        fn a_stop_path_pending_error_commits_nothing() {
+            let calls = record_calls();
+            let effects_complete =
+                scripted_stop_effects(Rc::clone(&calls), Timestamp::from_nanos(1));
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.pending_error = Some("pending stop checkpoint failure");
+
+            let fatal = match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Err(FatalCause::Environment(fatal)) => fatal,
+                Err(_) => panic!("a Stop checkpoint error must remain an Environment fatal"),
+                Ok(_) => panic!("a pending Stop checkpoint error must prevent advancement"),
+            };
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Checkpoint,
+                "a Stop checkpoint error must identify the checkpoint operation"
+            );
+            assert_eq!(
+                fatal.error, "pending stop checkpoint failure",
+                "a Stop checkpoint fatal must preserve the pending error"
+            );
+            assert_eq!(
+                calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| matches!(call, ScriptedCall::RecordCommitted(_)))
+                    .count(),
+                1,
+                "a failed Stop checkpoint must leave RunStarted as the only record"
+            );
+        }
+    }
+
+    mod turn_completion {
+        use super::*;
+
+        const RUN_STARTED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+        const TURN_COMPLETED_CONTINUE_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"TurnCompleted\",\"index\":0,\"outcome\":\"Continue\"}\n";
+        const STOP_REQUESTED_AT_ZERO: &[u8] = b"{\"record_kind\":\"StopRequested\",\"index\":0}\n";
+
+        fn continue_checkpointed(
+            calls: ScriptedCalls<u8>,
+        ) -> Certificate<ScriptedWriter<u8>, Checkpointed<answer::Continue>> {
+            let effects_complete =
+                scripted_continue_effects(Rc::clone(&calls), Timestamp::from_nanos(0));
+            let mut environment = ScriptedEnvironment::<u8>::new(calls, None);
+            match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a clean Continue completion fixture must checkpoint"),
+            }
+        }
+
+        fn stop_checkpointed(
+            calls: ScriptedCalls<u8>,
+        ) -> Certificate<ScriptedWriter<u8>, Checkpointed<answer::Stop>> {
+            let effects_complete =
+                scripted_stop_effects(Rc::clone(&calls), Timestamp::from_nanos(0));
+            let mut environment = ScriptedEnvironment::<u8>::new(calls, None);
+            match effects_complete.checkpoint::<_, ()>(&mut environment) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a clean Stop completion fixture must checkpoint"),
+            }
+        }
+
+        fn direct_checkpointed<W: io::Write, A>(
+            writer: W,
+            max_record_bytes: usize,
+            index: u64,
+            last_time: u64,
+        ) -> Certificate<W, Checkpointed<A>> {
+            Certificate {
+                journal: certificate_journal(writer, max_record_bytes),
+                index: EventIndex::new(index),
+                last_time: Timestamp::from_nanos(last_time),
+                _phase: PhantomData,
+            }
+        }
+
+        /// Invariant: completing a Continue turn commits exactly one completion
+        /// record carrying the Continue outcome before entering the next-turn phase.
+        /// Design Doc: the Edges table, by name
+        #[test]
+        fn continue_commits_turn_completed_continue() {
+            let calls = record_calls();
+            let checkpointed = continue_checkpointed(Rc::clone(&calls));
+
+            let between_turns = match checkpointed.complete_continue() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a Continue completion record must commit"),
+            };
+            fn require_between_turns<W: io::Write>(_certificate: &Certificate<W, BetweenTurns>) {}
+            require_between_turns(&between_turns);
+            drop(between_turns);
+
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::TakeError,
+                    ScriptedCall::RecordCommitted(TURN_COMPLETED_CONTINUE_AT_ZERO.to_vec()),
+                ],
+                "a Continue completion must append exactly its fixed completion record"
+            );
+        }
+
+        /// Invariant: completing a Stop turn commits shutdown intent before entering
+        /// the stop-pending phase and does not initiate Environment shutdown itself.
+        /// Design Doc: the Edges table, by name
+        #[test]
+        fn stop_commits_stop_requested() {
+            let calls = record_calls();
+            let checkpointed = stop_checkpointed(Rc::clone(&calls));
+
+            let stop_pending = match checkpointed.request_stop() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a StopRequested record must commit"),
+            };
+            fn require_stop_pending<W: io::Write>(_certificate: &Certificate<W, StopPending>) {}
+            require_stop_pending(&stop_pending);
+            drop(stop_pending);
+
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::TakeError,
+                    ScriptedCall::RecordCommitted(STOP_REQUESTED_AT_ZERO.to_vec()),
+                ],
+                "requesting Stop must commit intent without invoking shutdown"
+            );
+        }
+
+        /// Invariant: each completion method derives its record solely from the
+        /// certificate's fixed answer, without accepting a caller-supplied outcome.
+        /// Design Doc: RUN-ENFORCEMENT
+        #[test]
+        fn the_committed_outcome_is_the_phase_marker_not_a_caller_value() {
+            let mut continue_bytes = Vec::new();
+            let continue_certificate: Certificate<_, Checkpointed<answer::Continue>> =
+                direct_checkpointed(&mut continue_bytes, 128, 7, 11);
+            let continue_successor = match continue_certificate.complete_continue() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("the Continue marker must commit its fixed outcome"),
+            };
+            drop(continue_successor);
+
+            let mut stop_bytes = Vec::new();
+            let stop_certificate: Certificate<_, Checkpointed<answer::Stop>> =
+                direct_checkpointed(&mut stop_bytes, 128, 7, 11);
+            let stop_successor = match stop_certificate.request_stop() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("the Stop marker must commit its fixed intent"),
+            };
+            drop(stop_successor);
+
+            assert_eq!(
+                continue_bytes,
+                b"{\"record_kind\":\"TurnCompleted\",\"index\":7,\"outcome\":\"Continue\"}\n",
+                "the Continue marker must select TurnCompleted(Continue)"
+            );
+            assert_eq!(
+                stop_bytes, b"{\"record_kind\":\"StopRequested\",\"index\":7}\n",
+                "the Stop marker must select StopRequested"
+            );
+        }
+
+        /// Invariant: completion transitions preserve accepted index and logical
+        /// time at zero, one, and the largest representable value.
+        #[test]
+        fn completion_transitions_preserve_index_and_time_boundaries() {
+            for value in [0, 1, u64::MAX] {
+                let continue_certificate: Certificate<_, Checkpointed<answer::Continue>> =
+                    direct_checkpointed(Vec::new(), 128, value, value);
+                let between_turns = match continue_certificate.complete_continue() {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a boundary-valued Continue completion must commit"),
+                };
+                assert_eq!(
+                    between_turns.index.as_u64(),
+                    value,
+                    "a Continue completion must preserve its boundary-valued index"
+                );
+                assert_eq!(
+                    between_turns.last_time.as_nanos(),
+                    value,
+                    "a Continue completion must preserve its boundary-valued logical time"
+                );
+
+                let stop_certificate: Certificate<_, Checkpointed<answer::Stop>> =
+                    direct_checkpointed(Vec::new(), 128, value, value);
+                let stop_pending = match stop_certificate.request_stop() {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a boundary-valued Stop request must commit"),
+                };
+                assert_eq!(
+                    stop_pending.index.as_u64(),
+                    value,
+                    "a Stop request must preserve its boundary-valued index"
+                );
+                assert_eq!(
+                    stop_pending.last_time.as_nanos(),
+                    value,
+                    "a Stop request must preserve its boundary-valued logical time"
+                );
+            }
+        }
+
+        /// Invariant: each completion record commits when its encoded JSON exactly
+        /// fills the Journal's configured record capacity.
+        #[test]
+        fn completion_records_succeed_at_exact_record_capacity() {
+            let mut continue_bytes = Vec::new();
+            let continue_certificate: Certificate<_, Checkpointed<answer::Continue>> =
+                direct_checkpointed(
+                    &mut continue_bytes,
+                    TURN_COMPLETED_CONTINUE_AT_ZERO.len() - 1,
+                    0,
+                    0,
+                );
+            let continue_successor = match continue_certificate.complete_continue() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("an exact-capacity Continue completion must commit"),
+            };
+            drop(continue_successor);
+            assert_eq!(
+                continue_bytes, TURN_COMPLETED_CONTINUE_AT_ZERO,
+                "an exact-capacity Continue completion must write its complete JSON line"
+            );
+
+            let mut stop_bytes = Vec::new();
+            let stop_certificate: Certificate<_, Checkpointed<answer::Stop>> =
+                direct_checkpointed(&mut stop_bytes, STOP_REQUESTED_AT_ZERO.len() - 1, 0, 0);
+            let stop_successor = match stop_certificate.request_stop() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("an exact-capacity Stop request must commit"),
+            };
+            drop(stop_successor);
+            assert_eq!(
+                stop_bytes, STOP_REQUESTED_AT_ZERO,
+                "an exact-capacity Stop request must write its complete JSON line"
+            );
+        }
+
+        /// Invariant: a completion record one byte beyond capacity fails before
+        /// writing output and reports metadata for the attempted record.
+        #[test]
+        fn completion_records_one_byte_past_capacity_fail_without_output() {
+            let mut continue_bytes = Vec::new();
+            let continue_certificate: Certificate<_, Checkpointed<answer::Continue>> =
+                direct_checkpointed(
+                    &mut continue_bytes,
+                    TURN_COMPLETED_CONTINUE_AT_ZERO.len() - 2,
+                    0,
+                    0,
+                );
+            let continue_fatal = match continue_certificate.complete_continue() {
+                Err(fatal) => fatal,
+                Ok(_) => panic!("an oversized Continue completion must fail"),
+            };
+            assert_eq!(
+                continue_fatal.record_kind,
+                RecordKind::TurnCompleted,
+                "an oversized Continue completion must identify TurnCompleted"
+            );
+            assert_eq!(
+                continue_fatal.outcome,
+                Some(TurnOutcome::Continue),
+                "an oversized Continue completion must retain its fixed outcome"
+            );
+            assert!(
+                matches!(continue_fatal.error, JournalError::BoundExceeded),
+                "an oversized Continue completion must report BoundExceeded"
+            );
+            assert!(
+                continue_bytes.is_empty(),
+                "an oversized Continue completion must write no partial bytes"
+            );
+
+            let mut stop_bytes = Vec::new();
+            let stop_certificate: Certificate<_, Checkpointed<answer::Stop>> =
+                direct_checkpointed(&mut stop_bytes, STOP_REQUESTED_AT_ZERO.len() - 2, 0, 0);
+            let stop_fatal = match stop_certificate.request_stop() {
+                Err(fatal) => fatal,
+                Ok(_) => panic!("an oversized Stop request must fail"),
+            };
+            assert_eq!(
+                stop_fatal.record_kind,
+                RecordKind::StopRequested,
+                "an oversized Stop request must identify StopRequested"
+            );
+            assert_eq!(
+                stop_fatal.outcome, None,
+                "an oversized Stop request must not carry a completion outcome"
+            );
+            assert!(
+                matches!(stop_fatal.error, JournalError::BoundExceeded),
+                "an oversized Stop request must report BoundExceeded"
+            );
+            assert!(
+                stop_bytes.is_empty(),
+                "an oversized Stop request must write no partial bytes"
+            );
         }
     }
 
