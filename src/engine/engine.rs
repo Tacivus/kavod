@@ -1889,4 +1889,630 @@ mod tests {
             );
         }
     }
+
+    mod run_turn_loop {
+        use super::*;
+        use std::collections::VecDeque;
+
+        #[derive(Clone, Copy)]
+        enum LoopAnswer {
+            Continue,
+            Stop,
+            Fatal,
+        }
+
+        struct TurnScript {
+            mutation: u8,
+            commands: Vec<u8>,
+            answer: LoopAnswer,
+        }
+
+        struct LoopError {
+            label: &'static str,
+            drops: Rc<Cell<usize>>,
+        }
+
+        impl Drop for LoopError {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum LoopCall {
+            InitialState,
+            Start,
+            OnStart {
+                index: u64,
+                logical_time: u64,
+            },
+            OnEvent {
+                event: u8,
+                index: u64,
+                logical_time: u64,
+            },
+            Dispatch(u8),
+            TakeError,
+            NextEvent,
+            Shutdown,
+        }
+
+        struct LoopApplication {
+            turns: RefCell<VecDeque<TurnScript>>,
+            calls: Rc<RefCell<Vec<LoopCall>>>,
+            error_drops: Rc<Cell<usize>>,
+        }
+
+        impl LoopApplication {
+            fn handle(
+                &self,
+                state: &mut Vec<u8>,
+                context: &mut Context<'_, u8>,
+            ) -> Outcome<LoopError> {
+                let turn =
+                    self.turns.borrow_mut().pop_front().expect(
+                        "the loop must not invoke more handlers than the test script provides",
+                    );
+                state.push(turn.mutation);
+                for command in turn.commands {
+                    context.emit(command);
+                }
+                match turn.answer {
+                    LoopAnswer::Continue => Outcome::Continue,
+                    LoopAnswer::Stop => Outcome::Stop,
+                    LoopAnswer::Fatal => Outcome::Fatal(LoopError {
+                        label: "scripted handler fatal",
+                        drops: Rc::clone(&self.error_drops),
+                    }),
+                }
+            }
+        }
+
+        impl Application for LoopApplication {
+            type State = Vec<u8>;
+            type Event = u8;
+            type Command = u8;
+            type Error = LoopError;
+
+            fn initial_state(&self) -> Self::State {
+                self.calls.borrow_mut().push(LoopCall::InitialState);
+                Vec::new()
+            }
+
+            fn on_start(
+                &self,
+                state: &mut Self::State,
+                context: &mut Context<'_, Self::Command>,
+            ) -> Outcome<Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::OnStart {
+                    index: context.index().as_u64(),
+                    logical_time: context.logical_time().as_nanos(),
+                });
+                self.handle(state, context)
+            }
+
+            fn on_event(
+                &self,
+                state: &mut Self::State,
+                event: &Self::Event,
+                context: &mut Context<'_, Self::Command>,
+            ) -> Outcome<Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::OnEvent {
+                    event: *event,
+                    index: context.index().as_u64(),
+                    logical_time: context.logical_time().as_nanos(),
+                });
+                self.handle(state, context)
+            }
+        }
+
+        struct LoopEnvironment {
+            calls: Rc<RefCell<Vec<LoopCall>>>,
+            events: VecDeque<(u8, Timestamp)>,
+        }
+
+        impl Environment for LoopEnvironment {
+            type Event = u8;
+            type Command = u8;
+            type Error = &'static str;
+
+            fn start(&mut self) -> Result<Timestamp, Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::Start);
+                Ok(Timestamp::from_nanos(10))
+            }
+
+            fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::NextEvent);
+                Ok(self
+                    .events
+                    .pop_front()
+                    .expect("the loop must not request more Events than the test script provides"))
+            }
+
+            fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::Dispatch(command));
+                Ok(())
+            }
+
+            fn take_error(&mut self) -> Option<Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::TakeError);
+                None
+            }
+
+            fn shutdown(self) -> ShutdownReport<Self::Error> {
+                self.calls.borrow_mut().push(LoopCall::Shutdown);
+                ShutdownReport {
+                    quiescence: Quiescence::Quiesced,
+                    error: None,
+                }
+            }
+        }
+
+        fn turn(mutation: u8, commands: &[u8], answer: LoopAnswer) -> TurnScript {
+            TurnScript {
+                mutation,
+                commands: commands.to_vec(),
+                answer,
+            }
+        }
+
+        #[allow(
+            clippy::type_complexity,
+            reason = "the fixture returns the run exit with both shared observation handles"
+        )]
+        fn run_loop(
+            turns: Vec<TurnScript>,
+            events: Vec<(u8, u64)>,
+            max_commands_per_turn: usize,
+            bytes: &mut Vec<u8>,
+        ) -> (
+            EngineExit<Vec<u8>, LoopError, &'static str>,
+            Rc<RefCell<Vec<LoopCall>>>,
+            Rc<Cell<usize>>,
+        ) {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let error_drops = Rc::new(Cell::new(0));
+            let app = LoopApplication {
+                turns: RefCell::new(turns.into()),
+                calls: Rc::clone(&calls),
+                error_drops: Rc::clone(&error_drops),
+            };
+            let environment = LoopEnvironment {
+                calls: Rc::clone(&calls),
+                events: events
+                    .into_iter()
+                    .map(|(event, nanos)| (event, Timestamp::from_nanos(nanos)))
+                    .collect(),
+            };
+            let config = EngineConfig {
+                max_commands_per_turn: NonZeroUsize::new(max_commands_per_turn)
+                    .expect("a loop test command bound must be nonzero"),
+                max_record_bytes: NonZeroUsize::new(256)
+                    .expect("a loop test record bound must be nonzero"),
+            };
+            let engine = match Engine::new(config, app, environment, bytes) {
+                Ok(engine) => engine,
+                Err(_) => panic!("a loop test Engine must construct with small bounds"),
+            };
+
+            (engine.run(), calls, error_drops)
+        }
+
+        /// Invariant: each continued turn finishes its command handoff and
+        /// checkpoint before the next Event is requested, and accepted Events reach
+        /// handlers once in source order.
+        /// Design Doc: A2
+        #[test]
+        fn continue_turns_accept_events_in_sequence() {
+            let turns = vec![
+                turn(1, &[10], LoopAnswer::Continue),
+                turn(2, &[20], LoopAnswer::Continue),
+                turn(3, &[30], LoopAnswer::Stop),
+            ];
+            let mut bytes = Vec::new();
+
+            let (exit, calls, _) = run_loop(turns, vec![(7, 11), (8, 12)], 1, &mut bytes);
+
+            match exit {
+                EngineExit::Stopped { state } => assert_eq!(
+                    state,
+                    vec![1, 2, 3],
+                    "a serial three-turn run must retain one mutation from each handler"
+                ),
+                EngineExit::Fatal { .. } => {
+                    panic!("a serial Continue, Continue, Stop script must finish cleanly")
+                }
+            }
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[
+                    LoopCall::InitialState,
+                    LoopCall::Start,
+                    LoopCall::OnStart {
+                        index: 0,
+                        logical_time: 10,
+                    },
+                    LoopCall::Dispatch(10),
+                    LoopCall::TakeError,
+                    LoopCall::NextEvent,
+                    LoopCall::OnEvent {
+                        event: 7,
+                        index: 1,
+                        logical_time: 11,
+                    },
+                    LoopCall::Dispatch(20),
+                    LoopCall::TakeError,
+                    LoopCall::NextEvent,
+                    LoopCall::OnEvent {
+                        event: 8,
+                        index: 2,
+                        logical_time: 12,
+                    },
+                    LoopCall::Dispatch(30),
+                    LoopCall::TakeError,
+                    LoopCall::Shutdown,
+                ],
+                "each turn must complete before the next Event is requested, with Events handled in order"
+            );
+        }
+
+        /// Invariant: exceeding the command bound fixes command overflow as the
+        /// run's cause, discards its staged batch, and outranks every handler answer.
+        /// Design Doc: the TurnOpen phase row, by name
+        #[test]
+        fn overflow_beats_the_returned_outcome_and_discards_the_batch() {
+            for answer in [LoopAnswer::Continue, LoopAnswer::Stop, LoopAnswer::Fatal] {
+                let mut bytes = Vec::new();
+                let (exit, calls, error_drops) =
+                    run_loop(vec![turn(1, &[10, 11], answer)], Vec::new(), 1, &mut bytes);
+
+                match exit {
+                    EngineExit::Fatal {
+                        state,
+                        cause: FatalCause::Core(CoreError::CommandBoundExceeded),
+                        quiescence,
+                    } => {
+                        assert_eq!(
+                            state,
+                            vec![1],
+                            "command overflow must retain the failing handler's State mutation"
+                        );
+                        assert_eq!(
+                            quiescence,
+                            Quiescence::Quiesced,
+                            "command overflow must carry finalizing shutdown's quiescence"
+                        );
+                    }
+                    _ => panic!("command overflow must outrank every returned Outcome"),
+                }
+                assert_eq!(
+                    calls.borrow().as_slice(),
+                    &[
+                        LoopCall::InitialState,
+                        LoopCall::Start,
+                        LoopCall::OnStart {
+                            index: 0,
+                            logical_time: 10,
+                        },
+                        LoopCall::Shutdown,
+                    ],
+                    "an overflowing batch must be discarded before dispatch, checkpoint, or Event acquisition"
+                );
+                assert_eq!(
+                    error_drops.get(),
+                    if matches!(answer, LoopAnswer::Fatal) {
+                        1
+                    } else {
+                        0
+                    },
+                    "an outranked Application Error must be discarded while nonfatal answers create no Error"
+                );
+            }
+        }
+
+        /// Invariant: a handler failure preserves its exact Error while discarding
+        /// only that turn's staged commands and retaining effects from prior turns.
+        /// Design Doc: A4
+        #[test]
+        fn a_handler_fatal_discards_the_batch_and_carries_the_error() {
+            let turns = vec![
+                turn(1, &[10], LoopAnswer::Continue),
+                turn(2, &[20], LoopAnswer::Fatal),
+            ];
+            let mut bytes = Vec::new();
+
+            let (exit, calls, error_drops) = run_loop(turns, vec![(7, 11)], 1, &mut bytes);
+            let error = match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause: FatalCause::Application(error),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state,
+                        vec![1, 2],
+                        "an event-handler failure must retain mutations from both completed handler calls"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "a handler failure must carry finalizing shutdown's quiescence"
+                    );
+                    error
+                }
+                _ => panic!(
+                    "a non-overflowing handler Fatal must remain the run's Application cause"
+                ),
+            };
+            assert_eq!(
+                error.label, "scripted handler fatal",
+                "a handler Fatal must carry the exact Error payload returned by the handler"
+            );
+            assert_eq!(
+                error_drops.get(),
+                0,
+                "the handler Error must remain owned by the Fatal exit"
+            );
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[
+                    LoopCall::InitialState,
+                    LoopCall::Start,
+                    LoopCall::OnStart {
+                        index: 0,
+                        logical_time: 10,
+                    },
+                    LoopCall::Dispatch(10),
+                    LoopCall::TakeError,
+                    LoopCall::NextEvent,
+                    LoopCall::OnEvent {
+                        event: 7,
+                        index: 1,
+                        logical_time: 11,
+                    },
+                    LoopCall::Shutdown,
+                ],
+                "a fatal event turn must not dispatch its batch, checkpoint, or request another Event"
+            );
+            drop(error);
+            assert_eq!(
+                error_drops.get(),
+                1,
+                "dropping the Fatal cause must drop its preserved Application Error"
+            );
+        }
+
+        /// Invariant: mutations made by a failing handler remain in the returned
+        /// State for both application failure and command overflow, on start and
+        /// Event turns alike.
+        /// Design Doc: APP-STATE
+        #[test]
+        fn state_mutations_stand_on_every_fatal_exit() {
+            enum ExpectedCause {
+                Application,
+                Overflow,
+            }
+
+            let scenarios = [
+                (
+                    vec![turn(1, &[], LoopAnswer::Fatal)],
+                    Vec::new(),
+                    ExpectedCause::Application,
+                    vec![1],
+                ),
+                (
+                    vec![turn(1, &[10, 11], LoopAnswer::Continue)],
+                    Vec::new(),
+                    ExpectedCause::Overflow,
+                    vec![1],
+                ),
+                (
+                    vec![
+                        turn(1, &[], LoopAnswer::Continue),
+                        turn(2, &[], LoopAnswer::Fatal),
+                    ],
+                    vec![(7, 11)],
+                    ExpectedCause::Application,
+                    vec![1, 2],
+                ),
+                (
+                    vec![
+                        turn(1, &[], LoopAnswer::Continue),
+                        turn(2, &[20, 21], LoopAnswer::Stop),
+                    ],
+                    vec![(7, 11)],
+                    ExpectedCause::Overflow,
+                    vec![1, 2],
+                ),
+            ];
+
+            for (turns, events, expected_cause, expected_state) in scenarios {
+                let mut bytes = Vec::new();
+                let (exit, _, _) = run_loop(turns, events, 1, &mut bytes);
+
+                match exit {
+                    EngineExit::Fatal { state, cause, .. } => {
+                        assert_eq!(
+                            state, expected_state,
+                            "a handler-phase Fatal exit must retain every mutation through the failing handler"
+                        );
+                        assert!(
+                            matches!(
+                                (&expected_cause, cause),
+                                (ExpectedCause::Application, FatalCause::Application(_))
+                                    | (
+                                        ExpectedCause::Overflow,
+                                        FatalCause::Core(CoreError::CommandBoundExceeded)
+                                    )
+                            ),
+                            "each State scenario must reach its scripted handler-phase Fatal cause"
+                        );
+                    }
+                    EngineExit::Stopped { .. } => {
+                        panic!("every State-retention scenario must end Fatal")
+                    }
+                }
+            }
+        }
+
+        /// Invariant: when an accepted Event turn exceeds its command bound, the
+        /// journal locates the turn but records none of its staged command intent.
+        /// Design Doc: the intent-vacuum derivation, by name
+        #[test]
+        fn an_over_emitting_turn_leaves_no_command_record() {
+            let turns = vec![
+                turn(1, &[], LoopAnswer::Continue),
+                turn(2, &[41, 42], LoopAnswer::Stop),
+            ];
+            let mut bytes = Vec::new();
+
+            let (exit, calls, _) = run_loop(turns, vec![(9, 11)], 1, &mut bytes);
+
+            assert!(
+                matches!(
+                    exit,
+                    EngineExit::Fatal {
+                        cause: FatalCause::Core(CoreError::CommandBoundExceeded),
+                        ..
+                    }
+                ),
+                "an over-emitting Event turn must exit with command-bound overflow"
+            );
+            let journal = std::str::from_utf8(&bytes)
+                .expect("an intent-vacuum test Journal must contain UTF-8 JSON records");
+            let records: Vec<_> = journal.lines().collect();
+            assert_eq!(
+                records.len(),
+                3,
+                "an overflowing first Event turn must stop after its EventAccepted record"
+            );
+            assert!(
+                records[2].contains("\"record_kind\":\"EventAccepted\"")
+                    && records[2].contains("\"index\":1"),
+                "the EventAccepted record must identify the over-emitting turn"
+            );
+            assert!(
+                !journal.contains("\"record_kind\":\"CommandsPrepared\"")
+                    && !journal.contains("\"commands\""),
+                "an overflowing turn must leave no command-intent record"
+            );
+            assert!(
+                !calls
+                    .borrow()
+                    .iter()
+                    .any(|call| matches!(call, LoopCall::Dispatch(_))),
+                "commands staged by an overflowing turn must never be dispatched"
+            );
+        }
+
+        /// Invariant: filling the command batch exactly on consecutive turns
+        /// dispatches every command once in per-turn order without false overflow.
+        #[test]
+        fn exact_capacity_batches_dispatch_once_in_order_across_reused_turns() {
+            let turns = vec![
+                turn(1, &[10, 11], LoopAnswer::Continue),
+                turn(2, &[20, 21], LoopAnswer::Stop),
+            ];
+            let mut bytes = Vec::new();
+
+            let (exit, calls, _) = run_loop(turns, vec![(7, 11)], 2, &mut bytes);
+
+            assert!(
+                matches!(exit, EngineExit::Stopped { state } if state == vec![1, 2]),
+                "exact-capacity batches on reused turns must complete without overflow"
+            );
+            let dispatched: Vec<_> = calls
+                .borrow()
+                .iter()
+                .filter_map(|call| match call {
+                    LoopCall::Dispatch(command) => Some(*command),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                dispatched,
+                vec![10, 11, 20, 21],
+                "each exact-capacity batch must dispatch once in turn and emission order"
+            );
+        }
+
+        /// Invariant: a failure returned by the start handler ends the run before
+        /// command effects, checkpointing, or Event acquisition and then shuts down
+        /// exactly once.
+        #[test]
+        fn a_start_handler_fatal_performs_no_effect_phase_or_event_request() {
+            let mut bytes = Vec::new();
+
+            let (exit, calls, _) = run_loop(
+                vec![turn(1, &[10], LoopAnswer::Fatal)],
+                Vec::new(),
+                1,
+                &mut bytes,
+            );
+
+            assert!(
+                matches!(
+                    exit,
+                    EngineExit::Fatal {
+                        state,
+                        cause: FatalCause::Application(_),
+                        quiescence: Quiescence::Quiesced,
+                    } if state == vec![1]
+                ),
+                "a start-handler Fatal must preserve State and remain the Application cause"
+            );
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[
+                    LoopCall::InitialState,
+                    LoopCall::Start,
+                    LoopCall::OnStart {
+                        index: 0,
+                        logical_time: 10,
+                    },
+                    LoopCall::Shutdown,
+                ],
+                "a start-handler Fatal must skip effects and Event acquisition before one shutdown"
+            );
+        }
+
+        /// Invariant: a Continue turn with no commands takes the empty effects path,
+        /// accepts one Event, and a Stop answer prevents another Event request.
+        #[test]
+        fn an_empty_continue_turn_accepts_exactly_one_event_before_stop() {
+            let turns = vec![
+                turn(1, &[], LoopAnswer::Continue),
+                turn(2, &[], LoopAnswer::Stop),
+            ];
+            let mut bytes = Vec::new();
+
+            let (exit, calls, _) = run_loop(turns, vec![(7, 11)], 1, &mut bytes);
+
+            assert!(
+                matches!(exit, EngineExit::Stopped { state } if state == vec![1, 2]),
+                "an empty Continue turn followed by Stop must finish with both State mutations"
+            );
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[
+                    LoopCall::InitialState,
+                    LoopCall::Start,
+                    LoopCall::OnStart {
+                        index: 0,
+                        logical_time: 10,
+                    },
+                    LoopCall::TakeError,
+                    LoopCall::NextEvent,
+                    LoopCall::OnEvent {
+                        event: 7,
+                        index: 1,
+                        logical_time: 11,
+                    },
+                    LoopCall::TakeError,
+                    LoopCall::Shutdown,
+                ],
+                "an empty Continue turn must request one Event, and Stop must end the back edge"
+            );
+        }
+    }
 }
