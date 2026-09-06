@@ -106,6 +106,12 @@ macro_rules! reconstruct_engine {
                 Core(CoreError),
             }
 
+            impl<AE, EE> FatalCause<AE, EE> {
+                pub(super) fn environment(error: EE, operation: EnvironmentOperation) -> Self {
+                    Self::Environment(EnvironmentFatal { error, operation })
+                }
+            }
+
             mod record {
                 include!("../../../src/engine/record.rs");
             }

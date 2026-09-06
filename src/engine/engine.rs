@@ -1,5 +1,6 @@
 use super::record::{
-    Certificate, Checkpointed, ClassifiedTurn, JournalFatal, TurnOpen, TurnOutcome, answer,
+    Certificate, Checkpointed, ClassifiedTurn, Initial, JournalFatal, StopPending, TurnOpen,
+    TurnOutcome, answer,
 };
 use crate::application::{Application, Context, Outcome};
 use crate::bounded_buffer::BoundedBuffer;
@@ -79,14 +80,9 @@ where
 
         let (answer, overflowed) = {
             let mut context = Context::new(batch, index, logical_time);
-            let answer = if index.as_u64() == 0 {
-                app.on_start(state, &mut context)
-            } else {
-                app.on_event(
-                    state,
-                    event.expect("a later-turn certificate must have an accepted Event"),
-                    &mut context,
-                )
+            let answer = match event {
+                None => app.on_start(state, &mut context),
+                Some(event) => app.on_event(state, event, &mut context),
             };
             (answer, context.overflowed())
         };
@@ -141,6 +137,35 @@ where
         certificate.checkpoint(environment)
     }
 
+    fn drive(
+        app: &A,
+        state: &mut A::State,
+        env: &mut E,
+        batch: &mut BoundedBuffer<A::Command>,
+        certificate: Certificate<W, Initial>,
+    ) -> Result<Certificate<W, StopPending>, FatalCause<A::Error, E::Error>> {
+        let mut certificate = certificate.run_started().map_err(FatalCause::Journal)?;
+        let mut accepted_event = None;
+
+        loop {
+            match Self::turn(app, state, accepted_event.as_ref(), batch, certificate)? {
+                ClassifiedTurn::Continue(classified) => {
+                    let (next, event) = Self::effects(classified, env, batch)?
+                        .complete_continue()
+                        .map_err(FatalCause::Journal)?
+                        .accept_event(env)?;
+                    accepted_event = Some(event);
+                    certificate = next;
+                }
+                ClassifiedTurn::Stop(classified) => {
+                    return Self::effects(classified, env, batch)?
+                        .request_stop()
+                        .map_err(FatalCause::Journal);
+                }
+            }
+        }
+    }
+
     pub fn run(self) -> EngineExit<A::State, A::Error, E::Error> {
         let Self {
             app,
@@ -154,95 +179,21 @@ where
             Err(error) => {
                 return Self::finalize(
                     state,
-                    FatalCause::Environment(EnvironmentFatal {
-                        error,
-                        operation: EnvironmentOperation::Start,
-                    }),
+                    FatalCause::environment(error, EnvironmentOperation::Start),
                     Finalization::StartFailed,
                 );
             }
         };
         let certificate = Certificate::mint(journal, start_time);
-        let mut certificate = match certificate.run_started() {
-            Ok(certificate) => certificate,
-            Err(fatal) => {
-                return Self::finalize(
-                    state,
-                    FatalCause::Journal(fatal),
-                    Finalization::Unconsumed(env),
-                );
-            }
+        let stop_pending = match Self::drive(&app, &mut state, &mut env, &mut batch, certificate) {
+            Ok(stop_pending) => stop_pending,
+            Err(cause) => return Self::finalize(state, cause, Finalization::Unconsumed(env)),
         };
-        let mut pending_event = None;
 
-        loop {
-            let classified = match Self::turn(
-                &app,
-                &mut state,
-                pending_event.as_ref(),
-                &mut batch,
-                certificate,
-            ) {
-                Ok(classified) => classified,
-                Err(cause) => return Self::finalize(state, cause, Finalization::Unconsumed(env)),
-            };
-
-            match classified {
-                ClassifiedTurn::Continue(classified) => {
-                    match Self::effects(classified, &mut env, &mut batch) {
-                        Ok(checkpointed) => match checkpointed.complete_continue() {
-                            Ok(between_turns) => match between_turns.accept_event(&mut env) {
-                                Ok((next, event)) => {
-                                    pending_event = Some(event);
-                                    certificate = next;
-                                }
-                                Err(cause) => {
-                                    return Self::finalize(
-                                        state,
-                                        cause,
-                                        Finalization::Unconsumed(env),
-                                    );
-                                }
-                            },
-                            Err(fatal) => {
-                                return Self::finalize(
-                                    state,
-                                    FatalCause::Journal(fatal),
-                                    Finalization::Unconsumed(env),
-                                );
-                            }
-                        },
-                        Err(cause) => {
-                            return Self::finalize(state, cause, Finalization::Unconsumed(env));
-                        }
-                    }
-                }
-                ClassifiedTurn::Stop(classified) => {
-                    match Self::effects(classified, &mut env, &mut batch) {
-                        Ok(checkpointed) => match checkpointed.request_stop() {
-                            Ok(stop_pending) => match stop_pending.close(env) {
-                                Ok(_closed) => return EngineExit::Stopped { state },
-                                Err((cause, quiescence)) => {
-                                    return Self::finalize(
-                                        state,
-                                        cause,
-                                        Finalization::Retained(quiescence),
-                                    );
-                                }
-                            },
-                            Err(fatal) => {
-                                return Self::finalize(
-                                    state,
-                                    FatalCause::Journal(fatal),
-                                    Finalization::Unconsumed(env),
-                                );
-                            }
-                        },
-                        Err(cause) => {
-                            return Self::finalize(state, cause, Finalization::Unconsumed(env));
-                        }
-                    }
-                }
+        match stop_pending.close(env) {
+            Ok(_closed) => EngineExit::Stopped { state },
+            Err((cause, quiescence)) => {
+                Self::finalize(state, cause, Finalization::Retained(quiescence))
             }
         }
     }
@@ -264,6 +215,13 @@ pub enum FatalCause<AE, EE> {
     Environment(EnvironmentFatal<EE>),
     Journal(JournalFatal),
     Core(CoreError),
+}
+
+impl<AE, EE> FatalCause<AE, EE> {
+    /// The Environment cause observed at `operation`.
+    pub(super) fn environment(error: EE, operation: EnvironmentOperation) -> Self {
+        Self::Environment(EnvironmentFatal { error, operation })
+    }
 }
 
 /// Names the operation where the Error was observed - not necessarily where it was

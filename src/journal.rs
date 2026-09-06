@@ -75,13 +75,14 @@ impl<W: io::Write> Journal<W> {
 
         self.encode_line(record)?;
         self.write_line()?;
-        self.writer.flush().map_err(|error| {
-            self.poisoned = true;
-            JournalError::Sink {
-                operation: SinkOperation::Flush,
-                error,
-            }
-        })
+        self.writer
+            .flush()
+            .map_err(|error| self.poison(SinkOperation::Flush, error))
+    }
+
+    fn poison(&mut self, operation: SinkOperation, error: io::Error) -> JournalError {
+        self.poisoned = true;
+        JournalError::Sink { operation, error }
     }
 
     fn encode_raw<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError> {
@@ -120,30 +121,19 @@ impl<W: io::Write> Journal<W> {
 
             match self.writer.write(remaining) {
                 Ok(0) => {
-                    self.poisoned = true;
-                    return Err(JournalError::Sink {
-                        operation: SinkOperation::Write,
-                        error: io::ErrorKind::WriteZero.into(),
-                    });
+                    return Err(self.poison(SinkOperation::Write, io::ErrorKind::WriteZero.into()));
                 }
                 Ok(count) if count > remaining_len => {
-                    self.poisoned = true;
-                    return Err(JournalError::Sink {
-                        operation: SinkOperation::Write,
-                        error: io::Error::new(
+                    return Err(self.poison(
+                        SinkOperation::Write,
+                        io::Error::new(
                             io::ErrorKind::InvalidData,
                             "sink reported writing more bytes than provided",
                         ),
-                    });
+                    ));
                 }
                 Ok(count) => offset += count,
-                Err(error) => {
-                    self.poisoned = true;
-                    return Err(JournalError::Sink {
-                        operation: SinkOperation::Write,
-                        error,
-                    });
-                }
+                Err(error) => return Err(self.poison(SinkOperation::Write, error)),
             }
         }
 

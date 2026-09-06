@@ -1,3 +1,4 @@
+use super::{CoreError, EnvironmentOperation, FatalCause};
 use crate::bounded_buffer::BoundedBuffer;
 use crate::environment::{Environment, Quiescence};
 use crate::journal::{Journal, JournalError};
@@ -31,6 +32,12 @@ impl RecordKind {
 
 pub trait RecordPayload {
     const KIND: RecordKind;
+
+    /// The attempted outcome a failed commit reports: `Some` only for
+    /// `TurnCompleted`.
+    fn outcome(&self) -> Option<TurnOutcome> {
+        None
+    }
 }
 
 /// Kind-typed zero-sized first field; `fn() -> P` keeps auto-traits clean.
@@ -112,6 +119,10 @@ pub struct TurnCompletedRecord {
 
 impl RecordPayload for TurnCompletedRecord {
     const KIND: RecordKind = RecordKind::TurnCompleted;
+
+    fn outcome(&self) -> Option<TurnOutcome> {
+        Some(self.outcome)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -186,14 +197,10 @@ impl<W: io::Write, P> Certificate<W, P> {
         }
     }
 
-    fn commit<R: RecordPayload + Serialize>(
-        &mut self,
-        payload: &R,
-        outcome: Option<TurnOutcome>,
-    ) -> Result<(), JournalFatal> {
+    fn commit<R: RecordPayload + Serialize>(&mut self, payload: &R) -> Result<(), JournalFatal> {
         self.journal.commit(payload).map_err(|error| JournalFatal {
             record_kind: R::KIND,
-            outcome,
+            outcome: payload.outcome(),
             error,
         })
     }
@@ -232,7 +239,7 @@ impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
         mut self,
         environment: &mut E,
         commands: &mut BoundedBuffer<C>,
-    ) -> Result<Certificate<W, EffectsComplete<A>>, super::FatalCause<AE, E::Error>>
+    ) -> Result<Certificate<W, EffectsComplete<A>>, FatalCause<AE, E::Error>>
     where
         C: Serialize,
         E: Environment<Command = C>,
@@ -242,33 +249,24 @@ impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
             "ASSERT-INVARIANTS: the dispatch batch transition requires a nonempty command buffer"
         );
 
-        self.commit(
-            &CommandsPreparedRecord {
-                record_kind: Kind::new(),
-                index: self.index,
-                commands: commands.as_slice(),
-            },
-            None,
-        )
-        .map_err(super::FatalCause::Journal)?;
+        self.commit(&CommandsPreparedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+            commands: commands.as_slice(),
+        })
+        .map_err(FatalCause::Journal)?;
 
         for (position, command) in commands.drain().enumerate() {
             environment.dispatch(command).map_err(|error| {
-                super::FatalCause::Environment(super::EnvironmentFatal {
-                    error,
-                    operation: super::EnvironmentOperation::Dispatch { position },
-                })
+                FatalCause::environment(error, EnvironmentOperation::Dispatch { position })
             })?;
         }
 
-        self.commit(
-            &CommandsDispatchedRecord {
-                record_kind: Kind::new(),
-                index: self.index,
-            },
-            None,
-        )
-        .map_err(super::FatalCause::Journal)?;
+        self.commit(&CommandsDispatchedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+        })
+        .map_err(FatalCause::Journal)?;
 
         Ok(self.advance())
     }
@@ -278,12 +276,12 @@ impl<W: io::Write, A: answer::Answer> Certificate<W, EffectsComplete<A>> {
     pub(super) fn checkpoint<E: Environment, AE>(
         self,
         environment: &mut E,
-    ) -> Result<Certificate<W, Checkpointed<A>>, super::FatalCause<AE, E::Error>> {
+    ) -> Result<Certificate<W, Checkpointed<A>>, FatalCause<AE, E::Error>> {
         match environment.take_error() {
-            Some(error) => Err(super::FatalCause::Environment(super::EnvironmentFatal {
+            Some(error) => Err(FatalCause::environment(
                 error,
-                operation: super::EnvironmentOperation::Checkpoint,
-            })),
+                EnvironmentOperation::Checkpoint,
+            )),
             None => Ok(self.advance()),
         }
     }
@@ -293,14 +291,11 @@ impl<W: io::Write> Certificate<W, Checkpointed<answer::Continue>> {
     pub(super) fn complete_continue(
         mut self,
     ) -> Result<Certificate<W, BetweenTurns>, JournalFatal> {
-        self.commit(
-            &TurnCompletedRecord {
-                record_kind: Kind::new(),
-                index: self.index,
-                outcome: TurnOutcome::Continue,
-            },
-            Some(TurnOutcome::Continue),
-        )?;
+        self.commit(&TurnCompletedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+            outcome: TurnOutcome::Continue,
+        })?;
         Ok(self.advance())
     }
 }
@@ -313,42 +308,36 @@ impl<W: io::Write> Certificate<W, BetweenTurns> {
     pub(super) fn accept_event<E: Environment, AE>(
         mut self,
         environment: &mut E,
-    ) -> Result<(Certificate<W, TurnOpen>, E::Event), super::FatalCause<AE, E::Error>>
+    ) -> Result<(Certificate<W, TurnOpen>, E::Event), FatalCause<AE, E::Error>>
     where
         E::Event: Serialize,
     {
         if self.index.as_u64() == u64::MAX {
-            return Err(super::FatalCause::Core(super::CoreError::IndexExhausted));
+            return Err(FatalCause::Core(CoreError::IndexExhausted));
         }
 
-        let (event, offered) = environment.next_event().map_err(|error| {
-            super::FatalCause::Environment(super::EnvironmentFatal {
-                error,
-                operation: super::EnvironmentOperation::NextEvent,
-            })
-        })?;
+        let (event, offered) = environment
+            .next_event()
+            .map_err(|error| FatalCause::environment(error, EnvironmentOperation::NextEvent))?;
         let next_index = self
             .index
             .as_u64()
             .checked_add(1)
             .expect("RUN-INDEX: overflow past the index domain check");
         if offered < self.last_time {
-            return Err(super::FatalCause::Core(super::CoreError::TimeRegression {
+            return Err(FatalCause::Core(CoreError::TimeRegression {
                 previous: self.last_time,
                 offered,
             }));
         }
 
-        self.commit(
-            &EventAcceptedRecord {
-                record_kind: Kind::new(),
-                index: EventIndex::new(next_index),
-                logical_time: offered,
-                event: &event,
-            },
-            None,
-        )
-        .map_err(super::FatalCause::Journal)?;
+        self.commit(&EventAcceptedRecord {
+            record_kind: Kind::new(),
+            index: EventIndex::new(next_index),
+            logical_time: offered,
+            event: &event,
+        })
+        .map_err(FatalCause::Journal)?;
         self.index = EventIndex::new(next_index);
         self.last_time = offered;
         Ok((self.advance(), event))
@@ -357,13 +346,10 @@ impl<W: io::Write> Certificate<W, BetweenTurns> {
 
 impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
     pub(super) fn request_stop(mut self) -> Result<Certificate<W, StopPending>, JournalFatal> {
-        self.commit(
-            &StopRequestedRecord {
-                record_kind: Kind::new(),
-                index: self.index,
-            },
-            None,
-        )?;
+        self.commit(&StopRequestedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+        })?;
         Ok(self.advance())
     }
 }
@@ -376,35 +362,29 @@ impl<W: io::Write> Certificate<W, StopPending> {
     pub(super) fn close<E: Environment, AE>(
         mut self,
         environment: E,
-    ) -> Result<Certificate<W, Closed>, (super::FatalCause<AE, E::Error>, Quiescence)> {
+    ) -> Result<Certificate<W, Closed>, (FatalCause<AE, E::Error>, Quiescence)> {
         let report = environment.shutdown();
         let retained_quiescence = report.quiescence;
 
         if let Some(error) = report.error {
             return Err((
-                super::FatalCause::Environment(super::EnvironmentFatal {
-                    error,
-                    operation: super::EnvironmentOperation::Shutdown,
-                }),
+                FatalCause::environment(error, EnvironmentOperation::Shutdown),
                 retained_quiescence,
             ));
         }
         if retained_quiescence == Quiescence::Incomplete {
             return Err((
-                super::FatalCause::Core(super::CoreError::ShutdownIncomplete),
+                FatalCause::Core(CoreError::ShutdownIncomplete),
                 retained_quiescence,
             ));
         }
 
-        self.commit(
-            &TurnCompletedRecord {
-                record_kind: Kind::new(),
-                index: self.index,
-                outcome: TurnOutcome::Stop,
-            },
-            Some(TurnOutcome::Stop),
-        )
-        .map_err(|fatal| (super::FatalCause::Journal(fatal), retained_quiescence))?;
+        self.commit(&TurnCompletedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+            outcome: TurnOutcome::Stop,
+        })
+        .map_err(|fatal| (FatalCause::Journal(fatal), retained_quiescence))?;
         Ok(self.advance())
     }
 }
@@ -432,7 +412,7 @@ impl<W: io::Write> Certificate<W, Initial> {
             schema_version: 1,
             logical_time: self.last_time,
         };
-        self.commit(&payload, None)?;
+        self.commit(&payload)?;
         Ok(self.advance())
     }
 }

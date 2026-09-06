@@ -7,7 +7,7 @@ reconstruct_engine! {
             record_kind: record::Kind::new(),
             index: crate::time::EventIndex::new(0),
         };
-        let _result = certificate.commit(&payload, None);
+        let _result = certificate.commit(&payload);
     }
 }
 

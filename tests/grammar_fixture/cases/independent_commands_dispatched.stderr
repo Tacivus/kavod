@@ -1,14 +1,10 @@
 error[E0624]: method `commit` is private
   --> tests/grammar_fixture/cases/independent_commands_dispatched.rs:10:35
    |
-10 |           let _result = certificate.commit(&payload, None);
-   |                                     ^^^^^^ private method
+10 |         let _result = certificate.commit(&payload);
+   |                                   ^^^^^^ private method
    |
   ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
    |
-   | /     fn commit<R: RecordPayload + Serialize>(
-   | |         &mut self,
-   | |         payload: &R,
-   | |         outcome: Option<TurnOutcome>,
-   | |     ) -> Result<(), JournalFatal> {
-   | |_________________________________- private method defined here
+   |     fn commit<R: RecordPayload + Serialize>(&mut self, payload: &R) -> Result<(), JournalFatal> {
+   |     ------------------------------------------------------------------------------------------- private method defined here
