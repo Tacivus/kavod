@@ -1,3 +1,4 @@
+use crate::bounded_buffer::BoundedBuffer;
 use crate::journal::{Journal, JournalError};
 use crate::time::{EventIndex, Timestamp};
 use serde::{Serialize, Serializer};
@@ -233,6 +234,16 @@ pub(super) struct Certificate<W: io::Write, P> {
 
 #[allow(
     dead_code,
+    private_interfaces,
+    reason = "matched by the Engine turn helper in a later build step"
+)]
+pub(super) enum ClassifiedTurn<W: io::Write> {
+    Continue(Certificate<W, TurnOpen<answer::Continue>>),
+    Stop(Certificate<W, TurnOpen<answer::Stop>>),
+}
+
+#[allow(
+    dead_code,
     reason = "remaining certificate transitions are added in later grammar build steps"
 )]
 impl<W: io::Write, P> Certificate<W, P> {
@@ -255,6 +266,36 @@ impl<W: io::Write, P> Certificate<W, P> {
             outcome,
             error,
         })
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the Engine turn helper in a later build step"
+)]
+impl<W: io::Write> Certificate<W, TurnOpen> {
+    pub(super) fn classify(self, answer: TurnOutcome) -> ClassifiedTurn<W> {
+        match answer {
+            TurnOutcome::Continue => ClassifiedTurn::Continue(self.advance()),
+            TurnOutcome::Stop => ClassifiedTurn::Stop(self.advance()),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "called by the Engine effects helper in a later build step"
+)]
+impl<W: io::Write, A> Certificate<W, TurnOpen<A>> {
+    pub(super) fn no_commands<C>(
+        self,
+        commands: &BoundedBuffer<C>,
+    ) -> Certificate<W, EffectsComplete<A>> {
+        assert!(
+            commands.is_empty(),
+            "ASSERT-INVARIANTS: the recordless batch edge requires an empty command buffer"
+        );
+        self.advance()
     }
 }
 
@@ -544,6 +585,252 @@ mod tests {
             fn require_send_sync<T: Send + Sync>() {}
 
             require_send_sync::<Certificate<Vec<u8>, Rc<()>>>();
+        }
+    }
+
+    mod turn_classification {
+        use super::*;
+
+        const RUN_STARTED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+
+        fn turn_open<W: io::Write>(writer: W, start_time: Timestamp) -> Certificate<W, TurnOpen> {
+            let certificate = Certificate::mint(certificate_journal(writer, 256), start_time);
+            match certificate.run_started() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a turn-classification fixture must commit RunStarted"),
+            }
+        }
+
+        /// Invariant: classifying either non-fatal answer consumes the unclassified
+        /// turn and returns a certificate whose phase type permanently names that
+        /// answer.
+        /// Design Doc: RUN-ENFORCEMENT
+        #[test]
+        fn classify_fixes_the_answer_in_the_phase_type() {
+            fn require_continue<W: io::Write>(
+                _certificate: Certificate<W, TurnOpen<answer::Continue>>,
+            ) {
+            }
+            fn require_stop<W: io::Write>(_certificate: Certificate<W, TurnOpen<answer::Stop>>) {}
+
+            match turn_open(Vec::new(), Timestamp::from_nanos(0)).classify(TurnOutcome::Continue) {
+                ClassifiedTurn::Continue(certificate) => require_continue(certificate),
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must produce the Continue-typed phase")
+                }
+            }
+            match turn_open(Vec::new(), Timestamp::from_nanos(0)).classify(TurnOutcome::Stop) {
+                ClassifiedTurn::Stop(certificate) => require_stop(certificate),
+                ClassifiedTurn::Continue(_) => {
+                    panic!("a Stop answer must produce the Stop-typed phase")
+                }
+            }
+        }
+
+        /// Invariant: advancing an empty command batch to effects-complete writes no
+        /// record and leaves the existing Journal bytes unchanged.
+        /// Design Doc: the Edges table's recordless row, by name
+        #[test]
+        fn the_empty_batch_edge_commits_nothing() {
+            let mut bytes = Vec::new();
+            let commands =
+                BoundedBuffer::<u8>::new(2).expect("a two-command batch must be reservable");
+            let classified =
+                turn_open(&mut bytes, Timestamp::from_nanos(0)).classify(TurnOutcome::Continue);
+            let turn_open = match classified {
+                ClassifiedTurn::Continue(certificate) => certificate,
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must retain its phase during the empty edge")
+                }
+            };
+
+            let effects_complete = turn_open.no_commands(&commands);
+
+            drop(effects_complete);
+            assert_eq!(
+                bytes, RUN_STARTED_AT_ZERO,
+                "the empty-batch edge must not append a Journal record"
+            );
+        }
+
+        /// Invariant: the recordless command-batch edge rejects a nonempty batch
+        /// instead of silently advancing past undispatched commands.
+        /// Design Doc: ASSERT-INVARIANTS
+        #[test]
+        #[should_panic(expected = "ASSERT-INVARIANTS")]
+        fn no_commands_panics_on_a_nonempty_buffer() {
+            let mut commands =
+                BoundedBuffer::new(2).expect("a two-command batch must be reservable");
+            commands
+                .try_push("pending")
+                .expect("the first command must fit");
+            let classified =
+                turn_open(Vec::new(), Timestamp::from_nanos(0)).classify(TurnOutcome::Continue);
+            let turn_open = match classified {
+                ClassifiedTurn::Continue(certificate) => certificate,
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must produce the Continue-typed phase")
+                }
+            };
+
+            let _effects_complete = turn_open.no_commands(&commands);
+        }
+
+        /// Invariant: classifying either answer changes no Journal bytes before the
+        /// chosen effects transition runs.
+        #[test]
+        fn classify_commits_nothing_for_either_answer() {
+            for answer in [TurnOutcome::Continue, TurnOutcome::Stop] {
+                let mut bytes = Vec::new();
+                let classified = turn_open(&mut bytes, Timestamp::from_nanos(0)).classify(answer);
+
+                drop(classified);
+                assert_eq!(
+                    bytes, RUN_STARTED_AT_ZERO,
+                    "classification must not append a Journal record for either answer"
+                );
+            }
+        }
+
+        /// Invariant: answer classification preserves the accepted index and exact
+        /// logical time, including both time-domain boundaries.
+        #[test]
+        fn classify_preserves_certificate_state_for_both_answers() {
+            fn assert_state<W: io::Write, A>(
+                certificate: Certificate<W, TurnOpen<A>>,
+                expected_time: Timestamp,
+            ) {
+                assert_eq!(
+                    certificate.index.as_u64(),
+                    0,
+                    "classification must preserve the accepted turn index"
+                );
+                assert_eq!(
+                    certificate.last_time, expected_time,
+                    "classification must preserve the exact accepted logical time"
+                );
+            }
+
+            for (answer, nanos) in [(TurnOutcome::Continue, 0), (TurnOutcome::Stop, u64::MAX)] {
+                let classified =
+                    turn_open(Vec::new(), Timestamp::from_nanos(nanos)).classify(answer);
+
+                match (answer, classified) {
+                    (TurnOutcome::Continue, ClassifiedTurn::Continue(certificate)) => {
+                        assert_state(certificate, Timestamp::from_nanos(nanos));
+                    }
+                    (TurnOutcome::Stop, ClassifiedTurn::Stop(certificate)) => {
+                        assert_state(certificate, Timestamp::from_nanos(nanos));
+                    }
+                    _ => panic!("classification must preserve the selected answer variant"),
+                }
+            }
+        }
+
+        /// Invariant: taking the empty-batch edge preserves the certificate's
+        /// accepted index and last accepted logical time in the effects-complete
+        /// phase.
+        #[test]
+        fn no_commands_preserves_certificate_state() {
+            let commands =
+                BoundedBuffer::<u8>::new(1).expect("a one-command batch must be reservable");
+            let classified =
+                turn_open(Vec::new(), Timestamp::from_nanos(u64::MAX)).classify(TurnOutcome::Stop);
+            let turn_open = match classified {
+                ClassifiedTurn::Stop(certificate) => certificate,
+                ClassifiedTurn::Continue(_) => {
+                    panic!("a Stop answer must retain its phase during the empty edge")
+                }
+            };
+            let expected_index = turn_open.index;
+            let expected_time = turn_open.last_time;
+
+            let effects_complete = turn_open.no_commands(&commands);
+
+            assert_eq!(
+                effects_complete.index, expected_index,
+                "the empty-batch edge must preserve the certificate's accepted index"
+            );
+            assert_eq!(
+                effects_complete.last_time, expected_time,
+                "the empty-batch edge must preserve the certificate's last accepted logical time"
+            );
+            assert_eq!(
+                effects_complete.last_time.as_nanos(),
+                u64::MAX,
+                "the empty-batch edge fixture must exercise the maximum nonzero logical time"
+            );
+        }
+
+        /// Invariant: an empty zero-capacity command batch can take the recordless
+        /// edge without writing or requiring a storage slot.
+        #[test]
+        fn zero_capacity_empty_batch_advances_without_a_record() {
+            let mut bytes = Vec::new();
+            let commands =
+                BoundedBuffer::<u8>::new(0).expect("a zero-capacity batch must be reservable");
+            let classified =
+                turn_open(&mut bytes, Timestamp::from_nanos(0)).classify(TurnOutcome::Stop);
+            let turn_open = match classified {
+                ClassifiedTurn::Stop(certificate) => certificate,
+                ClassifiedTurn::Continue(_) => {
+                    panic!("a Stop answer must retain its phase during the empty edge")
+                }
+            };
+
+            let effects_complete = turn_open.no_commands(&commands);
+
+            assert!(
+                commands.is_empty(),
+                "taking the recordless edge must leave the zero-capacity batch empty"
+            );
+            drop(effects_complete);
+            assert_eq!(
+                bytes, RUN_STARTED_AT_ZERO,
+                "a zero-capacity empty batch must not append a Journal record"
+            );
+        }
+
+        /// Invariant: rejecting a full command batch leaves every command and all
+        /// previously committed Journal bytes unchanged after the panic.
+        #[test]
+        fn full_batch_rejection_preserves_buffer_and_journal() {
+            let mut bytes = Vec::new();
+            let mut commands =
+                BoundedBuffer::new(2).expect("a two-command batch must be reservable");
+            commands
+                .try_push("first")
+                .expect("the first command must fit");
+            commands
+                .try_push("second")
+                .expect("the second command must fit");
+            let classified =
+                turn_open(&mut bytes, Timestamp::from_nanos(0)).classify(TurnOutcome::Continue);
+            let turn_open = match classified {
+                ClassifiedTurn::Continue(certificate) => certificate,
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must produce the Continue-typed phase")
+                }
+            };
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _effects_complete = turn_open.no_commands(&commands);
+            }));
+
+            assert!(
+                panic.is_err(),
+                "the recordless edge must panic when the command batch is full"
+            );
+            assert_eq!(
+                commands.as_slice(),
+                &["first", "second"],
+                "rejecting a full batch must preserve every pending command"
+            );
+            assert_eq!(
+                bytes, RUN_STARTED_AT_ZERO,
+                "rejecting a full batch must not append a Journal record"
+            );
         }
     }
 
