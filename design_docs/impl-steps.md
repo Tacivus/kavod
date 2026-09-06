@@ -94,7 +94,7 @@ that's the row it pins.
 - [x] C15 · engine skeleton + exit types
 - [x] C16 · record marker + first payloads
 - [x] C17 · remaining payloads
-- [ ] C18 · certificate + `run_started`
+- [x] C18 · certificate + `run_started`
 - [ ] C19 · `classify` + `no_commands`
 - [ ] C20 · `dispatch_batch`
 - [ ] C21 · checkpoint + completion records

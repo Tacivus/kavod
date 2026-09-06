@@ -1,7 +1,7 @@
-use crate::journal::JournalError;
+use crate::journal::{Journal, JournalError};
 use crate::time::{EventIndex, Timestamp};
 use serde::{Serialize, Serializer};
-use std::marker::PhantomData;
+use std::{io, marker::PhantomData};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecordKind {
@@ -163,10 +163,389 @@ pub struct JournalFatal {
     pub error: JournalError,
 }
 
+#[allow(
+    dead_code,
+    reason = "used by the Engine run assembled in later build steps"
+)]
+pub(super) struct Unclassified;
+
+#[allow(
+    dead_code,
+    reason = "used by answer-typed transitions in later grammar build steps"
+)]
+mod answer {
+    pub(super) struct Continue;
+    pub(super) struct Stop;
+}
+
+#[allow(
+    dead_code,
+    reason = "used by the Engine run assembled in later build steps"
+)]
+pub(super) struct Initial;
+
+#[allow(
+    dead_code,
+    reason = "used by the Engine run assembled in later build steps"
+)]
+pub(super) struct TurnOpen<A = Unclassified>(PhantomData<fn() -> A>);
+
+#[allow(
+    dead_code,
+    reason = "used by effects transitions in later grammar build steps"
+)]
+pub(super) struct EffectsComplete<A>(PhantomData<fn() -> A>);
+
+#[allow(
+    dead_code,
+    reason = "used by completion transitions in later grammar build steps"
+)]
+pub(super) struct Checkpointed<A>(PhantomData<fn() -> A>);
+
+#[allow(
+    dead_code,
+    reason = "used by event acceptance in a later grammar build step"
+)]
+pub(super) struct BetweenTurns;
+
+#[allow(
+    dead_code,
+    reason = "used by the closing transition in a later grammar build step"
+)]
+pub(super) struct StopPending;
+
+#[allow(
+    dead_code,
+    reason = "used by the Engine run assembled in later build steps"
+)]
+pub(super) struct Closed;
+
+#[allow(
+    dead_code,
+    reason = "remaining certificate transitions are added in later grammar build steps"
+)]
+pub(super) struct Certificate<W: io::Write, P> {
+    journal: Journal<W>,
+    index: EventIndex,
+    last_time: Timestamp,
+    _phase: PhantomData<fn() -> P>,
+}
+
+#[allow(
+    dead_code,
+    reason = "remaining certificate transitions are added in later grammar build steps"
+)]
+impl<W: io::Write, P> Certificate<W, P> {
+    fn advance<Q>(self) -> Certificate<W, Q> {
+        Certificate {
+            journal: self.journal,
+            index: self.index,
+            last_time: self.last_time,
+            _phase: PhantomData,
+        }
+    }
+
+    fn commit<R: RecordPayload + Serialize>(
+        &mut self,
+        payload: &R,
+        outcome: Option<TurnOutcome>,
+    ) -> Result<(), JournalFatal> {
+        self.journal.commit(payload).map_err(|error| JournalFatal {
+            record_kind: R::KIND,
+            outcome,
+            error,
+        })
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write> Certificate<W, Initial> {
+    pub(super) fn mint(journal: Journal<W>, start_time: Timestamp) -> Self {
+        let certificate = Self {
+            journal,
+            index: EventIndex::new(0),
+            last_time: start_time,
+            _phase: PhantomData,
+        };
+        assert_eq!(
+            certificate.index.as_u64(),
+            0,
+            "RUN-ENFORCEMENT: an Initial certificate's prospective index must be zero"
+        );
+        certificate
+    }
+
+    pub(super) fn run_started(mut self) -> Result<Certificate<W, TurnOpen>, JournalFatal> {
+        let payload = RunStartedRecord {
+            record_kind: Kind::new(),
+            index: self.index,
+            schema_version: 1,
+            logical_time: self.last_time,
+        };
+        self.commit(&payload, None)?;
+        Ok(self.advance())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::{cell::Cell, num::NonZeroUsize, rc::Rc};
+
+    fn certificate_journal<W: io::Write>(writer: W, max_record_bytes: usize) -> Journal<W> {
+        Journal::new(
+            writer,
+            NonZeroUsize::new(max_record_bytes)
+                .expect("a certificate test record bound must be nonzero"),
+        )
+        .expect("a small certificate test Journal must reserve its record buffer")
+    }
+
+    mod certificate_minting {
+        use super::*;
+
+        /// Invariant: every newly minted certificate begins at prospective event
+        /// index zero, regardless of its frozen start time.
+        /// Design Doc: RUN-ENFORCEMENT
+        #[test]
+        fn minting_asserts_the_prospective_index_base() {
+            let certificate: Certificate<_, Initial> = Certificate::mint(
+                certificate_journal(Vec::new(), 256),
+                Timestamp::from_nanos(73),
+            );
+
+            assert_eq!(
+                certificate.index.as_u64(),
+                0,
+                "a newly minted Initial certificate must store prospective index zero"
+            );
+        }
+
+        /// Invariant: starting a run commits its versioned record first, using the
+        /// certificate's prospective index and frozen logical time.
+        /// Design Doc: RUN-RECORDS
+        #[test]
+        fn run_started_commits_the_versioned_first_record() {
+            let mut bytes = Vec::new();
+            let certificate = Certificate::mint(
+                certificate_journal(&mut bytes, 256),
+                Timestamp::from_nanos(100),
+            );
+            let turn_open = match certificate.run_started() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a valid RunStarted record must commit successfully"),
+            };
+
+            assert_eq!(
+                turn_open.index.as_u64(),
+                0,
+                "the RunStarted transition must preserve accepted start-turn index zero"
+            );
+            assert_eq!(
+                turn_open.last_time,
+                Timestamp::from_nanos(100),
+                "the RunStarted transition must preserve the frozen start time"
+            );
+            drop(turn_open);
+            assert_eq!(
+                bytes,
+                br#"{"record_kind":"RunStarted","index":0,"schema_version":1,"logical_time":100}
+"#,
+                "RunStarted must be the versioned first Journal record with exact field order"
+            );
+        }
+
+        /// Invariant: the RunStarted transition preserves logical times at zero,
+        /// one, and the largest representable nanosecond value without truncation.
+        #[test]
+        fn run_started_preserves_frozen_time_boundaries() {
+            for nanos in [0, 1, u64::MAX] {
+                let mut bytes = Vec::new();
+                let certificate = Certificate::mint(
+                    certificate_journal(&mut bytes, 256),
+                    Timestamp::from_nanos(nanos),
+                );
+                let turn_open = match certificate.run_started() {
+                    Ok(certificate) => certificate,
+                    Err(_) => panic!("a boundary-valued start time must commit successfully"),
+                };
+
+                assert_eq!(
+                    turn_open.last_time,
+                    Timestamp::from_nanos(nanos),
+                    "the RunStarted successor must retain the exact frozen start time"
+                );
+                drop(turn_open);
+                assert_eq!(
+                    bytes,
+                    format!(
+                        "{{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":{nanos}}}\n"
+                    )
+                    .into_bytes(),
+                    "RunStarted bytes must preserve a boundary-valued frozen start time"
+                );
+            }
+        }
+    }
+
+    mod certificate_fatal_path {
+        use super::*;
+
+        struct FailingWriter {
+            dropped: Rc<Cell<bool>>,
+        }
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "intentional RunStarted write failure",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Drop for FailingWriter {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        /// Invariant: if the first record cannot commit, the failure identifies
+        /// RunStarted and the consumed certificate destroys its Journal.
+        /// Design Doc: RUN-GRAMMAR
+        #[test]
+        fn commit_failure_names_run_started_and_destroys_the_journal() {
+            let dropped = Rc::new(Cell::new(false));
+            let certificate = Certificate::mint(
+                certificate_journal(
+                    FailingWriter {
+                        dropped: Rc::clone(&dropped),
+                    },
+                    256,
+                ),
+                Timestamp::from_nanos(0),
+            );
+            assert!(
+                !dropped.get(),
+                "minting must transfer the live Journal into the certificate"
+            );
+
+            let fatal = match certificate.run_started() {
+                Ok(_) => panic!("a failing writer must prevent the RunStarted transition"),
+                Err(fatal) => fatal,
+            };
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::RunStarted,
+                "a failed RunStarted commit must retain the RunStarted record kind"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "a RunStarted commit failure must not carry a turn outcome"
+            );
+            match fatal.error {
+                JournalError::Sink { operation, error } => {
+                    assert_eq!(
+                        operation,
+                        crate::journal::SinkOperation::Write,
+                        "the RunStarted fatal must preserve the failed sink operation"
+                    );
+                    assert_eq!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe,
+                        "the RunStarted fatal must preserve the writer's error kind"
+                    );
+                }
+                _ => panic!("a RunStarted writer failure must retain its typed sink error"),
+            }
+            assert!(
+                dropped.get(),
+                "a failed RunStarted transition must destroy its consumed Journal"
+            );
+        }
+    }
+
+    mod certificate_bounds {
+        use super::*;
+
+        const RUN_STARTED_ZERO: &[u8] =
+            b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+
+        /// Invariant: a RunStarted record that exactly fills the configured record
+        /// capacity commits successfully, including its reserved newline.
+        #[test]
+        fn run_started_succeeds_at_exact_record_capacity() {
+            let mut bytes = Vec::new();
+            let record_capacity = RUN_STARTED_ZERO.len() - 1;
+            let certificate = Certificate::mint(
+                certificate_journal(&mut bytes, record_capacity),
+                Timestamp::from_nanos(0),
+            );
+            let turn_open = match certificate.run_started() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a RunStarted record at exact capacity must commit"),
+            };
+
+            drop(turn_open);
+            assert_eq!(
+                bytes, RUN_STARTED_ZERO,
+                "an exact-capacity RunStarted record must commit its complete JSON line"
+            );
+        }
+
+        /// Invariant: a RunStarted record one byte beyond capacity fails before
+        /// writing any partial bytes to its sink.
+        #[test]
+        fn one_byte_past_record_capacity_fails_without_output() {
+            let mut bytes = Vec::new();
+            let record_capacity = RUN_STARTED_ZERO.len() - 2;
+            let certificate = Certificate::mint(
+                certificate_journal(&mut bytes, record_capacity),
+                Timestamp::from_nanos(0),
+            );
+
+            let fatal = match certificate.run_started() {
+                Ok(_) => panic!("a RunStarted record beyond capacity must fail"),
+                Err(fatal) => fatal,
+            };
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::RunStarted,
+                "an oversized RunStarted record must retain its record kind"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "an oversized RunStarted record must not carry a turn outcome"
+            );
+            assert!(
+                matches!(fatal.error, JournalError::BoundExceeded),
+                "a RunStarted record one byte past capacity must report BoundExceeded"
+            );
+            assert!(
+                bytes.is_empty(),
+                "an oversized RunStarted record must fail before writing any sink bytes"
+            );
+        }
+    }
+
+    mod certificate_auto_traits {
+        use super::*;
+
+        /// Invariant: a certificate remains sendable and shareable when its phase
+        /// marker itself is neither sendable nor shareable.
+        #[test]
+        fn phase_marker_does_not_control_send_or_sync() {
+            fn require_send_sync<T: Send + Sync>() {}
+
+            require_send_sync::<Certificate<Vec<u8>, Rc<()>>>();
+        }
+    }
 
     mod record_payload_wire {
         use super::*;
