@@ -1,5 +1,5 @@
 use super::record::{
-    Certificate, Checkpointed, ClassifiedTurn, JournalFatal, TurnOpen, TurnOutcome,
+    Certificate, Checkpointed, ClassifiedTurn, JournalFatal, TurnOpen, TurnOutcome, answer,
 };
 use crate::application::{Application, Context, Outcome};
 use crate::bounded_buffer::BoundedBuffer;
@@ -15,10 +15,6 @@ pub struct EngineConfig {
     pub max_record_bytes: NonZeroUsize,
 }
 
-#[allow(
-    dead_code,
-    reason = "the Engine fields are consumed by run in later build steps"
-)]
 pub struct Engine<A, E, W>
 where
     A: Application,
@@ -34,6 +30,17 @@ where
 pub enum BuildError {
     CommandBuffer(TryReserveError),
     Journal(JournalBuildError),
+}
+
+/// The source `RUN-FINALIZE` fixes a Fatal exit's quiescence from.
+enum Finalization<E> {
+    /// `start` returned `Err`: the Environment is already quiesced (`ENV-START`).
+    StartFailed,
+    /// `start` returned `Ok` and the Environment is unconsumed: `shutdown`
+    /// supplies the quiescence and its Error is discarded (A4).
+    Unconsumed(E),
+    /// `StopPending` consumed the Environment: the quiescence its close retained.
+    Retained(Quiescence),
 }
 
 impl<A, E, W> Engine<A, E, W>
@@ -55,7 +62,6 @@ where
         })
     }
 
-    #[allow(dead_code, reason = "called by Engine::run in a later build step")]
     fn turn(
         app: &A,
         state: &mut A::State,
@@ -100,20 +106,15 @@ where
         }
     }
 
-    #[allow(dead_code, reason = "called by Engine::run in a later build step")]
     fn finalize(
         state: A::State,
         cause: FatalCause<A::Error, E::Error>,
-        retained_quiescence: Option<Quiescence>,
-        environment: Option<E>,
+        finalization: Finalization<E>,
     ) -> EngineExit<A::State, A::Error, E::Error> {
-        let quiescence = match (retained_quiescence, environment) {
-            (Some(quiescence), None) => quiescence,
-            (None, Some(environment)) => environment.shutdown().quiescence,
-            (None, None) => Quiescence::Quiesced,
-            (Some(_), Some(_)) => unreachable!(
-                "fatal finalization cannot retain quiescence while still owning the Environment"
-            ),
+        let quiescence = match finalization {
+            Finalization::StartFailed => Quiescence::Quiesced,
+            Finalization::Unconsumed(environment) => environment.shutdown().quiescence,
+            Finalization::Retained(quiescence) => quiescence,
         };
 
         EngineExit::Fatal {
@@ -127,7 +128,7 @@ where
         clippy::type_complexity,
         reason = "the helper returns the typed checkpoint successor or the shared fatal cause"
     )]
-    fn effects<M>(
+    fn effects<M: answer::Answer>(
         certificate: Certificate<W, TurnOpen<M>>,
         environment: &mut E,
         batch: &mut BoundedBuffer<A::Command>,
@@ -157,8 +158,7 @@ where
                         error,
                         operation: EnvironmentOperation::Start,
                     }),
-                    None,
-                    None,
+                    Finalization::StartFailed,
                 );
             }
         };
@@ -166,7 +166,11 @@ where
         let mut certificate = match certificate.run_started() {
             Ok(certificate) => certificate,
             Err(fatal) => {
-                return Self::finalize(state, FatalCause::Journal(fatal), None, Some(env));
+                return Self::finalize(
+                    state,
+                    FatalCause::Journal(fatal),
+                    Finalization::Unconsumed(env),
+                );
             }
         };
         let mut pending_event = None;
@@ -180,7 +184,7 @@ where
                 certificate,
             ) {
                 Ok(classified) => classified,
-                Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+                Err(cause) => return Self::finalize(state, cause, Finalization::Unconsumed(env)),
             };
 
             match classified {
@@ -193,19 +197,24 @@ where
                                     certificate = next;
                                 }
                                 Err(cause) => {
-                                    return Self::finalize(state, cause, None, Some(env));
+                                    return Self::finalize(
+                                        state,
+                                        cause,
+                                        Finalization::Unconsumed(env),
+                                    );
                                 }
                             },
                             Err(fatal) => {
                                 return Self::finalize(
                                     state,
                                     FatalCause::Journal(fatal),
-                                    None,
-                                    Some(env),
+                                    Finalization::Unconsumed(env),
                                 );
                             }
                         },
-                        Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+                        Err(cause) => {
+                            return Self::finalize(state, cause, Finalization::Unconsumed(env));
+                        }
                     }
                 }
                 ClassifiedTurn::Stop(classified) => {
@@ -214,19 +223,24 @@ where
                             Ok(stop_pending) => match stop_pending.close(env) {
                                 Ok(_closed) => return EngineExit::Stopped { state },
                                 Err((cause, quiescence)) => {
-                                    return Self::finalize(state, cause, Some(quiescence), None);
+                                    return Self::finalize(
+                                        state,
+                                        cause,
+                                        Finalization::Retained(quiescence),
+                                    );
                                 }
                             },
                             Err(fatal) => {
                                 return Self::finalize(
                                     state,
                                     FatalCause::Journal(fatal),
-                                    None,
-                                    Some(env),
+                                    Finalization::Unconsumed(env),
                                 );
                             }
                         },
-                        Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+                        Err(cause) => {
+                            return Self::finalize(state, cause, Finalization::Unconsumed(env));
+                        }
                     }
                 }
             }
@@ -1176,7 +1190,6 @@ mod tests {
 
     mod fatal_finalization {
         use super::*;
-        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         struct ShutdownError {
             label: &'static str,
@@ -1247,8 +1260,7 @@ mod tests {
             let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
                 17,
                 FatalCause::Core(CoreError::IndexExhausted),
-                None,
-                Some(environment),
+                Finalization::Unconsumed(environment),
             );
 
             assert_eq!(
@@ -1299,8 +1311,7 @@ mod tests {
                     label: "fixed application cause",
                     dropped: Rc::clone(&cause_dropped),
                 }),
-                None,
-                Some(environment),
+                Finalization::Unconsumed(environment),
             );
 
             assert_eq!(
@@ -1362,8 +1373,7 @@ mod tests {
                     },
                     operation: EnvironmentOperation::Start,
                 }),
-                None,
-                None,
+                Finalization::StartFailed,
             );
 
             match exit {
@@ -1406,8 +1416,7 @@ mod tests {
             let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
                 31,
                 FatalCause::Core(CoreError::ShutdownIncomplete),
-                Some(Quiescence::Incomplete),
-                None,
+                Finalization::Retained(Quiescence::Incomplete),
             );
 
             match exit {
@@ -1437,8 +1446,7 @@ mod tests {
             let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
                 37,
                 FatalCause::Core(CoreError::IndexExhausted),
-                Some(Quiescence::Quiesced),
-                None,
+                Finalization::Retained(Quiescence::Quiesced),
             );
 
             match exit {
@@ -1459,46 +1467,6 @@ mod tests {
                 }
                 _ => panic!("retained Quiesced finalization must preserve its fixed Fatal cause"),
             }
-        }
-
-        /// Invariant: retained quiescence proves the Environment was consumed, so
-        /// retaining both it and the Environment is rejected before shutdown.
-        #[test]
-        fn contradictory_retained_quiescence_and_environment_is_an_invariant_panic() {
-            let shutdown_calls = Rc::new(Cell::new(0));
-            let environment = environment(Quiescence::Quiesced, None, &shutdown_calls);
-
-            let panic = catch_unwind(AssertUnwindSafe(|| {
-                let _ = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
-                    0,
-                    FatalCause::Core(CoreError::IndexExhausted),
-                    Some(Quiescence::Quiesced),
-                    Some(environment),
-                );
-            }));
-
-            let payload = match panic {
-                Err(payload) => payload,
-                Ok(_) => panic!(
-                    "fatal finalization must reject retained quiescence paired with an Environment"
-                ),
-            };
-            let message = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-            assert_eq!(
-                message,
-                Some(
-                    "internal error: entered unreachable code: fatal finalization cannot retain quiescence while still owning the Environment"
-                ),
-                "the contradictory ownership panic must name the finalization invariant"
-            );
-            assert_eq!(
-                shutdown_calls.get(),
-                0,
-                "a contradictory finalization state must panic before shutdown"
-            );
         }
     }
 

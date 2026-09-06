@@ -1,19 +1,11 @@
 use std::collections::TryReserveError;
 use std::vec::Drain;
 
-#[allow(
-    dead_code,
-    reason = "the Journal and Engine use this buffer in later build steps"
-)]
 pub(crate) struct BoundedBuffer<T> {
     items: Vec<T>,
     capacity: usize,
 }
 
-#[allow(
-    dead_code,
-    reason = "the Journal and Engine use this buffer in later build steps"
-)]
 impl<T> BoundedBuffer<T> {
     pub(crate) fn new(capacity: usize) -> Result<Self, TryReserveError> {
         let mut items = Vec::new();

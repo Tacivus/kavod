@@ -17,7 +17,7 @@ pub enum RecordKind {
 
 impl RecordKind {
     /// Returns the record kind's stable wire tag.
-    pub const fn tag(self) -> &'static str {
+    pub(crate) const fn tag(self) -> &'static str {
         match self {
             Self::RunStarted => "RunStarted",
             Self::EventAccepted => "EventAccepted",
@@ -29,26 +29,14 @@ impl RecordKind {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the record commit helper in later grammar build steps"
-)]
 pub trait RecordPayload {
     const KIND: RecordKind;
 }
 
 /// Kind-typed zero-sized first field; `fn() -> P` keeps auto-traits clean.
-#[allow(
-    dead_code,
-    reason = "constructed by record transitions in later grammar build steps"
-)]
 pub struct Kind<P>(PhantomData<fn() -> P>);
 
 impl<P> Kind<P> {
-    #[allow(
-        dead_code,
-        reason = "used to construct payloads in later grammar build steps"
-    )]
     pub const fn new() -> Self {
         Self(PhantomData)
     }
@@ -61,10 +49,6 @@ impl<P: RecordPayload> Serialize for Kind<P> {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by the RunStarted transition in a later grammar build step"
-)]
 pub struct RunStartedRecord {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -77,10 +61,6 @@ impl RecordPayload for RunStartedRecord {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by the EventAccepted transition in a later grammar build step"
-)]
 pub struct EventAcceptedRecord<'a, Ev> {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -93,10 +73,6 @@ impl<'a, Ev> RecordPayload for EventAcceptedRecord<'a, Ev> {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by the batch transition in a later grammar build step"
-)]
 pub struct CommandsPreparedRecord<'a, C> {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -108,10 +84,6 @@ impl<'a, C> RecordPayload for CommandsPreparedRecord<'a, C> {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by the batch transition in a later grammar build step"
-)]
 pub struct CommandsDispatchedRecord {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -122,10 +94,6 @@ impl RecordPayload for CommandsDispatchedRecord {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by the stop transition in a later grammar build step"
-)]
 pub struct StopRequestedRecord {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -136,10 +104,6 @@ impl RecordPayload for StopRequestedRecord {
 }
 
 #[derive(Serialize)]
-#[allow(
-    dead_code,
-    reason = "constructed by completion transitions in later grammar build steps"
-)]
 pub struct TurnCompletedRecord {
     pub record_kind: Kind<Self>,
     pub index: EventIndex,
@@ -165,67 +129,41 @@ pub struct JournalFatal {
     pub error: JournalError,
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the Engine run assembled in later build steps"
-)]
 pub(super) struct Unclassified;
 
-#[allow(
-    dead_code,
-    reason = "used by answer-typed transitions in later grammar build steps"
-)]
 pub(super) mod answer {
+    mod sealed {
+        pub trait Sealed {}
+        impl Sealed for super::Continue {}
+        impl Sealed for super::Stop {}
+    }
+
+    /// A classified turn's fixed answer: `Continue` or `Stop`, and nothing else.
+    /// The supertrait is private to this module, so no other marker can
+    /// implement it.
+    pub(in crate::engine) trait Answer: sealed::Sealed {}
+
     pub(in crate::engine) struct Continue;
     pub(in crate::engine) struct Stop;
+
+    impl Answer for Continue {}
+    impl Answer for Stop {}
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the Engine run assembled in later build steps"
-)]
 pub(super) struct Initial;
 
-#[allow(
-    dead_code,
-    reason = "used by the Engine run assembled in later build steps"
-)]
 pub(super) struct TurnOpen<A = Unclassified>(PhantomData<fn() -> A>);
 
-#[allow(
-    dead_code,
-    reason = "used by effects transitions in later grammar build steps"
-)]
-pub(super) struct EffectsComplete<A>(PhantomData<fn() -> A>);
+pub(super) struct EffectsComplete<A: answer::Answer>(PhantomData<fn() -> A>);
 
-#[allow(
-    dead_code,
-    reason = "used by completion transitions in later grammar build steps"
-)]
-pub(super) struct Checkpointed<A>(PhantomData<fn() -> A>);
+pub(super) struct Checkpointed<A: answer::Answer>(PhantomData<fn() -> A>);
 
-#[allow(
-    dead_code,
-    reason = "used by event acceptance in a later grammar build step"
-)]
 pub(super) struct BetweenTurns;
 
-#[allow(
-    dead_code,
-    reason = "used by the closing transition in a later grammar build step"
-)]
 pub(super) struct StopPending;
 
-#[allow(
-    dead_code,
-    reason = "used by the Engine run assembled in later build steps"
-)]
 pub(super) struct Closed;
 
-#[allow(
-    dead_code,
-    reason = "remaining certificate transitions are added in later grammar build steps"
-)]
 pub(super) struct Certificate<W: io::Write, P> {
     journal: Journal<W>,
     index: EventIndex,
@@ -233,20 +171,11 @@ pub(super) struct Certificate<W: io::Write, P> {
     _phase: PhantomData<fn() -> P>,
 }
 
-#[allow(
-    dead_code,
-    private_interfaces,
-    reason = "matched by the Engine turn helper in a later build step"
-)]
 pub(super) enum ClassifiedTurn<W: io::Write> {
     Continue(Certificate<W, TurnOpen<answer::Continue>>),
     Stop(Certificate<W, TurnOpen<answer::Stop>>),
 }
 
-#[allow(
-    dead_code,
-    reason = "remaining certificate transitions are added in later grammar build steps"
-)]
 impl<W: io::Write, P> Certificate<W, P> {
     fn advance<Q>(self) -> Certificate<W, Q> {
         Certificate {
@@ -270,10 +199,6 @@ impl<W: io::Write, P> Certificate<W, P> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "called by the Engine turn helper in a later build step"
-)]
 impl<W: io::Write> Certificate<W, TurnOpen> {
     pub(super) fn index(&self) -> EventIndex {
         self.index
@@ -291,11 +216,7 @@ impl<W: io::Write> Certificate<W, TurnOpen> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "called by the Engine effects helper in a later build step"
-)]
-impl<W: io::Write, A> Certificate<W, TurnOpen<A>> {
+impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
     pub(super) fn no_commands<C>(
         self,
         commands: &BoundedBuffer<C>,
@@ -353,8 +274,7 @@ impl<W: io::Write, A> Certificate<W, TurnOpen<A>> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
-impl<W: io::Write, A> Certificate<W, EffectsComplete<A>> {
+impl<W: io::Write, A: answer::Answer> Certificate<W, EffectsComplete<A>> {
     pub(super) fn checkpoint<E: Environment, AE>(
         self,
         environment: &mut E,
@@ -369,7 +289,6 @@ impl<W: io::Write, A> Certificate<W, EffectsComplete<A>> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, Checkpointed<answer::Continue>> {
     pub(super) fn complete_continue(
         mut self,
@@ -386,7 +305,6 @@ impl<W: io::Write> Certificate<W, Checkpointed<answer::Continue>> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, BetweenTurns> {
     #[allow(
         clippy::type_complexity,
@@ -437,7 +355,6 @@ impl<W: io::Write> Certificate<W, BetweenTurns> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
     pub(super) fn request_stop(mut self) -> Result<Certificate<W, StopPending>, JournalFatal> {
         self.commit(
@@ -451,7 +368,6 @@ impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, StopPending> {
     #[allow(
         clippy::type_complexity,
@@ -493,7 +409,6 @@ impl<W: io::Write> Certificate<W, StopPending> {
     }
 }
 
-#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, Initial> {
     pub(super) fn mint(journal: Journal<W>, start_time: Timestamp) -> Self {
         let certificate = Self {
@@ -1230,7 +1145,7 @@ mod tests {
             }
         }
 
-        fn dispatch<A, C: Serialize>(
+        fn dispatch<A: answer::Answer, C: Serialize>(
             certificate: Certificate<ScriptedWriter<C>, TurnOpen<A>>,
             environment: &mut ScriptedEnvironment<C>,
             commands: &mut BoundedBuffer<C>,
@@ -1252,7 +1167,9 @@ mod tests {
             }
         }
 
-        fn expect_journal_fatal<A, C>(result: DispatchResult<C, A>) -> JournalFatal {
+        fn expect_journal_fatal<A: answer::Answer, C>(
+            result: DispatchResult<C, A>,
+        ) -> JournalFatal {
             match result {
                 Err(FatalCause::Journal(fatal)) => fatal,
                 Err(_) => panic!("a scripted Journal failure must remain the fatal cause"),
@@ -1260,7 +1177,7 @@ mod tests {
             }
         }
 
-        fn expect_environment_fatal<A, C>(
+        fn expect_environment_fatal<A: answer::Answer, C>(
             result: DispatchResult<C, A>,
         ) -> crate::EnvironmentFatal<&'static str> {
             match result {
@@ -1943,7 +1860,7 @@ mod tests {
             }
         }
 
-        fn direct_checkpointed<W: io::Write, A>(
+        fn direct_checkpointed<W: io::Write, A: answer::Answer>(
             writer: W,
             max_record_bytes: usize,
             index: u64,

@@ -38,10 +38,6 @@ pub struct Context<'a, C> {
 }
 
 impl<'a, C> Context<'a, C> {
-    #[allow(
-        dead_code,
-        reason = "the Engine constructs Contexts in a later build step"
-    )]
     pub(crate) fn new(
         buffer: &'a mut BoundedBuffer<C>,
         index: EventIndex,
@@ -88,10 +84,6 @@ impl<'a, C> Context<'a, C> {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the Engine reads the overflow marker in a later build step"
-    )]
     pub(crate) fn overflowed(&self) -> bool {
         self.overflowed
     }

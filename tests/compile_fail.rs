@@ -46,14 +46,14 @@ mod tests {
             cases.compile_fail("tests/grammar_fixture/cases/event_before_continue_completion.rs");
         }
 
-        /// Invariant: the closed run is terminal, an unclassified checkpoint
-        /// cannot select a completion outcome, and BetweenTurns permits only Event
-        /// acceptance as its next transition.
+        /// Invariant: the closed run is terminal, an unclassified certificate
+        /// cannot take either batch edge or name the phases beyond them, and
+        /// BetweenTurns permits only Event acceptance as its next transition.
         #[test]
         fn terminal_and_intermediate_phases_reject_wrong_transitions() {
             let cases = trybuild::TestCases::new();
             cases.compile_fail("tests/grammar_fixture/cases/closed_is_terminal.rs");
-            cases.compile_fail("tests/grammar_fixture/cases/unclassified_checkpoint_dead_end.rs");
+            cases.compile_fail("tests/grammar_fixture/cases/unclassified_batch_edge.rs");
             cases.compile_fail("tests/grammar_fixture/cases/between_turns_only_accepts_event.rs");
         }
     }

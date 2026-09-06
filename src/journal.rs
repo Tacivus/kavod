@@ -35,12 +35,7 @@ pub enum SinkOperation {
 
 /// A bounded JSON Lines writer.
 pub struct Journal<W: io::Write> {
-    #[allow(
-        dead_code,
-        reason = "used by Journal sink operations in later build steps"
-    )]
     writer: W,
-    #[allow(dead_code, reason = "used by Journal encoding in later build steps")]
     region: BoundedBuffer<u8>,
     poisoned: bool,
 }
@@ -89,10 +84,6 @@ impl<W: io::Write> Journal<W> {
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by Journal line encoding in the next build step"
-    )]
     fn encode_raw<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError> {
         self.region.clear();
         serde_json::to_writer(&mut self.region, record).map_err(|error| {
@@ -104,7 +95,6 @@ impl<W: io::Write> Journal<W> {
         })
     }
 
-    #[allow(dead_code, reason = "used by Journal::commit in a later build step")]
     fn encode_line<R: Serialize>(&mut self, record: &R) -> Result<(), JournalError> {
         self.encode_raw(record)?;
 
@@ -121,7 +111,6 @@ impl<W: io::Write> Journal<W> {
             .map_err(|_| JournalError::BoundExceeded)
     }
 
-    #[allow(dead_code, reason = "used by Journal::commit in the next build step")]
     fn write_line(&mut self) -> Result<(), JournalError> {
         let mut offset = 0;
 
@@ -194,7 +183,6 @@ mod tests {
 
     enum ScriptedResult {
         Write(io::Result<usize>),
-        #[allow(dead_code, reason = "used by Journal flush tests in later build steps")]
         Flush(io::Result<()>),
     }
 

@@ -10,7 +10,6 @@ pub struct EventIndex(u64);
 pub struct Timestamp(u64);
 
 impl EventIndex {
-    #[allow(dead_code, reason = "used by the Run built in later steps")]
     pub(crate) fn new(index: u64) -> Self {
         Self(index)
     }

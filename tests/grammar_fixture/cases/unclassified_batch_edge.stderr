@@ -1,0 +1,77 @@
+error[E0277]: the trait bound `Unclassified: Answer` is not satisfied
+  --> tests/grammar_fixture/cases/unclassified_batch_edge.rs:17:31
+   |
+17 |     ) -> Certificate<Vec<u8>, EffectsComplete<record::Unclassified>> {
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `Answer` is not implemented for `Unclassified`
+  --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Unclassified;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `Answer`
+  --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   |     impl Answer for Continue {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ `answer::Continue`
+   |     impl Answer for Stop {}
+   |     ^^^^^^^^^^^^^^^^^^^^ `answer::Stop`
+note: required by a bound in `EffectsComplete`
+  --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct EffectsComplete<A: answer::Answer>(PhantomData<fn() -> A>);
+   |                                      ^^^^^^^^^^^^^^ required by this bound in `EffectsComplete`
+
+error[E0599]: the method `no_commands` exists for struct `Certificate<Vec<u8>, TurnOpen>`, but its trait bounds were not satisfied
+ --> tests/grammar_fixture/cases/unclassified_batch_edge.rs:6:36
+  |
+6 |         let _effects = turn_open().no_commands(&commands);
+  |                                    ^^^^^^^^^^^ method cannot be called on `Certificate<Vec<u8>, TurnOpen>` due to unsatisfied trait bounds
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Unclassified;
+  | ------------------------------ doesn't satisfy `Unclassified: Answer`
+...
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `no_commands` not found for this struct
+  |
+note: trait bound `Unclassified: Answer` was not satisfied
+ --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
+  |                       ^^^^^^^^^^^^^^  ---------------------------
+  |                       |
+  |                       unsatisfied trait bound introduced here
+note: the trait `Answer` must be implemented
+ --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  |     pub(in crate::engine) trait Answer: sealed::Sealed {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: the method `dispatch_batch` exists for struct `Certificate<Vec<u8>, TurnOpen>`, but its trait bounds were not satisfied
+  --> tests/grammar_fixture/cases/unclassified_batch_edge.rs:13:25
+   |
+13 |             turn_open().dispatch_batch::<_, _, ()>(&mut CleanEnvironment, &mut commands);
+   |                         ^^^^^^^^^^^^^^ method cannot be called on `Certificate<Vec<u8>, TurnOpen>` due to unsatisfied trait bounds
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Unclassified;
+   | ------------------------------ doesn't satisfy `Unclassified: Answer`
+...
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `dispatch_batch` not found for this struct
+   |
+note: trait bound `Unclassified: Answer` was not satisfied
+  --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
+   |                       ^^^^^^^^^^^^^^  ---------------------------
+   |                       |
+   |                       unsatisfied trait bound introduced here
+note: the trait `Answer` must be implemented
+  --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   |     pub(in crate::engine) trait Answer: sealed::Sealed {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
