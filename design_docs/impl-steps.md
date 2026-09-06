@@ -110,7 +110,7 @@ that's the row it pins.
 
 **H — Core suites**
 - [x] C29 · tests/support harness
-- [ ] C30 · golden suite 1
+- [x] C30 · golden suite 1
 - [ ] C31 · golden suite 2
 - [ ] C32 · fault suite 1
 - [ ] C33 · fault suite 2
