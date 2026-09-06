@@ -114,7 +114,7 @@ that's the row it pins.
 - [x] C31 · golden suite 2
 - [x] C32 · fault suite 1
 - [x] C33 · fault suite 2
-- [ ] C34 · conformance
+- [x] C34 · conformance
 - [ ] C35 · compile-fail fixture
 
 **I — Simulated Environment**
