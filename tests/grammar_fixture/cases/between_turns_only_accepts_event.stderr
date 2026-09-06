@@ -1,0 +1,103 @@
+error[E0599]: no method named `run_started` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:12:37
+   |
+12 |         let _next = between_turns().run_started();
+   |                                     ^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `run_started` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Initial>`
+
+error[E0599]: no method named `classify` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:16:37
+   |
+16 |         let _next = between_turns().classify(TurnOutcome::Continue);
+   |                                     ^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `classify` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen>`
+
+error[E0599]: no method named `no_commands` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:21:37
+   |
+21 |         let _next = between_turns().no_commands(&commands);
+   |                                     ^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `no_commands` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen<A>>`
+
+error[E0599]: no method named `dispatch_batch` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:28:37
+   |
+28 |         let _next = between_turns().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+   |                                     ^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `dispatch_batch` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen<A>>`
+
+error[E0599]: no method named `checkpoint` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:32:37
+   |
+32 |         let _next = between_turns().checkpoint::<_, ()>(&mut CleanEnvironment);
+   |                                     ^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `checkpoint` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, EffectsComplete<A>>`
+
+error[E0599]: no method named `complete_continue` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:36:37
+   |
+36 |         let _next = between_turns().complete_continue();
+   |                                     ^^^^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `complete_continue` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Checkpointed<answer::Continue>>`
+
+error[E0599]: no method named `request_stop` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:40:37
+   |
+40 |         let _next = between_turns().request_stop();
+   |                                     ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `request_stop` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Checkpointed<answer::Stop>>`
+
+error[E0599]: no method named `close` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
+  --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:44:37
+   |
+44 |         let _next = between_turns().close::<_, ()>(CleanEnvironment);
+   |                                     ^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `close` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, StopPending>`

@@ -1,0 +1,21 @@
+error[E0382]: use of moved value: `certificate`
+ --> tests/grammar_fixture/cases/certificate_copy.rs:8:14
+  |
+5 |         let certificate = initial();
+  |             ----------- move occurs because `certificate` has type `Certificate<Vec<u8>, Initial>`, which does not implement the `Copy` trait
+6 |         let moved = certificate;
+  |                     ----------- value moved here
+7 |         drop(moved);
+8 |         drop(certificate);
+  |              ^^^^^^^^^^^ value used here after move
+  |
+note: if `Certificate<Vec<u8>, Initial>` implemented `Clone`, you could clone the value
+ --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+  |
+ ::: tests/grammar_fixture/cases/certificate_copy.rs:6:21
+  |
+6 |         let moved = certificate;
+  |                     ----------- you could clone this value

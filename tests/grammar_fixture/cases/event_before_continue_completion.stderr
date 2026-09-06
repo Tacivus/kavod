@@ -1,0 +1,12 @@
+error[E0599]: no method named `accept_event` found for struct `Certificate<Vec<u8>, Checkpointed<answer::Continue>>` in the current scope
+ --> tests/grammar_fixture/cases/event_before_continue_completion.rs:5:49
+  |
+5 |         let _accepted = continue_checkpointed().accept_event::<_, ()>(&mut CleanEnvironment);
+  |                                                 ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Checkpointed<answer::Continue>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `accept_event` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, BetweenTurns>`

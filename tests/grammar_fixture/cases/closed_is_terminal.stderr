@@ -1,0 +1,116 @@
+error[E0599]: no method named `run_started` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:16:30
+   |
+16 |         let _next = closed().run_started();
+   |                              ^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `run_started` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Initial>`
+
+error[E0599]: no method named `classify` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:20:30
+   |
+20 |         let _next = closed().classify(TurnOutcome::Continue);
+   |                              ^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `classify` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen>`
+
+error[E0599]: no method named `no_commands` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:25:30
+   |
+25 |         let _next = closed().no_commands(&commands);
+   |                              ^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `no_commands` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen<A>>`
+
+error[E0599]: no method named `dispatch_batch` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:32:30
+   |
+32 |         let _next = closed().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+   |                              ^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `dispatch_batch` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, TurnOpen<A>>`
+
+error[E0599]: no method named `checkpoint` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:36:30
+   |
+36 |         let _next = closed().checkpoint::<_, ()>(&mut CleanEnvironment);
+   |                              ^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `checkpoint` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, EffectsComplete<A>>`
+
+error[E0599]: no method named `complete_continue` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:40:30
+   |
+40 |         let _next = closed().complete_continue();
+   |                              ^^^^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `complete_continue` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Checkpointed<answer::Continue>>`
+
+error[E0599]: no method named `accept_event` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:44:30
+   |
+44 |         let _next = closed().accept_event::<_, ()>(&mut CleanEnvironment);
+   |                              ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `accept_event` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, BetweenTurns>`
+
+error[E0599]: no method named `request_stop` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:48:30
+   |
+48 |         let _next = closed().request_stop();
+   |                              ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `request_stop` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, Checkpointed<answer::Stop>>`
+
+error[E0599]: no method named `close` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
+  --> tests/grammar_fixture/cases/closed_is_terminal.rs:52:30
+   |
+52 |         let _next = closed().close::<_, ()>(CleanEnvironment);
+   |                              ^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
+   |
+  ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+   |
+   | pub(super) struct Certificate<W: io::Write, P> {
+   | ---------------------------------------------- method `close` not found for this struct
+   |
+   = note: the method was found for `Certificate<W, StopPending>`

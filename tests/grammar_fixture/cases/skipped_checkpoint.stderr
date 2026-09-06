@@ -1,0 +1,12 @@
+error[E0599]: no method named `complete_continue` found for struct `Certificate<Vec<u8>, EffectsComplete<answer::Continue>>` in the current scope
+ --> tests/grammar_fixture/cases/skipped_checkpoint.rs:5:49
+  |
+5 |         let _between_turns = continue_effects().complete_continue();
+  |                                                 ^^^^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, EffectsComplete<answer::Continue>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `complete_continue` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, Checkpointed<answer::Continue>>`

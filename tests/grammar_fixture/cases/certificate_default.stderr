@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `Certificate<Vec<u8>, Initial>: Default` is not satisfied
+ --> tests/grammar_fixture/cases/certificate_default.rs:5:59
+  |
+5 |         let _certificate: Certificate<Vec<u8>, Initial> = Default::default();
+  |                                                           ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `Default` is not implemented for `Certificate<Vec<u8>, Initial>`
+ --> tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,28 @@
+error[E0599]: no method named `index` found for struct `Certificate<Vec<u8>, Initial>` in the current scope
+ --> tests/grammar_fixture/cases/initial_context_access.rs:5:32
+  |
+5 |         let _index = initial().index();
+  |                                ^^^^^ private field, not a method
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `index` not found for this struct
+  |
+  = help: items from traits can only be used if the trait is implemented and in scope
+  = note: the following traits define an item `index`, perhaps you need to implement one of them:
+          candidate #1: `Index`
+          candidate #2: `SliceIndex`
+
+error[E0599]: no method named `logical_time` found for struct `Certificate<Vec<u8>, Initial>` in the current scope
+ --> tests/grammar_fixture/cases/initial_context_access.rs:9:39
+  |
+9 |         let _logical_time = initial().logical_time();
+  |                                       ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Initial>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `logical_time` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, TurnOpen>`

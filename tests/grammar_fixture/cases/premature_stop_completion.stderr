@@ -1,0 +1,12 @@
+error[E0599]: no method named `close` found for struct `Certificate<Vec<u8>, Checkpointed<answer::Stop>>` in the current scope
+ --> tests/grammar_fixture/cases/premature_stop_completion.rs:5:43
+  |
+5 |         let _closed = stop_checkpointed().close::<_, ()>(CleanEnvironment);
+  |                                           ^^^^^ method not found in `Certificate<Vec<u8>, Checkpointed<answer::Stop>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `close` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, StopPending>`

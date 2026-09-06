@@ -1,0 +1,25 @@
+error[E0599]: no method named `request_stop` found for struct `Certificate<Vec<u8>, Checkpointed<answer::Continue>>` in the current scope
+ --> tests/grammar_fixture/cases/disagreeing_outcome.rs:5:53
+  |
+5 |         let _stop_pending = continue_checkpointed().request_stop();
+  |                                                     ^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Checkpointed<answer::Continue>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `request_stop` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, Checkpointed<answer::Stop>>`
+
+error[E0599]: no method named `complete_continue` found for struct `Certificate<Vec<u8>, Checkpointed<answer::Stop>>` in the current scope
+ --> tests/grammar_fixture/cases/disagreeing_outcome.rs:9:50
+  |
+9 |         let _between_turns = stop_checkpointed().complete_continue();
+  |                                                  ^^^^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Checkpointed<answer::Stop>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `complete_continue` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, Checkpointed<answer::Continue>>`
