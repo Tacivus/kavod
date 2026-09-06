@@ -175,9 +175,9 @@ pub(super) struct Unclassified;
     dead_code,
     reason = "used by answer-typed transitions in later grammar build steps"
 )]
-mod answer {
-    pub(super) struct Continue;
-    pub(super) struct Stop;
+pub(super) mod answer {
+    pub(in crate::engine) struct Continue;
+    pub(in crate::engine) struct Stop;
 }
 
 #[allow(
@@ -275,6 +275,14 @@ impl<W: io::Write, P> Certificate<W, P> {
     reason = "called by the Engine turn helper in a later build step"
 )]
 impl<W: io::Write> Certificate<W, TurnOpen> {
+    pub(super) fn index(&self) -> EventIndex {
+        self.index
+    }
+
+    pub(super) fn logical_time(&self) -> Timestamp {
+        self.last_time
+    }
+
     pub(super) fn classify(self, answer: TurnOutcome) -> ClassifiedTurn<W> {
         match answer {
             TurnOutcome::Continue => ClassifiedTurn::Continue(self.advance()),
