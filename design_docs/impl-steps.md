@@ -91,7 +91,7 @@ that's the row it pins.
 - [x] C14 · latch
 
 **F — Record grammar**
-- [ ] C15 · engine skeleton + exit types
+- [x] C15 · engine skeleton + exit types
 - [ ] C16 · record marker + first payloads
 - [ ] C17 · remaining payloads
 - [ ] C18 · certificate + `run_started`
