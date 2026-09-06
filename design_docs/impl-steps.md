@@ -104,7 +104,7 @@ that's the row it pins.
 **G — Engine**
 - [x] C24 · `Engine::new`
 - [x] C25 · turn helper
-- [ ] C26 · finalize helper
+- [x] C26 · finalize helper
 - [ ] C27 · `Engine::run`
 - [ ] C28 · loop behavior (tests only)
 

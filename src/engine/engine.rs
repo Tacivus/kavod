@@ -97,6 +97,29 @@ where
             }
         }
     }
+
+    #[allow(dead_code, reason = "called by Engine::run in a later build step")]
+    fn finalize(
+        state: A::State,
+        cause: FatalCause<A::Error, E::Error>,
+        retained_quiescence: Option<Quiescence>,
+        environment: Option<E>,
+    ) -> EngineExit<A::State, A::Error, E::Error> {
+        let quiescence = match (retained_quiescence, environment) {
+            (Some(quiescence), None) => quiescence,
+            (None, Some(environment)) => environment.shutdown().quiescence,
+            (None, None) => Quiescence::Quiesced,
+            (Some(_), Some(_)) => unreachable!(
+                "fatal finalization cannot retain quiescence while still owning the Environment"
+            ),
+        };
+
+        EngineExit::Fatal {
+            state,
+            cause,
+            quiescence,
+        }
+    }
 }
 
 pub enum EngineExit<S, AE, EE> {
@@ -1035,6 +1058,334 @@ mod tests {
             assert_eq!(
                 state, 0,
                 "rejecting a missing later-turn Event must leave handler state untouched"
+            );
+        }
+    }
+
+    mod fatal_finalization {
+        use super::*;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        struct ShutdownError {
+            label: &'static str,
+            dropped: Rc<Cell<bool>>,
+        }
+
+        impl Drop for ShutdownError {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        struct FinalizingEnvironment {
+            shutdown_calls: Rc<Cell<usize>>,
+            report: ShutdownReport<ShutdownError>,
+        }
+
+        impl Environment for FinalizingEnvironment {
+            type Event = u8;
+            type Command = u8;
+            type Error = ShutdownError;
+
+            fn start(&mut self) -> Result<Timestamp, Self::Error> {
+                panic!("a finalization test must not start its Environment")
+            }
+
+            fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error> {
+                panic!("a finalization test must not request an Event")
+            }
+
+            fn dispatch(&mut self, _command: Self::Command) -> Result<(), Self::Error> {
+                panic!("a finalization test must not dispatch a Command")
+            }
+
+            fn take_error(&mut self) -> Option<Self::Error> {
+                panic!("a finalization test must not inspect the Error latch")
+            }
+
+            fn shutdown(self) -> ShutdownReport<Self::Error> {
+                let Self {
+                    shutdown_calls,
+                    report,
+                } = self;
+                shutdown_calls.set(shutdown_calls.get() + 1);
+                report
+            }
+        }
+
+        fn environment(
+            quiescence: Quiescence,
+            error: Option<ShutdownError>,
+            shutdown_calls: &Rc<Cell<usize>>,
+        ) -> FinalizingEnvironment {
+            FinalizingEnvironment {
+                shutdown_calls: Rc::clone(shutdown_calls),
+                report: ShutdownReport { quiescence, error },
+            }
+        }
+
+        /// Invariant: fatal finalization shuts down a started, unconsumed
+        /// Environment exactly once and returns the report's quiescence.
+        /// Design Doc: RUN-FINALIZE
+        #[test]
+        fn a_started_environment_is_shutdown_exactly_once() {
+            let shutdown_calls = Rc::new(Cell::new(0));
+            let environment = environment(Quiescence::Incomplete, None, &shutdown_calls);
+
+            let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                17,
+                FatalCause::Core(CoreError::IndexExhausted),
+                None,
+                Some(environment),
+            );
+
+            assert_eq!(
+                shutdown_calls.get(),
+                1,
+                "fatal finalization must shut down an unconsumed Environment exactly once"
+            );
+            match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause: FatalCause::Core(CoreError::IndexExhausted),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state, 17,
+                        "fatal finalization must preserve the State it receives"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Incomplete,
+                        "fatal finalization must use the shutdown report's quiescence"
+                    );
+                }
+                _ => panic!("fatal finalization must preserve the fixed Core cause"),
+            }
+        }
+
+        /// Invariant: an Error reported by finalizing shutdown is discarded and
+        /// never replaces the failure that triggered finalization.
+        /// Design Doc: A4, RUN-FINALIZE
+        #[test]
+        fn the_shutdown_error_never_replaces_the_fixed_cause() {
+            let shutdown_calls = Rc::new(Cell::new(0));
+            let shutdown_error_dropped = Rc::new(Cell::new(false));
+            let cause_dropped = Rc::new(Cell::new(false));
+            let environment = environment(
+                Quiescence::Quiesced,
+                Some(ShutdownError {
+                    label: "later shutdown error",
+                    dropped: Rc::clone(&shutdown_error_dropped),
+                }),
+                &shutdown_calls,
+            );
+
+            let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                23,
+                FatalCause::Application(ScriptedError {
+                    label: "fixed application cause",
+                    dropped: Rc::clone(&cause_dropped),
+                }),
+                None,
+                Some(environment),
+            );
+
+            assert_eq!(
+                shutdown_calls.get(),
+                1,
+                "discarding a shutdown Error must not repeat finalizing shutdown"
+            );
+            assert!(
+                shutdown_error_dropped.get(),
+                "the shutdown report's later Error must be discarded during fatal finalization"
+            );
+            let cause = match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause: FatalCause::Application(error),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state, 23,
+                        "discarding a shutdown Error must not change the returned State"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "discarding a shutdown Error must retain the report's quiescence"
+                    );
+                    error
+                }
+                _ => panic!("a shutdown Error must not replace the fixed Application cause"),
+            };
+            assert_eq!(
+                cause.label, "fixed application cause",
+                "fatal finalization must return the exact first-observed Error payload"
+            );
+            assert!(
+                !cause_dropped.get(),
+                "the fixed Error payload must remain owned by the Fatal exit"
+            );
+            drop(cause);
+            assert!(
+                cause_dropped.get(),
+                "dropping the Fatal cause must drop its preserved Error payload"
+            );
+        }
+
+        /// Invariant: a failed Environment start is already quiesced, so fatal
+        /// finalization returns without attempting shutdown.
+        /// Design Doc: ENV-START, RUN-FINALIZE
+        #[test]
+        fn a_start_error_skips_shutdown_and_is_quiesced() {
+            let start_error_dropped = Rc::new(Cell::new(false));
+
+            let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                29,
+                FatalCause::Environment(EnvironmentFatal {
+                    error: ShutdownError {
+                        label: "start error",
+                        dropped: Rc::clone(&start_error_dropped),
+                    },
+                    operation: EnvironmentOperation::Start,
+                }),
+                None,
+                None,
+            );
+
+            match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause:
+                        FatalCause::Environment(EnvironmentFatal {
+                            error,
+                            operation: EnvironmentOperation::Start,
+                        }),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state, 29,
+                        "a start failure must preserve the State created before startup"
+                    );
+                    assert_eq!(
+                        error.label, "start error",
+                        "a start failure must remain the fixed Environment cause"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "a failed Environment start must finalize as already quiesced"
+                    );
+                    assert!(
+                        !start_error_dropped.get(),
+                        "the start Error must remain owned by the Fatal exit"
+                    );
+                }
+                _ => panic!("a start Error must finalize as an Environment Start cause"),
+            }
+        }
+
+        /// Invariant: once shutdown has consumed the Environment, fatal
+        /// finalization uses its retained quiescence without another shutdown.
+        /// Design Doc: RUN-FINALIZE
+        #[test]
+        fn a_consumed_environment_uses_the_retained_quiescence() {
+            let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                31,
+                FatalCause::Core(CoreError::ShutdownIncomplete),
+                Some(Quiescence::Incomplete),
+                None,
+            );
+
+            match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause: FatalCause::Core(CoreError::ShutdownIncomplete),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state, 31,
+                        "finalization after consuming the Environment must preserve State"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Incomplete,
+                        "finalization must preserve the quiescence retained before the Environment was consumed"
+                    );
+                }
+                _ => panic!("a consumed Environment must preserve its fixed Fatal cause"),
+            }
+        }
+
+        /// Invariant: finalization returns retained quiesced status unchanged after
+        /// shutdown has already consumed the Environment.
+        #[test]
+        fn a_consumed_environment_preserves_retained_quiesced() {
+            let exit = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                37,
+                FatalCause::Core(CoreError::IndexExhausted),
+                Some(Quiescence::Quiesced),
+                None,
+            );
+
+            match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause: FatalCause::Core(CoreError::IndexExhausted),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state, 37,
+                        "retained Quiesced finalization must preserve State"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "retained Quiesced status must pass through finalization unchanged"
+                    );
+                }
+                _ => panic!("retained Quiesced finalization must preserve its fixed Fatal cause"),
+            }
+        }
+
+        /// Invariant: retained quiescence proves the Environment was consumed, so
+        /// retaining both it and the Environment is rejected before shutdown.
+        #[test]
+        fn contradictory_retained_quiescence_and_environment_is_an_invariant_panic() {
+            let shutdown_calls = Rc::new(Cell::new(0));
+            let environment = environment(Quiescence::Quiesced, None, &shutdown_calls);
+
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let _ = Engine::<TurnApplication, FinalizingEnvironment, Vec<u8>>::finalize(
+                    0,
+                    FatalCause::Core(CoreError::IndexExhausted),
+                    Some(Quiescence::Quiesced),
+                    Some(environment),
+                );
+            }));
+
+            let payload = match panic {
+                Err(payload) => payload,
+                Ok(_) => panic!(
+                    "fatal finalization must reject retained quiescence paired with an Environment"
+                ),
+            };
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            assert_eq!(
+                message,
+                Some(
+                    "internal error: entered unreachable code: fatal finalization cannot retain quiescence while still owning the Environment"
+                ),
+                "the contradictory ownership panic must name the finalization invariant"
+            );
+            assert_eq!(
+                shutdown_calls.get(),
+                0,
+                "a contradictory finalization state must panic before shutdown"
             );
         }
     }
