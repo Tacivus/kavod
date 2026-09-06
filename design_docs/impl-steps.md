@@ -105,7 +105,7 @@ that's the row it pins.
 - [x] C24 · `Engine::new`
 - [x] C25 · turn helper
 - [x] C26 · finalize helper
-- [ ] C27 · `Engine::run`
+- [x] C27 · `Engine::run`
 - [ ] C28 · loop behavior (tests only)
 
 **H — Core suites**

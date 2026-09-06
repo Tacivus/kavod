@@ -1,4 +1,6 @@
-use super::record::{Certificate, ClassifiedTurn, JournalFatal, TurnOpen, TurnOutcome};
+use super::record::{
+    Certificate, Checkpointed, ClassifiedTurn, JournalFatal, TurnOpen, TurnOutcome,
+};
 use crate::application::{Application, Context, Outcome};
 use crate::bounded_buffer::BoundedBuffer;
 use crate::environment::{Environment, Quiescence};
@@ -118,6 +120,116 @@ where
             state,
             cause,
             quiescence,
+        }
+    }
+
+    #[allow(
+        clippy::type_complexity,
+        reason = "the helper returns the typed checkpoint successor or the shared fatal cause"
+    )]
+    fn effects<M>(
+        certificate: Certificate<W, TurnOpen<M>>,
+        environment: &mut E,
+        batch: &mut BoundedBuffer<A::Command>,
+    ) -> Result<Certificate<W, Checkpointed<M>>, FatalCause<A::Error, E::Error>> {
+        let certificate = if batch.is_empty() {
+            certificate.no_commands(batch)
+        } else {
+            certificate.dispatch_batch(environment, batch)?
+        };
+        certificate.checkpoint(environment)
+    }
+
+    pub fn run(self) -> EngineExit<A::State, A::Error, E::Error> {
+        let Self {
+            app,
+            mut env,
+            journal,
+            mut batch,
+        } = self;
+        let mut state = app.initial_state();
+        let start_time = match env.start() {
+            Ok(start_time) => start_time,
+            Err(error) => {
+                return Self::finalize(
+                    state,
+                    FatalCause::Environment(EnvironmentFatal {
+                        error,
+                        operation: EnvironmentOperation::Start,
+                    }),
+                    None,
+                    None,
+                );
+            }
+        };
+        let certificate = Certificate::mint(journal, start_time);
+        let mut certificate = match certificate.run_started() {
+            Ok(certificate) => certificate,
+            Err(fatal) => {
+                return Self::finalize(state, FatalCause::Journal(fatal), None, Some(env));
+            }
+        };
+        let mut pending_event = None;
+
+        loop {
+            let classified = match Self::turn(
+                &app,
+                &mut state,
+                pending_event.as_ref(),
+                &mut batch,
+                certificate,
+            ) {
+                Ok(classified) => classified,
+                Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+            };
+
+            match classified {
+                ClassifiedTurn::Continue(classified) => {
+                    match Self::effects(classified, &mut env, &mut batch) {
+                        Ok(checkpointed) => match checkpointed.complete_continue() {
+                            Ok(between_turns) => match between_turns.accept_event(&mut env) {
+                                Ok((next, event)) => {
+                                    pending_event = Some(event);
+                                    certificate = next;
+                                }
+                                Err(cause) => {
+                                    return Self::finalize(state, cause, None, Some(env));
+                                }
+                            },
+                            Err(fatal) => {
+                                return Self::finalize(
+                                    state,
+                                    FatalCause::Journal(fatal),
+                                    None,
+                                    Some(env),
+                                );
+                            }
+                        },
+                        Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+                    }
+                }
+                ClassifiedTurn::Stop(classified) => {
+                    match Self::effects(classified, &mut env, &mut batch) {
+                        Ok(checkpointed) => match checkpointed.request_stop() {
+                            Ok(stop_pending) => match stop_pending.close(env) {
+                                Ok(_closed) => return EngineExit::Stopped { state },
+                                Err((cause, quiescence)) => {
+                                    return Self::finalize(state, cause, Some(quiescence), None);
+                                }
+                            },
+                            Err(fatal) => {
+                                return Self::finalize(
+                                    state,
+                                    FatalCause::Journal(fatal),
+                                    None,
+                                    Some(env),
+                                );
+                            }
+                        },
+                        Err(cause) => return Self::finalize(state, cause, None, Some(env)),
+                    }
+                }
+            }
         }
     }
 }
@@ -1386,6 +1498,394 @@ mod tests {
                 shutdown_calls.get(),
                 0,
                 "a contradictory finalization state must panic before shutdown"
+            );
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RunCall {
+        InitialState,
+        Start,
+        OnStart {
+            index: u64,
+            logical_time: u64,
+        },
+        OnEvent {
+            event: u8,
+            index: u64,
+            logical_time: u64,
+        },
+        NextEvent,
+        Dispatch(u8),
+        TakeError,
+        Shutdown,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RunState {
+        value: usize,
+    }
+
+    struct RunApplication {
+        calls: Rc<RefCell<Vec<RunCall>>>,
+        initial_value: usize,
+    }
+
+    impl Application for RunApplication {
+        type State = RunState;
+        type Event = u8;
+        type Command = u8;
+        type Error = &'static str;
+
+        fn initial_state(&self) -> Self::State {
+            self.calls.borrow_mut().push(RunCall::InitialState);
+            RunState {
+                value: self.initial_value,
+            }
+        }
+
+        fn on_start(
+            &self,
+            state: &mut Self::State,
+            context: &mut Context<'_, Self::Command>,
+        ) -> Outcome<Self::Error> {
+            self.calls.borrow_mut().push(RunCall::OnStart {
+                index: context.index().as_u64(),
+                logical_time: context.logical_time().as_nanos(),
+            });
+            state.value += 1;
+            Outcome::Stop
+        }
+
+        fn on_event(
+            &self,
+            state: &mut Self::State,
+            event: &Self::Event,
+            context: &mut Context<'_, Self::Command>,
+        ) -> Outcome<Self::Error> {
+            self.calls.borrow_mut().push(RunCall::OnEvent {
+                event: *event,
+                index: context.index().as_u64(),
+                logical_time: context.logical_time().as_nanos(),
+            });
+            state.value += 1;
+            Outcome::Stop
+        }
+    }
+
+    struct RunEnvironment {
+        calls: Rc<RefCell<Vec<RunCall>>>,
+        start_result: Option<Result<Timestamp, &'static str>>,
+    }
+
+    impl Environment for RunEnvironment {
+        type Event = u8;
+        type Command = u8;
+        type Error = &'static str;
+
+        fn start(&mut self) -> Result<Timestamp, Self::Error> {
+            self.calls.borrow_mut().push(RunCall::Start);
+            self.start_result
+                .take()
+                .expect("a run fixture must call Environment::start at most once")
+        }
+
+        fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error> {
+            self.calls.borrow_mut().push(RunCall::NextEvent);
+            Ok((1, Timestamp::from_nanos(1)))
+        }
+
+        fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error> {
+            self.calls.borrow_mut().push(RunCall::Dispatch(command));
+            Ok(())
+        }
+
+        fn take_error(&mut self) -> Option<Self::Error> {
+            self.calls.borrow_mut().push(RunCall::TakeError);
+            None
+        }
+
+        fn shutdown(self) -> ShutdownReport<Self::Error> {
+            self.calls.borrow_mut().push(RunCall::Shutdown);
+            ShutdownReport {
+                quiescence: Quiescence::Quiesced,
+                error: None,
+            }
+        }
+    }
+
+    fn run_fixture(
+        start_result: Result<Timestamp, &'static str>,
+        initial_value: usize,
+        calls: Rc<RefCell<Vec<RunCall>>>,
+        bytes: &mut Vec<u8>,
+    ) -> EngineExit<RunState, &'static str, &'static str> {
+        let app = RunApplication {
+            calls: Rc::clone(&calls),
+            initial_value,
+        };
+        let environment = RunEnvironment {
+            calls,
+            start_result: Some(start_result),
+        };
+        let config = EngineConfig {
+            max_commands_per_turn: NonZeroUsize::new(1)
+                .expect("a run fixture command bound must be nonzero"),
+            max_record_bytes: NonZeroUsize::new(256)
+                .expect("a run fixture record bound must be nonzero"),
+        };
+        let engine = match Engine::new(config, app, environment, bytes) {
+            Ok(engine) => engine,
+            Err(_) => panic!("a run fixture Engine must construct with small bounds"),
+        };
+        engine.run()
+    }
+
+    mod run_startup {
+        use super::*;
+
+        /// Invariant: initial State is created exactly once before the first
+        /// Environment operation, even when that operation fails.
+        /// Design Doc: the startup table, by name
+        #[test]
+        fn state_is_created_before_any_fallible_step() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let _exit = run_fixture(Err("start failed"), 3, Rc::clone(&calls), &mut bytes);
+
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[RunCall::InitialState, RunCall::Start],
+                "initial State creation must precede the first fallible Environment operation"
+            );
+        }
+
+        /// Invariant: a failed Environment start returns a fatal, quiesced run
+        /// without invoking shutdown.
+        /// Design Doc: ENV-START
+        #[test]
+        fn a_start_error_exits_fatal_quiesced_without_shutdown() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let exit = run_fixture(Err("start failed"), 5, Rc::clone(&calls), &mut bytes);
+
+            match exit {
+                EngineExit::Fatal {
+                    state,
+                    cause:
+                        FatalCause::Environment(EnvironmentFatal {
+                            error,
+                            operation: EnvironmentOperation::Start,
+                        }),
+                    quiescence,
+                } => {
+                    assert_eq!(
+                        state,
+                        RunState { value: 5 },
+                        "a start failure must carry the State created before startup"
+                    );
+                    assert_eq!(
+                        error, "start failed",
+                        "a start failure must preserve the exact Environment Error"
+                    );
+                    assert_eq!(
+                        quiescence,
+                        Quiescence::Quiesced,
+                        "a failed Environment start must exit already quiesced"
+                    );
+                }
+                _ => panic!("a failed Environment start must be the fatal Start cause"),
+            }
+            assert_eq!(
+                calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| matches!(call, RunCall::Shutdown))
+                    .count(),
+                0,
+                "a failed Environment start must not be followed by shutdown"
+            );
+        }
+
+        /// Invariant: when Environment startup fails, no handler runs and no
+        /// Journal record is written before the fatal exit.
+        #[test]
+        fn a_start_error_invokes_no_handler_and_writes_no_record() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let _exit = run_fixture(Err("start failed"), 7, Rc::clone(&calls), &mut bytes);
+
+            assert!(
+                !calls
+                    .borrow()
+                    .iter()
+                    .any(|call| matches!(call, RunCall::OnStart { .. } | RunCall::OnEvent { .. })),
+                "a failed Environment start must prevent every Application handler"
+            );
+            assert!(
+                bytes.is_empty(),
+                "a failed Environment start must leave the Journal sink untouched"
+            );
+        }
+
+        /// Invariant: start times at both ends of the timestamp domain reach the
+        /// first handler and first Journal record without alteration.
+        #[test]
+        fn boundary_start_times_reach_the_handler_and_journal_unchanged() {
+            for nanos in [0, u64::MAX] {
+                let calls = Rc::new(RefCell::new(Vec::new()));
+                let mut bytes = Vec::new();
+
+                let exit = run_fixture(
+                    Ok(Timestamp::from_nanos(nanos)),
+                    0,
+                    Rc::clone(&calls),
+                    &mut bytes,
+                );
+
+                assert!(
+                    matches!(exit, EngineExit::Stopped { .. }),
+                    "a boundary-valued start time must complete a clean Stop run"
+                );
+                assert!(
+                    calls.borrow().contains(&RunCall::OnStart {
+                        index: 0,
+                        logical_time: nanos,
+                    }),
+                    "the start handler must observe the exact frozen boundary timestamp"
+                );
+                let first_record = format!(
+                    "{{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":{nanos}}}\n"
+                );
+                assert!(
+                    bytes.starts_with(first_record.as_bytes()),
+                    "the first Journal record must contain the exact frozen boundary timestamp"
+                );
+            }
+        }
+    }
+
+    mod run_stop_path {
+        use super::*;
+
+        /// Invariant: stopping during the start turn writes exactly RunStarted,
+        /// StopRequested, and TurnCompleted Stop in that order.
+        /// Design Doc: RUN-GRAMMAR, RUN-RECORDS
+        #[test]
+        fn stop_at_start_produces_the_three_record_journal() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let exit = run_fixture(Ok(Timestamp::from_nanos(37)), 0, calls, &mut bytes);
+
+            assert!(
+                matches!(exit, EngineExit::Stopped { .. }),
+                "a clean Stop answer during the start turn must return Stopped"
+            );
+            assert_eq!(
+                bytes,
+                br#"{"record_kind":"RunStarted","index":0,"schema_version":1,"logical_time":37}
+{"record_kind":"StopRequested","index":0}
+{"record_kind":"TurnCompleted","index":0,"outcome":"Stop"}
+"#,
+                "a Stop-at-start run must write exactly its three required records"
+            );
+        }
+
+        /// Invariant: a stopped run returns the final State including mutations
+        /// made by its start handler.
+        /// Design Doc: EngineExit, by name
+        #[test]
+        fn stopped_carries_the_final_state() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let exit = run_fixture(Ok(Timestamp::from_nanos(0)), 41, calls, &mut bytes);
+
+            match exit {
+                EngineExit::Stopped { state } => assert_eq!(
+                    state,
+                    RunState { value: 42 },
+                    "Stopped must carry the State after the start handler's mutation"
+                ),
+                EngineExit::Fatal { .. } => {
+                    panic!("a clean Stop-at-start run must not return Fatal")
+                }
+            }
+        }
+
+        /// Invariant: a Stop-at-start run invokes Environment operations serially
+        /// as start, one checkpoint, and consuming shutdown.
+        /// Design Doc: ENV-SERIAL
+        #[test]
+        fn the_call_sequence_matches_env_serial() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let exit = run_fixture(
+                Ok(Timestamp::from_nanos(11)),
+                0,
+                Rc::clone(&calls),
+                &mut bytes,
+            );
+
+            assert!(
+                matches!(exit, EngineExit::Stopped { .. }),
+                "the serial call trace fixture must finish as Stopped"
+            );
+            assert_eq!(
+                calls.borrow().as_slice(),
+                &[
+                    RunCall::InitialState,
+                    RunCall::Start,
+                    RunCall::OnStart {
+                        index: 0,
+                        logical_time: 11,
+                    },
+                    RunCall::TakeError,
+                    RunCall::Shutdown,
+                ],
+                "a Stop-at-start run must call start first, checkpoint once, and shutdown last"
+            );
+        }
+
+        /// Invariant: stopping during the start turn invokes the start handler once
+        /// and never invokes the Event handler.
+        #[test]
+        fn stop_at_start_invokes_only_the_start_handler_once() {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let mut bytes = Vec::new();
+
+            let exit = run_fixture(
+                Ok(Timestamp::from_nanos(13)),
+                0,
+                Rc::clone(&calls),
+                &mut bytes,
+            );
+
+            assert!(
+                matches!(exit, EngineExit::Stopped { .. }),
+                "the handler-selection fixture must finish as Stopped"
+            );
+            let calls = calls.borrow();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| matches!(call, RunCall::OnStart { .. }))
+                    .count(),
+                1,
+                "a Stop-at-start run must invoke on_start exactly once"
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| matches!(call, RunCall::OnEvent { .. }))
+                    .count(),
+                0,
+                "a Stop-at-start run must never invoke on_event"
             );
         }
     }
