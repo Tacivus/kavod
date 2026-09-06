@@ -90,6 +90,64 @@ impl<'a, Ev> RecordPayload for EventAcceptedRecord<'a, Ev> {
     const KIND: RecordKind = RecordKind::EventAccepted;
 }
 
+#[derive(Serialize)]
+#[allow(
+    dead_code,
+    reason = "constructed by the batch transition in a later grammar build step"
+)]
+pub struct CommandsPreparedRecord<'a, C> {
+    pub record_kind: Kind<Self>,
+    pub index: EventIndex,
+    pub commands: &'a [C],
+}
+
+impl<'a, C> RecordPayload for CommandsPreparedRecord<'a, C> {
+    const KIND: RecordKind = RecordKind::CommandsPrepared;
+}
+
+#[derive(Serialize)]
+#[allow(
+    dead_code,
+    reason = "constructed by the batch transition in a later grammar build step"
+)]
+pub struct CommandsDispatchedRecord {
+    pub record_kind: Kind<Self>,
+    pub index: EventIndex,
+}
+
+impl RecordPayload for CommandsDispatchedRecord {
+    const KIND: RecordKind = RecordKind::CommandsDispatched;
+}
+
+#[derive(Serialize)]
+#[allow(
+    dead_code,
+    reason = "constructed by the stop transition in a later grammar build step"
+)]
+pub struct StopRequestedRecord {
+    pub record_kind: Kind<Self>,
+    pub index: EventIndex,
+}
+
+impl RecordPayload for StopRequestedRecord {
+    const KIND: RecordKind = RecordKind::StopRequested;
+}
+
+#[derive(Serialize)]
+#[allow(
+    dead_code,
+    reason = "constructed by completion transitions in later grammar build steps"
+)]
+pub struct TurnCompletedRecord {
+    pub record_kind: Kind<Self>,
+    pub index: EventIndex,
+    pub outcome: TurnOutcome,
+}
+
+impl RecordPayload for TurnCompletedRecord {
+    const KIND: RecordKind = RecordKind::TurnCompleted;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TurnOutcome {
     Continue,
@@ -119,6 +177,12 @@ mod tests {
             quantity: u64,
         }
 
+        #[derive(Serialize)]
+        struct TestCommand {
+            action: &'static str,
+            quantity: u64,
+        }
+
         struct FailsOnce {
             should_fail: Cell<bool>,
         }
@@ -132,6 +196,23 @@ mod tests {
                 }
 
                 serializer.serialize_str("recovered")
+            }
+        }
+
+        struct FallibleCommand {
+            action: &'static str,
+            should_fail: Cell<bool>,
+        }
+
+        impl Serialize for FallibleCommand {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                if self.should_fail.replace(false) {
+                    return Err(serde::ser::Error::custom(
+                        "intentional command serialization failure",
+                    ));
+                }
+
+                serializer.serialize_str(self.action)
             }
         }
 
@@ -207,6 +288,277 @@ mod tests {
                     .expect("an EventAccepted kind marker must serialize"),
                 r#""EventAccepted""#,
                 "an EventAccepted kind marker must serialize from its payload's declared kind"
+            );
+        }
+
+        /// Invariant: a prepared command record preserves the exact order of the
+        /// borrowed command batch in its serialized bytes.
+        /// Design Doc: RUN-RECORDS
+        #[test]
+        fn commands_prepared_keeps_batch_order_in_bytes() {
+            let commands = [
+                TestCommand {
+                    action: "buy",
+                    quantity: 2,
+                },
+                TestCommand {
+                    action: "sell",
+                    quantity: 1,
+                },
+            ];
+            let record = CommandsPreparedRecord {
+                record_kind: Kind::new(),
+                index: EventIndex::new(4),
+                commands: &commands,
+            };
+
+            assert_eq!(
+                serde_json::to_string(&record).expect("a CommandsPrepared record must serialize"),
+                r#"{"record_kind":"CommandsPrepared","index":4,"commands":[{"action":"buy","quantity":2},{"action":"sell","quantity":1}]}"#,
+                "a CommandsPrepared record must preserve command order in its bytes"
+            );
+            assert_eq!(
+                commands[0].action, "buy",
+                "serializing a CommandsPrepared record must not consume its borrowed batch"
+            );
+        }
+
+        /// Invariant: every record payload serializes only its documented fields,
+        /// beginning with its matching kind and preserving field order.
+        /// Design Doc: RUN-RECORDS
+        #[test]
+        fn every_payload_leads_with_its_kind_in_table_order() {
+            let event = TestEvent {
+                symbol: "KVD",
+                quantity: 3,
+            };
+            let commands = [TestCommand {
+                action: "hold",
+                quantity: 3,
+            }];
+            let cases = [
+                (
+                    serde_json::to_string(&RunStartedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(0),
+                        schema_version: 1,
+                        logical_time: Timestamp::from_nanos(100),
+                    })
+                    .expect("a RunStarted record must serialize"),
+                    r#"{"record_kind":"RunStarted","index":0,"schema_version":1,"logical_time":100}"#,
+                ),
+                (
+                    serde_json::to_string(&EventAcceptedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(1),
+                        logical_time: Timestamp::from_nanos(101),
+                        event: &event,
+                    })
+                    .expect("an EventAccepted record must serialize"),
+                    r#"{"record_kind":"EventAccepted","index":1,"logical_time":101,"event":{"symbol":"KVD","quantity":3}}"#,
+                ),
+                (
+                    serde_json::to_string(&CommandsPreparedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(1),
+                        commands: &commands,
+                    })
+                    .expect("a CommandsPrepared record must serialize"),
+                    r#"{"record_kind":"CommandsPrepared","index":1,"commands":[{"action":"hold","quantity":3}]}"#,
+                ),
+                (
+                    serde_json::to_string(&CommandsDispatchedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(1),
+                    })
+                    .expect("a CommandsDispatched record must serialize"),
+                    r#"{"record_kind":"CommandsDispatched","index":1}"#,
+                ),
+                (
+                    serde_json::to_string(&StopRequestedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(1),
+                    })
+                    .expect("a StopRequested record must serialize"),
+                    r#"{"record_kind":"StopRequested","index":1}"#,
+                ),
+                (
+                    serde_json::to_string(&TurnCompletedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(1),
+                        outcome: TurnOutcome::Continue,
+                    })
+                    .expect("a TurnCompleted record must serialize"),
+                    r#"{"record_kind":"TurnCompleted","index":1,"outcome":"Continue"}"#,
+                ),
+            ];
+
+            for (actual, expected) in cases {
+                assert_eq!(
+                    actual.as_str(),
+                    expected,
+                    "every record payload must serialize its exact fields in table order"
+                );
+            }
+        }
+
+        /// Invariant: completion records serialize either possible turn outcome as
+        /// a direct string value rather than a nested object.
+        /// Design Doc: RUN-RECORDS
+        #[test]
+        fn turn_completed_outcome_is_a_bare_tag_for_both_answers() {
+            for (outcome, expected) in [
+                (
+                    TurnOutcome::Continue,
+                    r#"{"record_kind":"TurnCompleted","index":8,"outcome":"Continue"}"#,
+                ),
+                (
+                    TurnOutcome::Stop,
+                    r#"{"record_kind":"TurnCompleted","index":8,"outcome":"Stop"}"#,
+                ),
+            ] {
+                let record = TurnCompletedRecord {
+                    record_kind: Kind::new(),
+                    index: EventIndex::new(8),
+                    outcome,
+                };
+
+                assert_eq!(
+                    serde_json::to_string(&record).expect("a TurnCompleted record must serialize"),
+                    expected,
+                    "a TurnCompleted outcome must serialize as its bare tag"
+                );
+            }
+        }
+
+        /// Invariant: prepared command records serialize borrowed slices correctly
+        /// when they contain no commands or exactly one command.
+        #[test]
+        fn commands_prepared_serializes_zero_and_one_command_boundaries() {
+            let no_commands: [TestCommand; 0] = [];
+            let one_command = [TestCommand {
+                action: "buy",
+                quantity: 1,
+            }];
+
+            for (commands, expected) in [
+                (
+                    no_commands.as_slice(),
+                    r#"{"record_kind":"CommandsPrepared","index":0,"commands":[]}"#,
+                ),
+                (
+                    one_command.as_slice(),
+                    r#"{"record_kind":"CommandsPrepared","index":0,"commands":[{"action":"buy","quantity":1}]}"#,
+                ),
+            ] {
+                let record = CommandsPreparedRecord {
+                    record_kind: Kind::new(),
+                    index: EventIndex::new(0),
+                    commands,
+                };
+
+                assert_eq!(
+                    serde_json::to_string(&record)
+                        .expect("a boundary-sized command batch must serialize"),
+                    expected,
+                    "a CommandsPrepared record must preserve a zero- or one-command slice"
+                );
+            }
+        }
+
+        /// Invariant: every remaining payload preserves an event index at the
+        /// largest value in its unsigned numeric domain.
+        #[test]
+        fn remaining_payloads_preserve_maximum_index() {
+            let commands = [0_u8];
+            let maximum = u64::MAX;
+            let cases = [
+                (
+                    serde_json::to_string(&CommandsPreparedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(maximum),
+                        commands: &commands,
+                    })
+                    .expect("a maximum-index CommandsPrepared record must serialize"),
+                    format!(
+                        "{{\"record_kind\":\"CommandsPrepared\",\"index\":{maximum},\"commands\":[0]}}"
+                    ),
+                ),
+                (
+                    serde_json::to_string(&CommandsDispatchedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(maximum),
+                    })
+                    .expect("a maximum-index CommandsDispatched record must serialize"),
+                    format!("{{\"record_kind\":\"CommandsDispatched\",\"index\":{maximum}}}"),
+                ),
+                (
+                    serde_json::to_string(&StopRequestedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(maximum),
+                    })
+                    .expect("a maximum-index StopRequested record must serialize"),
+                    format!("{{\"record_kind\":\"StopRequested\",\"index\":{maximum}}}"),
+                ),
+                (
+                    serde_json::to_string(&TurnCompletedRecord {
+                        record_kind: Kind::new(),
+                        index: EventIndex::new(maximum),
+                        outcome: TurnOutcome::Stop,
+                    })
+                    .expect("a maximum-index TurnCompleted record must serialize"),
+                    format!(
+                        "{{\"record_kind\":\"TurnCompleted\",\"index\":{maximum},\"outcome\":\"Stop\"}}"
+                    ),
+                ),
+            ];
+
+            for (actual, expected) in cases {
+                assert_eq!(
+                    actual, expected,
+                    "a remaining record payload must preserve the maximum event index"
+                );
+            }
+        }
+
+        /// Invariant: if a borrowed command fails during serialization, the same
+        /// batch and record remain intact for a later serialization attempt.
+        #[test]
+        fn commands_prepared_serialization_failure_leaves_batch_and_record_reusable() {
+            let commands = [
+                FallibleCommand {
+                    action: "first",
+                    should_fail: Cell::new(false),
+                },
+                FallibleCommand {
+                    action: "second",
+                    should_fail: Cell::new(true),
+                },
+            ];
+            let record = CommandsPreparedRecord {
+                record_kind: Kind::new(),
+                index: EventIndex::new(2),
+                commands: &commands,
+            };
+
+            let error = serde_json::to_string(&record)
+                .expect_err("the command's first serialization failure must propagate");
+            assert!(
+                error
+                    .to_string()
+                    .contains("intentional command serialization failure"),
+                "a CommandsPrepared record must preserve its command's serialization error"
+            );
+            assert_eq!(
+                record.commands.len(),
+                2,
+                "a command serialization failure must leave the borrowed batch intact"
+            );
+            assert_eq!(
+                serde_json::to_string(&record)
+                    .expect("the same borrowed command record must remain serializable"),
+                r#"{"record_kind":"CommandsPrepared","index":2,"commands":["first","second"]}"#,
+                "a CommandsPrepared record must remain reusable after a command serialization failure"
             );
         }
 
