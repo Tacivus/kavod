@@ -1,4 +1,5 @@
 use crate::bounded_buffer::BoundedBuffer;
+use crate::environment::Environment;
 use crate::journal::{Journal, JournalError};
 use crate::time::{EventIndex, Timestamp};
 use serde::{Serialize, Serializer};
@@ -297,6 +298,51 @@ impl<W: io::Write, A> Certificate<W, TurnOpen<A>> {
         );
         self.advance()
     }
+
+    pub(super) fn dispatch_batch<C, E, AE>(
+        mut self,
+        environment: &mut E,
+        commands: &mut BoundedBuffer<C>,
+    ) -> Result<Certificate<W, EffectsComplete<A>>, super::FatalCause<AE, E::Error>>
+    where
+        C: Serialize,
+        E: Environment<Command = C>,
+    {
+        assert!(
+            !commands.is_empty(),
+            "ASSERT-INVARIANTS: the dispatch batch transition requires a nonempty command buffer"
+        );
+
+        self.commit(
+            &CommandsPreparedRecord {
+                record_kind: Kind::new(),
+                index: self.index,
+                commands: commands.as_slice(),
+            },
+            None,
+        )
+        .map_err(super::FatalCause::Journal)?;
+
+        for (position, command) in commands.drain().enumerate() {
+            environment.dispatch(command).map_err(|error| {
+                super::FatalCause::Environment(super::EnvironmentFatal {
+                    error,
+                    operation: super::EnvironmentOperation::Dispatch { position },
+                })
+            })?;
+        }
+
+        self.commit(
+            &CommandsDispatchedRecord {
+                record_kind: Kind::new(),
+                index: self.index,
+            },
+            None,
+        )
+        .map_err(super::FatalCause::Journal)?;
+
+        Ok(self.advance())
+    }
 }
 
 #[allow(dead_code, reason = "called by Engine::run in a later build step")]
@@ -331,7 +377,11 @@ impl<W: io::Write> Certificate<W, Initial> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, num::NonZeroUsize, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        num::NonZeroUsize,
+        rc::Rc,
+    };
 
     fn certificate_journal<W: io::Write>(writer: W, max_record_bytes: usize) -> Journal<W> {
         Journal::new(
@@ -340,6 +390,127 @@ mod tests {
                 .expect("a certificate test record bound must be nonzero"),
         )
         .expect("a small certificate test Journal must reserve its record buffer")
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ScriptedCall<C> {
+        RecordCommitted(Vec<u8>),
+        Start,
+        NextEvent,
+        Dispatch(C),
+        DispatchFailed(C),
+        TakeError,
+        Shutdown,
+    }
+
+    type ScriptedCalls<C> = Rc<RefCell<Vec<ScriptedCall<C>>>>;
+
+    struct ScriptedEnvironment<C> {
+        calls: ScriptedCalls<C>,
+        dispatch_position: usize,
+        fail_dispatch_at: Option<usize>,
+        next_event: Option<Result<(u8, Timestamp), &'static str>>,
+        pending_error: Option<&'static str>,
+        shutdown_report: crate::environment::ShutdownReport<&'static str>,
+    }
+
+    impl<C> ScriptedEnvironment<C> {
+        fn new(calls: ScriptedCalls<C>, fail_dispatch_at: Option<usize>) -> Self {
+            Self {
+                calls,
+                dispatch_position: 0,
+                fail_dispatch_at,
+                next_event: Some(Ok((1, Timestamp::from_nanos(1)))),
+                pending_error: None,
+                shutdown_report: crate::environment::ShutdownReport {
+                    quiescence: crate::environment::Quiescence::Quiesced,
+                    error: None,
+                },
+            }
+        }
+    }
+
+    impl<C> Environment for ScriptedEnvironment<C> {
+        type Event = u8;
+        type Command = C;
+        type Error = &'static str;
+
+        fn start(&mut self) -> Result<Timestamp, Self::Error> {
+            self.calls.borrow_mut().push(ScriptedCall::Start);
+            Ok(Timestamp::from_nanos(0))
+        }
+
+        fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error> {
+            self.calls.borrow_mut().push(ScriptedCall::NextEvent);
+            self.next_event
+                .take()
+                .expect("a scripted Environment must have one next-event result")
+        }
+
+        fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error> {
+            let position = self.dispatch_position;
+            self.dispatch_position += 1;
+            if self.fail_dispatch_at == Some(position) {
+                self.calls
+                    .borrow_mut()
+                    .push(ScriptedCall::DispatchFailed(command));
+                return Err("scripted dispatch failure");
+            }
+
+            self.calls
+                .borrow_mut()
+                .push(ScriptedCall::Dispatch(command));
+            Ok(())
+        }
+
+        fn take_error(&mut self) -> Option<Self::Error> {
+            self.calls.borrow_mut().push(ScriptedCall::TakeError);
+            self.pending_error.take()
+        }
+
+        fn shutdown(self) -> crate::environment::ShutdownReport<Self::Error> {
+            self.calls.borrow_mut().push(ScriptedCall::Shutdown);
+            self.shutdown_report
+        }
+    }
+
+    struct ScriptedWriter<C> {
+        calls: ScriptedCalls<C>,
+        pending_record: Vec<u8>,
+        flush_position: usize,
+        fail_flush_at: Option<usize>,
+    }
+
+    impl<C> ScriptedWriter<C> {
+        fn new(calls: ScriptedCalls<C>, fail_flush_at: Option<usize>) -> Self {
+            Self {
+                calls,
+                pending_record: Vec::new(),
+                flush_position: 0,
+                fail_flush_at,
+            }
+        }
+    }
+
+    impl<C> io::Write for ScriptedWriter<C> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.pending_record.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let position = self.flush_position;
+            self.flush_position += 1;
+            if self.fail_flush_at == Some(position) {
+                return Err(io::Error::other("scripted record flush failure"));
+            }
+
+            let record = std::mem::take(&mut self.pending_record);
+            self.calls
+                .borrow_mut()
+                .push(ScriptedCall::RecordCommitted(record));
+            Ok(())
+        }
     }
 
     mod certificate_minting {
@@ -831,6 +1002,477 @@ mod tests {
                 bytes, RUN_STARTED_AT_ZERO,
                 "rejecting a full batch must not append a Journal record"
             );
+        }
+    }
+
+    mod batch_dispatch {
+        use super::*;
+        use crate::{EnvironmentOperation, FatalCause};
+
+        const RUN_STARTED_AT_ZERO: &[u8] =
+            b"{\"record_kind\":\"RunStarted\",\"index\":0,\"schema_version\":1,\"logical_time\":0}\n";
+        type DispatchResult<C, A> = Result<
+            Certificate<ScriptedWriter<C>, EffectsComplete<A>>,
+            FatalCause<(), &'static str>,
+        >;
+
+        fn scripted_calls<C>() -> ScriptedCalls<C> {
+            Rc::new(RefCell::new(Vec::new()))
+        }
+
+        fn turn_open<C>(
+            calls: ScriptedCalls<C>,
+            fail_flush_at: Option<usize>,
+            start_time: Timestamp,
+        ) -> Certificate<ScriptedWriter<C>, TurnOpen> {
+            let certificate = Certificate::mint(
+                certificate_journal(ScriptedWriter::new(calls, fail_flush_at), 512),
+                start_time,
+            );
+            match certificate.run_started() {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a batch-dispatch fixture must commit RunStarted"),
+            }
+        }
+
+        fn dispatch<A, C: Serialize>(
+            certificate: Certificate<ScriptedWriter<C>, TurnOpen<A>>,
+            environment: &mut ScriptedEnvironment<C>,
+            commands: &mut BoundedBuffer<C>,
+        ) -> DispatchResult<C, A> {
+            certificate.dispatch_batch(environment, commands)
+        }
+
+        fn continue_turn<C>(
+            calls: ScriptedCalls<C>,
+            fail_flush_at: Option<usize>,
+        ) -> Certificate<ScriptedWriter<C>, TurnOpen<answer::Continue>> {
+            match turn_open(calls, fail_flush_at, Timestamp::from_nanos(0))
+                .classify(TurnOutcome::Continue)
+            {
+                ClassifiedTurn::Continue(certificate) => certificate,
+                ClassifiedTurn::Stop(_) => {
+                    panic!("a Continue answer must produce the Continue-typed phase")
+                }
+            }
+        }
+
+        fn expect_journal_fatal<A, C>(result: DispatchResult<C, A>) -> JournalFatal {
+            match result {
+                Err(FatalCause::Journal(fatal)) => fatal,
+                Err(_) => panic!("a scripted Journal failure must remain the fatal cause"),
+                Ok(_) => panic!("a scripted Journal failure must prevent phase advancement"),
+            }
+        }
+
+        fn expect_environment_fatal<A, C>(
+            result: DispatchResult<C, A>,
+        ) -> crate::EnvironmentFatal<&'static str> {
+            match result {
+                Err(FatalCause::Environment(fatal)) => fatal,
+                Err(_) => panic!("a scripted dispatch failure must remain the fatal cause"),
+                Ok(_) => panic!("a scripted dispatch failure must prevent phase advancement"),
+            }
+        }
+
+        /// Invariant: a nonempty batch is durably recorded before its commands are
+        /// handed off in order, and completion is recorded only after every handoff.
+        /// Design Doc: A5
+        #[test]
+        fn prepared_then_each_handoff_in_order_then_dispatched() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            for command in [10, 20, 30] {
+                commands
+                    .try_push(command)
+                    .expect("each command through exact capacity must fit");
+            }
+
+            let effects_complete = dispatch(certificate, &mut environment, &mut commands);
+
+            assert!(
+                effects_complete.is_ok(),
+                "a successful full-batch handoff must reach effects-complete"
+            );
+            assert!(
+                commands.is_empty(),
+                "a successful batch handoff must drain every command"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsPrepared\",\"index\":0,\"commands\":[10,20,30]}\n"
+                            .to_vec(),
+                    ),
+                    ScriptedCall::Dispatch(10),
+                    ScriptedCall::Dispatch(20),
+                    ScriptedCall::Dispatch(30),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsDispatched\",\"index\":0}\n".to_vec(),
+                    ),
+                ],
+                "the committed intent, ordered handoffs, and committed completion must be bracketed exactly"
+            );
+        }
+
+        /// Invariant: when command handoff fails at a batch position, only the
+        /// successful prefix remains handed off and every later command is discarded.
+        /// Design Doc: the Prepared phase row, by name
+        #[test]
+        fn error_at_position_k_keeps_the_prefix_and_discards_the_suffix() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(1));
+            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            for command in [10, 20, 30] {
+                commands
+                    .try_push(command)
+                    .expect("each scripted command must fit");
+            }
+
+            let fatal =
+                expect_environment_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Dispatch { position: 1 },
+                "a dispatch failure must identify its zero-based batch position"
+            );
+            assert_eq!(
+                fatal.error, "scripted dispatch failure",
+                "a dispatch failure must preserve the Environment error"
+            );
+            assert!(
+                commands.is_empty(),
+                "a dispatch failure must discard the failed command and undelivered suffix"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsPrepared\",\"index\":0,\"commands\":[10,20,30]}\n"
+                            .to_vec(),
+                    ),
+                    ScriptedCall::Dispatch(10),
+                    ScriptedCall::DispatchFailed(20),
+                ],
+                "a failed middle handoff must retain only the handed-off prefix and never attempt the suffix"
+            );
+        }
+
+        /// Invariant: if the prepared-command record cannot commit, no command is
+        /// handed off and the complete batch remains available for fatal cleanup.
+        /// Design Doc: RUN-GRAMMAR
+        #[test]
+        fn prepared_commit_failure_precedes_any_handoff() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), Some(1));
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(1).expect("one command slot must reserve");
+            commands.try_push(7).expect("the scripted command must fit");
+
+            let fatal =
+                expect_journal_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::CommandsPrepared,
+                "a failed intent commit must identify CommandsPrepared"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "a failed CommandsPrepared record must carry no turn outcome"
+            );
+            assert!(
+                matches!(
+                    fatal.error,
+                    JournalError::Sink {
+                        operation: crate::journal::SinkOperation::Flush,
+                        ..
+                    }
+                ),
+                "the scripted prepared-record flush failure must preserve its typed Journal error"
+            );
+            assert_eq!(
+                commands.as_slice(),
+                &[7],
+                "a prepared-record failure must leave the complete undrained batch intact"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec())],
+                "a prepared-record failure must occur before every Environment handoff"
+            );
+        }
+
+        /// Invariant: if the dispatched-command record cannot commit, every command
+        /// has already been handed off and the drained batch remains empty.
+        /// Design Doc: the Edges table, by name
+        #[test]
+        fn dispatched_commit_failure_follows_every_handoff() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), Some(2));
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            commands.try_push(4).expect("the first command must fit");
+            commands.try_push(5).expect("the second command must fit");
+
+            let fatal =
+                expect_journal_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::CommandsDispatched,
+                "a failed completion commit must identify CommandsDispatched"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "a failed CommandsDispatched record must carry no turn outcome"
+            );
+            assert!(
+                commands.is_empty(),
+                "a dispatched-record failure must leave the already handed-off batch empty"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec()),
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"CommandsPrepared\",\"index\":0,\"commands\":[4,5]}\n"
+                            .to_vec(),
+                    ),
+                    ScriptedCall::Dispatch(4),
+                    ScriptedCall::Dispatch(5),
+                ],
+                "a dispatched-record failure must follow every ordered handoff without committing completion"
+            );
+        }
+
+        /// Invariant: the dispatch transition rejects an empty command batch rather
+        /// than recording intent for work that does not exist.
+        /// Design Doc: ASSERT-INVARIANTS
+        #[test]
+        #[should_panic(expected = "ASSERT-INVARIANTS")]
+        fn an_empty_buffer_is_an_invariant_panic() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(calls, None);
+            let mut commands =
+                BoundedBuffer::<u8>::new(0).expect("a zero-capacity command batch must reserve");
+
+            let _effects_complete = dispatch(certificate, &mut environment, &mut commands);
+        }
+
+        /// Invariant: handing off the sole command in a one-slot batch returns a
+        /// certificate that still encodes the Stop answer, preserves its accepted
+        /// index and logical time, and leaves the command slot reusable.
+        #[test]
+        fn one_command_batch_preserves_phase_state_and_reusable_capacity() {
+            let calls = scripted_calls();
+            let certificate =
+                match turn_open(Rc::clone(&calls), None, Timestamp::from_nanos(u64::MAX))
+                    .classify(TurnOutcome::Stop)
+                {
+                    ClassifiedTurn::Stop(certificate) => certificate,
+                    ClassifiedTurn::Continue(_) => {
+                        panic!("a Stop answer must produce the Stop-typed phase")
+                    }
+                };
+            let mut environment = ScriptedEnvironment::new(calls, None);
+            let mut commands = BoundedBuffer::new(1).expect("one command slot must reserve");
+            commands
+                .try_push(9)
+                .expect("the sole command must fit exactly");
+
+            let effects_complete = match dispatch(certificate, &mut environment, &mut commands) {
+                Ok(certificate) => certificate,
+                Err(_) => panic!("a one-command batch must dispatch successfully"),
+            };
+
+            fn require_stop<W: io::Write>(
+                _certificate: &Certificate<W, EffectsComplete<answer::Stop>>,
+            ) {
+            }
+            require_stop(&effects_complete);
+            assert_eq!(
+                effects_complete.index.as_u64(),
+                0,
+                "batch dispatch must preserve the accepted turn index"
+            );
+            assert_eq!(
+                effects_complete.last_time.as_nanos(),
+                u64::MAX,
+                "batch dispatch must preserve the exact last accepted logical time"
+            );
+            assert_eq!(
+                commands.capacity(),
+                1,
+                "draining the sole command must preserve the batch's logical capacity"
+            );
+            commands
+                .try_push(10)
+                .expect("the drained command slot must remain reusable");
+            assert_eq!(
+                commands.as_slice(),
+                &[10],
+                "the batch must accept a replacement command after successful dispatch"
+            );
+        }
+
+        /// Invariant: failure at the first command hands off no prefix and discards
+        /// the failed command together with the entire remaining batch.
+        #[test]
+        fn first_position_failure_hands_off_nothing_and_discards_all_commands() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(0));
+            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            for command in [1, 2, 3] {
+                commands
+                    .try_push(command)
+                    .expect("each scripted command must fit");
+            }
+
+            let fatal =
+                expect_environment_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Dispatch { position: 0 },
+                "a first-command failure must report position zero"
+            );
+            assert!(
+                commands.is_empty(),
+                "a first-command failure must discard the entire drained batch"
+            );
+            assert!(
+                matches!(calls.borrow().last(), Some(ScriptedCall::DispatchFailed(1))),
+                "a first-command failure must attempt only the first command"
+            );
+        }
+
+        /// Invariant: failure at the last command preserves every earlier handoff,
+        /// does not hand off the failing command, and leaves no batch residue.
+        #[test]
+        fn last_position_failure_keeps_the_full_prefix_and_discards_the_failed_command() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(2));
+            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            for command in [1, 2, 3] {
+                commands
+                    .try_push(command)
+                    .expect("each scripted command must fit");
+            }
+
+            let fatal =
+                expect_environment_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Dispatch { position: 2 },
+                "a last-command failure must report the final zero-based position"
+            );
+            assert!(
+                commands.is_empty(),
+                "a last-command failure must leave the drained batch empty"
+            );
+            let calls = calls.borrow();
+            assert!(
+                calls.ends_with(&[
+                    ScriptedCall::Dispatch(1),
+                    ScriptedCall::Dispatch(2),
+                    ScriptedCall::DispatchFailed(3),
+                ]),
+                "a last-command failure must retain every successful prefix handoff in order"
+            );
+        }
+
+        /// Invariant: a command serialization failure occurs while the batch is
+        /// still borrowed, leaving every command intact and the Environment untouched.
+        #[test]
+        fn command_serialization_failure_leaves_the_batch_undrained() {
+            struct Unserializable;
+
+            impl Serialize for Unserializable {
+                fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                    Err(serde::ser::Error::custom(
+                        "scripted command serialization failure",
+                    ))
+                }
+            }
+
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands =
+                BoundedBuffer::new(1).expect("one unserializable command slot must reserve");
+            commands
+                .try_push(Unserializable)
+                .unwrap_or_else(|_| panic!("the unserializable command must fit"));
+
+            let fatal =
+                expect_journal_fatal(dispatch(certificate, &mut environment, &mut commands));
+
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::CommandsPrepared,
+                "a command encoding failure must identify CommandsPrepared"
+            );
+            assert!(
+                matches!(fatal.error, JournalError::Encode(_)),
+                "a command serializer failure must retain the Journal Encode error"
+            );
+            assert_eq!(
+                commands.len(),
+                1,
+                "a command serializer failure must leave the complete batch undrained"
+            );
+            assert_eq!(
+                environment.dispatch_position, 0,
+                "a command serializer failure must precede every Environment handoff"
+            );
+            assert_eq!(
+                calls.borrow().len(),
+                1,
+                "a command serializer failure must commit no record after RunStarted"
+            );
+        }
+
+        /// Invariant: rejecting an empty batch changes neither Journal history nor
+        /// Environment state and leaves the empty buffer reusable after the panic.
+        #[test]
+        fn empty_batch_panic_has_no_record_or_environment_side_effect() {
+            let calls = scripted_calls();
+            let certificate = continue_turn(Rc::clone(&calls), None);
+            let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
+            let mut commands = BoundedBuffer::<u8>::new(1).expect("one command slot must reserve");
+
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _effects_complete = dispatch(certificate, &mut environment, &mut commands);
+            }));
+
+            assert!(
+                panic.is_err(),
+                "an empty command batch must panic before phase advancement"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::RecordCommitted(RUN_STARTED_AT_ZERO.to_vec())],
+                "empty-batch rejection must append no Journal record or Environment call"
+            );
+            assert!(
+                commands.is_empty(),
+                "empty-batch rejection must leave the command buffer empty"
+            );
+            commands
+                .try_push(1)
+                .expect("the rejected empty batch must remain reusable");
         }
     }
 

@@ -96,7 +96,7 @@ that's the row it pins.
 - [x] C17 · remaining payloads
 - [x] C18 · certificate + `run_started`
 - [x] C19 · `classify` + `no_commands`
-- [ ] C20 · `dispatch_batch`
+- [x] C20 · `dispatch_batch`
 - [ ] C21 · checkpoint + completion records
 - [ ] C22 · `accept_event`
 - [ ] C23 · `close`
