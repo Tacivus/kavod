@@ -379,6 +379,57 @@ impl<W: io::Write> Certificate<W, Checkpointed<answer::Continue>> {
 }
 
 #[allow(dead_code, reason = "called by Engine::run in a later build step")]
+impl<W: io::Write> Certificate<W, BetweenTurns> {
+    #[allow(
+        clippy::type_complexity,
+        reason = "the transition returns its typed successor and owned Event or the shared fatal cause"
+    )]
+    pub(super) fn accept_event<E: Environment, AE>(
+        mut self,
+        environment: &mut E,
+    ) -> Result<(Certificate<W, TurnOpen>, E::Event), super::FatalCause<AE, E::Error>>
+    where
+        E::Event: Serialize,
+    {
+        if self.index.as_u64() == u64::MAX {
+            return Err(super::FatalCause::Core(super::CoreError::IndexExhausted));
+        }
+
+        let (event, offered) = environment.next_event().map_err(|error| {
+            super::FatalCause::Environment(super::EnvironmentFatal {
+                error,
+                operation: super::EnvironmentOperation::NextEvent,
+            })
+        })?;
+        let next_index = self
+            .index
+            .as_u64()
+            .checked_add(1)
+            .expect("RUN-INDEX: overflow past the index domain check");
+        if offered < self.last_time {
+            return Err(super::FatalCause::Core(super::CoreError::TimeRegression {
+                previous: self.last_time,
+                offered,
+            }));
+        }
+
+        self.commit(
+            &EventAcceptedRecord {
+                record_kind: Kind::new(),
+                index: EventIndex::new(next_index),
+                logical_time: offered,
+                event: &event,
+            },
+            None,
+        )
+        .map_err(super::FatalCause::Journal)?;
+        self.index = EventIndex::new(next_index);
+        self.last_time = offered;
+        Ok((self.advance(), event))
+    }
+}
+
+#[allow(dead_code, reason = "called by Engine::run in a later build step")]
 impl<W: io::Write> Certificate<W, Checkpointed<answer::Stop>> {
     pub(super) fn request_stop(mut self) -> Result<Certificate<W, StopPending>, JournalFatal> {
         self.commit(
@@ -2079,6 +2130,443 @@ mod tests {
             assert!(
                 stop_bytes.is_empty(),
                 "an oversized Stop request must write no partial bytes"
+            );
+        }
+    }
+
+    mod event_acceptance {
+        use super::*;
+        use crate::{CoreError, FatalCause};
+
+        const EVENT_ONE_AT_ONE: &[u8] =
+            b"{\"record_kind\":\"EventAccepted\",\"index\":1,\"logical_time\":1,\"event\":1}\n";
+
+        fn between_turns<W: io::Write>(
+            writer: W,
+            max_record_bytes: usize,
+            index: u64,
+            last_time: u64,
+        ) -> Certificate<W, BetweenTurns> {
+            Certificate {
+                journal: certificate_journal(writer, max_record_bytes),
+                index: EventIndex::new(index),
+                last_time: Timestamp::from_nanos(last_time),
+                _phase: PhantomData,
+            }
+        }
+
+        struct OneEventEnvironment<Ev> {
+            candidate: Option<(Ev, Timestamp)>,
+            next_event_calls: usize,
+        }
+
+        impl<Ev> OneEventEnvironment<Ev> {
+            fn new(event: Ev, timestamp: Timestamp) -> Self {
+                Self {
+                    candidate: Some((event, timestamp)),
+                    next_event_calls: 0,
+                }
+            }
+        }
+
+        impl<Ev> Environment for OneEventEnvironment<Ev> {
+            type Event = Ev;
+            type Command = ();
+            type Error = &'static str;
+
+            fn start(&mut self) -> Result<Timestamp, Self::Error> {
+                unreachable!("an event-acceptance fixture must not call start")
+            }
+
+            fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error> {
+                self.next_event_calls += 1;
+                Ok(self
+                    .candidate
+                    .take()
+                    .expect("an event-acceptance fixture must contain one candidate"))
+            }
+
+            fn dispatch(&mut self, _command: Self::Command) -> Result<(), Self::Error> {
+                unreachable!("an event-acceptance fixture must not call dispatch")
+            }
+
+            fn take_error(&mut self) -> Option<Self::Error> {
+                unreachable!("an event-acceptance fixture must not call take_error")
+            }
+
+            fn shutdown(self) -> crate::environment::ShutdownReport<Self::Error> {
+                unreachable!("an event-acceptance fixture must not call shutdown")
+            }
+        }
+
+        #[derive(Debug, PartialEq, Eq, Serialize)]
+        struct NonCloneEvent {
+            sequence: u8,
+        }
+
+        struct FailsToSerialize;
+
+        impl Serialize for FailsToSerialize {
+            fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "scripted Event serialization failure",
+                ))
+            }
+        }
+
+        /// Invariant: once the largest event index has been accepted, another
+        /// acceptance attempt fails before asking the Environment for a candidate.
+        /// Design Doc: RUN-INDEX
+        #[test]
+        fn the_domain_check_precedes_next_event() {
+            let calls = record_calls();
+            let certificate = between_turns(
+                ScriptedWriter::new(Rc::clone(&calls), None),
+                512,
+                u64::MAX - 1,
+                1,
+            );
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+
+            let (certificate, event) = match certificate.accept_event::<_, ()>(&mut environment) {
+                Ok(accepted) => accepted,
+                Err(_) => panic!("the largest available event index must be accepted"),
+            };
+            assert_eq!(
+                certificate.index.as_u64(),
+                u64::MAX,
+                "acceptance from one below the index maximum must reach the maximum"
+            );
+            assert_eq!(
+                event, 1,
+                "acceptance at the largest available index must return its candidate"
+            );
+            drop(certificate);
+            environment.next_event = Some(Ok((2, Timestamp::from_nanos(2))));
+            let exhausted_certificate = between_turns(
+                ScriptedWriter::new(Rc::clone(&calls), None),
+                512,
+                u64::MAX,
+                1,
+            );
+            let calls_before_exhaustion = calls.borrow().len();
+
+            let fatal = exhausted_certificate.accept_event::<_, ()>(&mut environment);
+
+            assert!(
+                matches!(fatal, Err(FatalCause::Core(CoreError::IndexExhausted))),
+                "acceptance past the event-index maximum must report index exhaustion"
+            );
+            assert_eq!(
+                calls.borrow().len(),
+                calls_before_exhaustion,
+                "index exhaustion must occur before another Environment or Journal call"
+            );
+            assert!(
+                environment.next_event.is_some(),
+                "index exhaustion must leave the next candidate unconsumed"
+            );
+        }
+
+        /// Invariant: a candidate stamped before the last accepted time is consumed
+        /// but rejected without committing an acceptance record.
+        /// Design Doc: the EventAccepted edge row, by name
+        #[test]
+        fn a_decreasing_stamp_is_time_regression_with_the_candidate_consumed() {
+            let calls = record_calls();
+            let certificate =
+                between_turns(ScriptedWriter::new(Rc::clone(&calls), None), 512, 4, 10);
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.next_event = Some(Ok((9, Timestamp::from_nanos(9))));
+
+            let fatal = certificate.accept_event::<_, ()>(&mut environment);
+
+            match fatal {
+                Err(FatalCause::Core(CoreError::TimeRegression { previous, offered })) => {
+                    assert_eq!(
+                        previous,
+                        Timestamp::from_nanos(10),
+                        "time regression must preserve the last accepted timestamp"
+                    );
+                    assert_eq!(
+                        offered,
+                        Timestamp::from_nanos(9),
+                        "time regression must preserve the rejected candidate timestamp"
+                    );
+                }
+                Err(_) => panic!("a decreasing candidate stamp must remain a Core fatal"),
+                Ok(_) => panic!("a decreasing candidate stamp must not be accepted"),
+            }
+            assert!(
+                environment.next_event.is_none(),
+                "a rejected regressing candidate must remain consumed"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[ScriptedCall::NextEvent],
+                "time regression must occur after candidate consumption and before record commit"
+            );
+        }
+
+        /// Invariant: a candidate carrying the same timestamp as the previous
+        /// accepted turn advances to the next event index.
+        /// Design Doc: ENV-TIME
+        #[test]
+        fn an_equal_stamp_is_accepted() {
+            let calls = record_calls();
+            let certificate =
+                between_turns(ScriptedWriter::new(Rc::clone(&calls), None), 512, 0, 1);
+            let mut environment = ScriptedEnvironment::<u8>::new(calls, None);
+
+            let (certificate, event) = match certificate.accept_event::<_, ()>(&mut environment) {
+                Ok(accepted) => accepted,
+                Err(_) => panic!("an equal candidate timestamp must be accepted"),
+            };
+
+            assert_eq!(event, 1, "equal-time acceptance must return its candidate");
+            assert_eq!(
+                certificate.index.as_u64(),
+                1,
+                "equal-time acceptance from the start turn must advance to index one"
+            );
+            assert_eq!(
+                certificate.last_time,
+                Timestamp::from_nanos(1),
+                "equal-time acceptance must preserve the accepted timestamp"
+            );
+        }
+
+        /// Invariant: an accepted candidate's index and time become certificate
+        /// state only when its acceptance record commits successfully.
+        /// Design Doc: RUN-GRAMMAR
+        #[test]
+        fn acceptance_advances_index_and_time_only_on_commit() {
+            let failed_calls = record_calls();
+            let failed_certificate = between_turns(
+                ScriptedWriter::new(Rc::clone(&failed_calls), Some(0)),
+                512,
+                7,
+                10,
+            );
+            let mut failed_environment =
+                ScriptedEnvironment::<u8>::new(Rc::clone(&failed_calls), None);
+            failed_environment.next_event = Some(Ok((5, Timestamp::from_nanos(12))));
+
+            let fatal = failed_certificate.accept_event::<_, ()>(&mut failed_environment);
+
+            match fatal {
+                Err(FatalCause::Journal(fatal)) => {
+                    assert_eq!(
+                        fatal.record_kind,
+                        RecordKind::EventAccepted,
+                        "a failed acceptance commit must identify EventAccepted"
+                    );
+                    assert_eq!(
+                        fatal.outcome, None,
+                        "an EventAccepted commit failure must carry no turn outcome"
+                    );
+                }
+                Err(_) => panic!("an acceptance commit failure must remain a Journal fatal"),
+                Ok(_) => panic!("a failed acceptance commit must return no successor certificate"),
+            }
+            assert_eq!(
+                &*failed_calls.borrow(),
+                &[ScriptedCall::NextEvent],
+                "a failed acceptance commit must expose no advanced successor state"
+            );
+
+            let successful_calls = record_calls();
+            let successful_certificate = between_turns(
+                ScriptedWriter::new(Rc::clone(&successful_calls), None),
+                512,
+                7,
+                10,
+            );
+            let mut successful_environment = ScriptedEnvironment::<u8>::new(successful_calls, None);
+            successful_environment.next_event = Some(Ok((5, Timestamp::from_nanos(12))));
+            let (successful_certificate, _) =
+                match successful_certificate.accept_event::<_, ()>(&mut successful_environment) {
+                    Ok(accepted) => accepted,
+                    Err(_) => panic!("a successful acceptance commit must return its successor"),
+                };
+            assert_eq!(
+                successful_certificate.index.as_u64(),
+                8,
+                "a committed acceptance must advance the certificate index"
+            );
+            assert_eq!(
+                successful_certificate.last_time,
+                Timestamp::from_nanos(12),
+                "a committed acceptance must update the certificate timestamp"
+            );
+        }
+
+        /// Invariant: an acceptance record serializes the newly derived index and
+        /// candidate timestamp with the consumed Event in stable field order.
+        /// Design Doc: RUN-RECORDS
+        #[test]
+        fn event_accepted_bytes_carry_the_new_index_and_time() {
+            let calls = record_calls();
+            let certificate =
+                between_turns(ScriptedWriter::new(Rc::clone(&calls), None), 512, 6, 10);
+            let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
+            environment.next_event = Some(Ok((42, Timestamp::from_nanos(12))));
+
+            let (certificate, event) = match certificate.accept_event::<_, ()>(&mut environment) {
+                Ok(accepted) => accepted,
+                Err(_) => panic!("a valid candidate must commit its acceptance record"),
+            };
+            drop(certificate);
+
+            assert_eq!(
+                event, 42,
+                "acceptance must return the Event written to its record"
+            );
+            assert_eq!(
+                &*calls.borrow(),
+                &[
+                    ScriptedCall::NextEvent,
+                    ScriptedCall::RecordCommitted(
+                        b"{\"record_kind\":\"EventAccepted\",\"index\":7,\"logical_time\":12,\"event\":42}\n"
+                            .to_vec(),
+                    ),
+                ],
+                "EventAccepted bytes must carry the derived index, offered time, and candidate"
+            );
+        }
+
+        /// Invariant: an EventAccepted record that exactly fills the configured
+        /// record capacity commits completely and returns its candidate.
+        #[test]
+        fn event_record_succeeds_at_exact_record_capacity() {
+            let mut bytes = Vec::new();
+            let certificate = between_turns(&mut bytes, EVENT_ONE_AT_ONE.len() - 1, 0, 0);
+            let mut environment = ScriptedEnvironment::<()>::new(record_calls(), None);
+
+            let (certificate, event) = match certificate.accept_event::<_, ()>(&mut environment) {
+                Ok(accepted) => accepted,
+                Err(_) => panic!("an exact-capacity acceptance record must commit"),
+            };
+            drop(certificate);
+
+            assert_eq!(
+                event, 1,
+                "an exact-capacity acceptance must return its consumed candidate"
+            );
+            assert_eq!(
+                bytes, EVENT_ONE_AT_ONE,
+                "an exact-capacity acceptance must write its complete JSON line"
+            );
+        }
+
+        /// Invariant: an EventAccepted record one byte beyond capacity fails without
+        /// output after consuming the candidate.
+        #[test]
+        fn event_record_one_byte_past_capacity_fails_after_consuming_candidate() {
+            let mut bytes = Vec::new();
+            let certificate = between_turns(&mut bytes, EVENT_ONE_AT_ONE.len() - 2, 0, 0);
+            let mut environment = ScriptedEnvironment::<()>::new(record_calls(), None);
+
+            let fatal = certificate.accept_event::<_, ()>(&mut environment);
+
+            match fatal {
+                Err(FatalCause::Journal(fatal)) => {
+                    assert_eq!(
+                        fatal.record_kind,
+                        RecordKind::EventAccepted,
+                        "an over-capacity acceptance must identify EventAccepted"
+                    );
+                    assert!(
+                        matches!(fatal.error, JournalError::BoundExceeded),
+                        "an acceptance one byte beyond capacity must report BoundExceeded"
+                    );
+                }
+                Err(_) => panic!("an over-capacity acceptance must remain a Journal fatal"),
+                Ok(_) => panic!("an over-capacity acceptance must return no successor"),
+            }
+            assert!(
+                environment.next_event.is_none(),
+                "an over-capacity acceptance must leave its candidate consumed"
+            );
+            assert!(
+                bytes.is_empty(),
+                "an over-capacity acceptance must write no partial output"
+            );
+        }
+
+        /// Invariant: an Event that cannot serialize is consumed exactly once and
+        /// produces a Journal fatal without writing output.
+        #[test]
+        fn event_serialization_failure_is_journal_fatal_after_consumption() {
+            let mut bytes = Vec::new();
+            let certificate = between_turns(&mut bytes, 512, 0, 0);
+            let mut environment =
+                OneEventEnvironment::new(FailsToSerialize, Timestamp::from_nanos(1));
+
+            let fatal = certificate.accept_event::<_, ()>(&mut environment);
+
+            match fatal {
+                Err(FatalCause::Journal(fatal)) => {
+                    assert_eq!(
+                        fatal.record_kind,
+                        RecordKind::EventAccepted,
+                        "an Event serialization failure must identify EventAccepted"
+                    );
+                    match fatal.error {
+                        JournalError::Encode(error) => assert!(
+                            error
+                                .to_string()
+                                .contains("scripted Event serialization failure"),
+                            "an Event serialization fatal must preserve the serializer error"
+                        ),
+                        _ => panic!("an Event serialization failure must remain an encode error"),
+                    }
+                }
+                Err(_) => panic!("an Event serialization failure must remain a Journal fatal"),
+                Ok(_) => panic!("an unserializable Event must return no successor"),
+            }
+            assert_eq!(
+                environment.next_event_calls, 1,
+                "an unserializable Event must be consumed exactly once"
+            );
+            assert!(
+                environment.candidate.is_none(),
+                "an unserializable Event must remain consumed after commit failure"
+            );
+            assert!(
+                bytes.is_empty(),
+                "an Event serialization failure must write no output"
+            );
+        }
+
+        /// Invariant: accepting an Event returns the same owned value after its
+        /// borrowed record has committed without requiring the Event to be cloneable.
+        #[test]
+        fn a_non_clone_event_is_returned_after_commit() {
+            let mut bytes = Vec::new();
+            let certificate = between_turns(&mut bytes, 512, 0, 0);
+            let mut environment =
+                OneEventEnvironment::new(NonCloneEvent { sequence: 3 }, Timestamp::from_nanos(1));
+
+            let (certificate, event) = match certificate.accept_event::<_, ()>(&mut environment) {
+                Ok(accepted) => accepted,
+                Err(_) => panic!("a serializable non-Clone Event must be accepted"),
+            };
+            drop(certificate);
+
+            assert_eq!(
+                event,
+                NonCloneEvent { sequence: 3 },
+                "acceptance must return the exact non-Clone Event value"
+            );
+            assert_eq!(
+                environment.next_event_calls, 1,
+                "a non-Clone Event must be consumed exactly once"
+            );
+            assert_eq!(
+                bytes,
+                b"{\"record_kind\":\"EventAccepted\",\"index\":1,\"logical_time\":1,\"event\":{\"sequence\":3}}\n",
+                "a non-Clone Event must be borrowed into the committed record before being returned"
             );
         }
     }
