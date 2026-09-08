@@ -59,3 +59,60 @@ Handed on, not this group's files:
   renamed to `zero_elapsed_preserves_the_timestamp` in the uncommitted round-3 diff.
 - The API block derives `Serialize` only; reading a Journal back with the crate's own
   types needs `Deserialize` on both newtypes. Export audit's call.
+
+## journal
+
+`src/journal.rs`. Landed 2026-09-08, uncommitted. Before: 7 pedantic and nursery hits
+and one `rustfmt` hunk. After: 0 and 0. Gates: all suites green (211 lib, 43 of them
+this file's), `clippy -D warnings` clean, the file `rustfmt --check` clean; the
+`cargo fmt --check` hunks that remain are in `environment.rs`, `port.rs`, and
+`tests/ports_macro.rs`. `Journal::new` and `commit` kept their signatures, so the
+fixture is untouched.
+
+- **I1 — `Display` and `Error` with `source()` on `JournalBuildError` and
+  `JournalError`.** Both wrap a std error a caller reaches through `source()`. First
+  error type in the crate to carry either trait; the export audit decides whether
+  `BuildError` and the Fatal types follow. API additive. Landed.
+- **I2 — `Clone, PartialEq, Eq` on `JournalBuildError`; `Clone, Copy, Hash` on
+  `SinkOperation`; `Debug` on `Journal`.** `TryReserveError` already has the first
+  three; the second is a fieldless enum; the third is what foundations I6 prepared, and
+  the derive bounds only the impl, so a non-`Debug` sink still builds. `JournalError`
+  stays `Debug` only: `serde_json::Error` and `io::Error` are neither `Clone` nor
+  `PartialEq`. API additive. Landed.
+- **I3 — `write_line` classifies first and poisons once.** The three arms produce an
+  `io::Error` and one `?` through `poison` follows, the shape `commit` already uses for
+  the flush; `remaining_len` went with it. Every arm is pinned by
+  `every_sink_failure_poisons_exactly_once` and the `faults.rs` matrices, all
+  unchanged. Landed.
+- **I4 — `#[must_use] pub const fn is_poisoned`; `const fn poison`.** The two
+  `missing_const_for_fn` hits; `must_use` matches the foundations accessors. Landed.
+- **I5 — one `AlwaysFails` at the `tests` root.** Four identical failing serializers
+  differed only in a message no test asserted. Landed.
+- **I6 — `CountingWriter` deleted; seven `journal_encoding` setups call
+  `line_journal(n)`.** It duplicated `LineCountingWriter` field for field. Landed.
+- **I7 — `NonZeroUsize::MIN` for the five `NonZeroUsize::new(1).expect(..)`.** Two of
+  the five went through I6. Landed.
+- **I8 — `expect_sink_failure(error, operation) -> io::Error`.** Replaces six
+  `match … _ => panic!` blocks; each site keeps only its kind and message asserts. The
+  helper's non-`Sink` arm names every variant, so a new `JournalError` variant fails to
+  compile here instead of falling into a wildcard. Landed.
+- **I9 — `ScriptedSink::write` and `flush` return the `Result` they matched.**
+  `if let … && …` and `if result.is_ok()` replace two matches that rebuilt their
+  scrutinee. Landed.
+- **I10 — the eight-row table moved to `fn failure_cases() -> [FailureCase; 8]`.**
+  The `too_many_lines` hit (166/100); `faults.rs` keeps its table the same way. The
+  `redundant_clone` on the last `remaining_after_one` went with it. Landed.
+- **I11 — `# Errors` sections on `new` and `commit`.** The two `missing_errors_doc`
+  hits; one sentence each pointing at the enum. Export audit may reword. Landed.
+- **I12 — backticks on the one `/// Design Doc: JournalBuildError` citation.** The
+  `doc_markdown` hit. Landed.
+- **I13 — the file's pre-existing `rustfmt` hunk at the old line 1837.** Landed.
+
+Handed on, not this group's files:
+
+- No other error type in the crate implements `Display` or `Error`; I1 is the
+  precedent for `BuildError`, `CoreError`, `EnvironmentFatal`, and `JournalFatal`.
+- `JournalFatal` (`src/engine/record.rs`) derives nothing; `Debug` is now free since
+  every field has it.
+- `tests/faults.rs:606` cites `/// Design Doc: JournalFatal` without backticks, the
+  same `doc_markdown` shape as I12.

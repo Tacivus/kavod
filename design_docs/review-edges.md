@@ -86,3 +86,65 @@ round, so nothing needs mirroring; realigning it would touch every case file und
   would restate the standard library.
 - **A zero-sized Command type at `NonZeroUsize::MAX`.** `Vec<ZST>` reserves nothing and
   reports `usize::MAX` capacity; the logical bound alone governs.
+
+## journal
+
+Reviewed 2026-09-08: `src/journal.rs`. Design rows `JRN-FORMAT`, `JRN-ENCODE`,
+`JRN-COMMIT`, `JRN-POISON`, `JRN-SINK`, `TRUST-SINK`, `TRUST-SERIALIZE`, A3, A8. Green
+before the round opened. Suites read: the file's nine test modules,
+`faults::journal_fault_matrix`, `golden_journal::encoding_rejection`,
+`tests/support/scripted_sink.rs`.
+
+**Result: no defects, one open attack, landed.** The fixture's `Journal::new` and
+`commit` are unchanged; no signature moved.
+
+### Journal
+
+| # | Attack | Resolution |
+|---|---|---|
+| N1 | `max = 1`: `{}` fits, newline has no room; `max = 2` commits `{}` | pinned — `journal_newline_reservation::object_of_region_size_has_no_newline_room`, `::encode_at_exactly_max_bytes_completes` |
+| N2 | `max = usize::MAX` overflows the region size | pinned — `journal_construction::region_size_overflow_is_max_bytes_too_large` |
+| N3 | `max = usize::MAX - 1`: reservation fails, not overflow | pinned — `journal_construction::failed_reservation_is_allocation_failed` |
+| N4 | `new` touches the sink | pinned — `journal_sink_writes::empty_line_completes_without_sink_calls` builds on an unscripted sink that panics on any call |
+| N5 | fresh Journal poisoned | pinned — `journal_construction::fresh_journal_is_not_poisoned` |
+| N6 | region is not exactly `max + 1` | pinned — `journal_construction::minimum_record_bound_reserves_object_plus_newline_region`; `journal_newline_reservation::consecutive_exact_maximum_lines_reuse_full_region` at 7 |
+| C1 | poisoned commit: panic, no sink call | asserted — `commit`'s first statement; pinned `journal_poisoning::commit_on_poisoned_journal_panics`, `journal_sink_matrix::every_sink_failure_poisons_exactly_once` |
+| C2 | poisoned commit with a record that cannot encode | **open — E1, landed** |
+| C3 | `Encode`: nothing written, not poisoned, region cleared, next commit exact | pinned — `journal_commit::every_encode_error_skips_sink_and_allows_later_commit`, `journal_encoding::serializer_failure_clears_previous_bytes_and_region_remains_reusable` |
+| C4 | null, bool, number, string, array at top level | pinned — `journal_object_validation::every_non_object_json_kind_is_rejected` |
+| C5 | unit, tuple, newtype, unit-variant payloads | by construction — serde_json's rules; on `review-adversarial.md`'s "Considered, not tested" list |
+| C6 | object of `max + 2` → `BoundExceeded` via `WriteZero` | pinned — `journal_line_errors::raw_bound_failure_leaves_journal_reusable`, `journal_encoding::oversized_record_is_bound_exceeded_without_sink_calls` |
+| C7 | object of exactly `max + 1` → `BoundExceeded` via `try_push` | pinned — `journal_newline_reservation::object_of_region_size_has_no_newline_room`, `::valid_object_encodes_after_missing_newline_room` |
+| C8 | object of exactly `max` commits | pinned — `journal_newline_reservation::encode_at_exactly_max_bytes_completes` |
+| C9 | non-object of exactly `max + 1` → `NotAnObject` | pinned — `journal_object_validation::non_object_top_level_is_rejected` |
+| C10 | non-object of `max + 2` → `BoundExceeded` before classification | pinned — `journal_object_validation::an_overrunning_non_object_is_bound_exceeded_before_classification` (S2) |
+| C11 | raw interior newline; escaped `\n` in a string | pinned — `journal_object_validation::interior_newline_is_not_an_object`, `::ordinary_string_newline_is_escaped_and_allowed`; through the Engine in `golden_journal::encoding_rejection` |
+| C12 | two objects on one line pass the three byte checks | by construction — `RawValue::from_string("{} {}")` is rejected as trailing characters (verified against the locked serde_json); one `Serialize` call yields one value. A `SerializeMap` that skips `serialize_value` yields `{"a"}` and passes; that breaks serde's own trait contract, the payload author's obligation |
+| C13 | `Serialize` that swallows the buffer's error and returns `Ok` | derived — truncation happens only at a full region, and a full region is C7 or C9 |
+| C14 | `Serialize` that emits nothing | by construction — `S::Ok` is reachable only through a serializer method, each of which writes at least one byte |
+| C15 | serde `Encode` mid-value leaves partial bytes in the region | pinned — `journal_encoding::serializer_failure_clears_previous_bytes_and_region_remains_reusable` asserts the region is empty afterward |
+| C16 | long record then short record: stale tail | pinned — `journal_encoding::successive_encodes_replace_previous_bytes`, `journal_newline_reservation::consecutive_exact_maximum_lines_reuse_full_region` |
+| W1 | `Ok(0)` first; after progress | pinned — `journal_sink_writes::zero_progress_maps_to_write_zero`; `every_sink_failure_poisons_exactly_once` rows 3 and 6 |
+| W2 | over-report first; against the suffix; count exactly equal to the suffix | pinned — `journal_sink_writes::over_reported_count_maps_to_invalid_data`, `::over_reported_count_is_measured_against_remaining_suffix`; the equal case is the last call of `::short_successful_writes_are_retried_to_completion` |
+| W3 | `count = usize::MAX` overflows `offset += count` | derived — the `count > remaining_len` arm precedes the add; W2 pins the arm |
+| W4 | `Interrupted` first; after progress | pinned — `journal_sink_writes::interrupted_write_poisons_without_retry`; after progress is the same `Err` arm, matrix row 5 |
+| W5 | one-byte writes: n calls, exact suffixes, no flush until done | pinned — `journal_sink_writes::short_successful_writes_are_retried_to_completion`, `journal_commit_boundaries::flush_failure_after_short_writes_leaves_a_complete_uncertain_line` |
+| W6 | `Err` after progress: poisoned, no flush, sink holds the prefix | pinned — matrix row 5; `journal_commit_boundaries::partial_second_write_failure_preserves_the_prior_boundary`; `faults::a_partial_write_failure_preserves_the_prior_commit_boundary` |
+| W7 | error kind and message survive `Sink { .. }` | pinned — `journal_sink_writes::interrupted_write_poisons_without_retry`, `journal_commit::flush_failure_is_sink_flush_and_uncommitted` |
+| W8 | empty region reaches `write_line` | pinned — `journal_sink_writes::empty_line_completes_without_sink_calls`; unreachable through `commit` |
+| F1 | flush `Err`: poisoned, full line is an uncertain suffix | pinned — `journal_commit_boundaries::only_successful_flush_advances_the_committed_boundary`; `faults::flush_failures_leave_the_failed_record_uncommitted` |
+| F2 | flush `Interrupted` not retried | derived — flush is one `map_err` with no loop; matrix row 8 pins the arm |
+| F3 | flush exactly once, after the last write, never after a write failure | pinned — `journal_commit::successful_flush_commits_exactly_the_line`, `::sink_error_poisons_permanently` |
+| L1 | second record fails at first byte, last byte, flush: first line intact | pinned — all four of `journal_commit_boundaries`; `faults::each_record_kind_maps_to_its_journal_fatal` |
+| L2 | poison outlives the sink's recovery | pinned — `every_sink_failure_poisons_exactly_once` retries every row |
+| L3 | drop performs a sink operation | derived — no `Drop` impl; every scripted test drops a Journal whose sink panics on an unscripted call |
+| L4 | writer dropped on a `new` failure | by construction — the design's `JournalBuildError` carries no writer |
+
+### Items decided
+
+**E1 — landed.** Every poisoned retry in the suite committed `json!({})`, which encodes
+cleanly, so nothing pinned that the poison check precedes encoding. New test
+`journal_poisoning::poisoned_commit_panics_before_encoding_the_record` commits a
+payload whose `Serialize` always fails on a poisoned Journal and expects the
+`JRN-POISON` panic. Mutation: the assertion moved below `encode_line`; the new test
+failed alone, the other 50 journal tests stayed green. Reverted.

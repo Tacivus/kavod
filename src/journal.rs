@@ -1,11 +1,13 @@
 use crate::bounded_buffer::BoundedBuffer;
 use serde::Serialize;
 use std::collections::TryReserveError;
+use std::error::Error;
+use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 
 /// An error that prevents a Journal from reserving its bounded encode region.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalBuildError {
     /// `max_record_bytes` leaves no room for the reserved newline byte.
     MaxBytesTooLarge,
@@ -27,13 +29,62 @@ pub enum JournalError {
 }
 
 /// The sink operation that failed while persisting a Journal record.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SinkOperation {
     Write,
     Flush,
 }
 
+impl fmt::Display for JournalBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MaxBytesTooLarge => {
+                f.write_str("max_record_bytes leaves no room for the reserved newline byte")
+            }
+            Self::AllocationFailed(_) => f.write_str("the encode region could not be reserved"),
+        }
+    }
+}
+
+impl Error for JournalBuildError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MaxBytesTooLarge => None,
+            Self::AllocationFailed(error) => Some(error),
+        }
+    }
+}
+
+impl fmt::Display for JournalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encode(_) => f.write_str("the record failed to encode"),
+            Self::NotAnObject => f.write_str("the record is not one single-line JSON object"),
+            Self::BoundExceeded => f.write_str("the record exceeds max_record_bytes"),
+            Self::Sink {
+                operation: SinkOperation::Write,
+                ..
+            } => f.write_str("the sink write failed"),
+            Self::Sink {
+                operation: SinkOperation::Flush,
+                ..
+            } => f.write_str("the sink flush failed"),
+        }
+    }
+}
+
+impl Error for JournalError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Encode(error) => Some(error),
+            Self::Sink { error, .. } => Some(error),
+            Self::NotAnObject | Self::BoundExceeded => None,
+        }
+    }
+}
+
 /// A bounded JSON Lines writer.
+#[derive(Debug)]
 pub struct Journal<W: io::Write> {
     writer: W,
     region: BoundedBuffer<u8>,
@@ -42,6 +93,10 @@ pub struct Journal<W: io::Write> {
 
 impl<W: io::Write> Journal<W> {
     /// Reserves the bounded encode region up front.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`JournalBuildError`] when the region size overflows or cannot be reserved.
     pub fn new(writer: W, max_record_bytes: NonZeroUsize) -> Result<Self, JournalBuildError> {
         let region_size = max_record_bytes
             .get()
@@ -58,11 +113,16 @@ impl<W: io::Write> Journal<W> {
     }
 
     /// Reports whether a sink failure has permanently poisoned the Journal.
-    pub fn is_poisoned(&self) -> bool {
+    #[must_use]
+    pub const fn is_poisoned(&self) -> bool {
         self.poisoned
     }
 
     /// Encodes, writes, and flushes one JSON Lines record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`JournalError`]: encode failures write nothing; sink failures poison the Journal.
     ///
     /// # Panics
     ///
@@ -80,7 +140,7 @@ impl<W: io::Write> Journal<W> {
             .map_err(|error| self.poison(SinkOperation::Flush, error))
     }
 
-    fn poison(&mut self, operation: SinkOperation, error: io::Error) -> JournalError {
+    const fn poison(&mut self, operation: SinkOperation, error: io::Error) -> JournalError {
         self.poisoned = true;
         JournalError::Sink { operation, error }
     }
@@ -117,24 +177,15 @@ impl<W: io::Write> Journal<W> {
 
         while offset < self.region.len() {
             let remaining = &self.region.as_slice()[offset..];
-            let remaining_len = remaining.len();
-
-            match self.writer.write(remaining) {
-                Ok(0) => {
-                    return Err(self.poison(SinkOperation::Write, io::ErrorKind::WriteZero.into()));
-                }
-                Ok(count) if count > remaining_len => {
-                    return Err(self.poison(
-                        SinkOperation::Write,
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "sink reported writing more bytes than provided",
-                        ),
-                    ));
-                }
-                Ok(count) => offset += count,
-                Err(error) => return Err(self.poison(SinkOperation::Write, error)),
-            }
+            let written = match self.writer.write(remaining) {
+                Ok(0) => Err(io::ErrorKind::WriteZero.into()),
+                Ok(count) if count > remaining.len() => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sink reported writing more bytes than provided",
+                )),
+                written => written,
+            };
+            offset += written.map_err(|error| self.poison(SinkOperation::Write, error))?;
         }
 
         Ok(())
@@ -169,6 +220,29 @@ mod tests {
             .expect("a line-encoding test bound must be nonzero");
         Journal::new(LineCountingWriter::default(), max_record_bytes)
             .expect("a small line-encoding region must be reservable")
+    }
+
+    struct AlwaysFails;
+
+    impl Serialize for AlwaysFails {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("intentional serializer failure"))
+        }
+    }
+
+    fn expect_sink_failure(error: JournalError, expected_operation: SinkOperation) -> io::Error {
+        match error {
+            JournalError::Sink { operation, error } => {
+                assert_eq!(
+                    operation, expected_operation,
+                    "a sink failure must identify the operation that failed"
+                );
+                error
+            }
+            JournalError::Encode(_) | JournalError::NotAnObject | JournalError::BoundExceeded => {
+                panic!("a sink failure must return a Sink error")
+            }
+        }
     }
 
     enum ScriptedResult {
@@ -222,15 +296,12 @@ mod tests {
                 }
             };
 
-            match result {
-                Ok(count) => {
-                    if count <= bytes.len() {
-                        self.accepted_bytes.extend_from_slice(&bytes[..count]);
-                    }
-                    Ok(count)
-                }
-                Err(error) => Err(error),
+            if let Ok(count) = result
+                && count <= bytes.len()
+            {
+                self.accepted_bytes.extend_from_slice(&bytes[..count]);
             }
+            result
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -246,13 +317,10 @@ mod tests {
                 }
             };
 
-            match result {
-                Ok(()) => {
-                    self.committed_len = self.accepted_bytes.len();
-                    Ok(())
-                }
-                Err(error) => Err(error),
+            if result.is_ok() {
+                self.committed_len = self.accepted_bytes.len();
             }
+            result
         }
     }
 
@@ -294,7 +362,7 @@ mod tests {
 
         /// Invariant: failure to reserve the complete encode region returns the
         /// allocator's reservation error instead of a partially constructed Journal.
-        /// Design Doc: JournalBuildError
+        /// Design Doc: `JournalBuildError`
         #[test]
         fn failed_reservation_is_allocation_failed() {
             let largest_nonoverflowing = NonZeroUsize::new(usize::MAX - 1)
@@ -314,9 +382,7 @@ mod tests {
         /// Design Doc: JRN-POISON
         #[test]
         fn fresh_journal_is_not_poisoned() {
-            let max_record_bytes =
-                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
-            let journal = Journal::new(Vec::<u8>::new(), max_record_bytes)
+            let journal = Journal::new(Vec::<u8>::new(), NonZeroUsize::MIN)
                 .expect("the minimum encode region must be reservable");
 
             assert!(
@@ -329,9 +395,7 @@ mod tests {
         /// record and one additional byte for its newline without pre-filling either.
         #[test]
         fn minimum_record_bound_reserves_object_plus_newline_region() {
-            let max_record_bytes =
-                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
-            let journal = Journal::new(Vec::<u8>::new(), max_record_bytes)
+            let journal = Journal::new(Vec::<u8>::new(), NonZeroUsize::MIN)
                 .expect("the minimum encode region must be reservable");
 
             assert_eq!(
@@ -349,41 +413,12 @@ mod tests {
     mod journal_encoding {
         use super::*;
 
-        struct AlwaysFails;
-
-        impl Serialize for AlwaysFails {
-            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional serializer failure"))
-            }
-        }
-
-        #[derive(Default)]
-        struct CountingWriter {
-            write_calls: usize,
-            flush_calls: usize,
-        }
-
-        impl io::Write for CountingWriter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.write_calls += 1;
-                Ok(bytes.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                self.flush_calls += 1;
-                Ok(())
-            }
-        }
-
         /// Invariant: a record larger than the bounded encode region is rejected
         /// before either writing to or flushing the sink.
         /// Design Doc: JRN-ENCODE
         #[test]
         fn oversized_record_is_bound_exceeded_without_sink_calls() {
-            let max_record_bytes =
-                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("the minimum encode region must be reservable");
+            let mut journal = line_journal(1);
 
             let error = journal
                 .encode_raw(&serde_json::json!({"oversized": true}))
@@ -408,10 +443,7 @@ mod tests {
         /// Design Doc: JRN-ENCODE
         #[test]
         fn serializer_failure_is_encode_without_sink_calls() {
-            let max_record_bytes =
-                NonZeroUsize::new(16).expect("sixteen must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("a small encode region must be reservable");
+            let mut journal = line_journal(16);
 
             let error = journal
                 .encode_raw(&AlwaysFails)
@@ -436,10 +468,7 @@ mod tests {
         /// Design Doc: JRN-ENCODE
         #[test]
         fn encode_failures_do_not_poison() {
-            let max_record_bytes =
-                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("the minimum encode region must be reservable");
+            let mut journal = line_journal(1);
 
             let oversized_error = journal
                 .encode_raw(&serde_json::json!({"oversized": true}))
@@ -471,10 +500,7 @@ mod tests {
         #[test]
         fn successful_record_is_buffered_without_sink_calls() {
             let expected = br#"{"ready":true}"#;
-            let max_record_bytes = NonZeroUsize::new(expected.len())
-                .expect("a nonempty JSON object must define a nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("the exact encode region must be reservable");
+            let mut journal = line_journal(expected.len());
 
             journal
                 .encode_raw(&serde_json::json!({"ready": true}))
@@ -503,10 +529,7 @@ mod tests {
         /// instead of appending to them or changing the bounded capacity.
         #[test]
         fn successive_encodes_replace_previous_bytes() {
-            let max_record_bytes =
-                NonZeroUsize::new(32).expect("thirty-two must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("a small encode region must be reservable");
+            let mut journal = line_journal(32);
             let region_capacity = journal.region.capacity();
 
             journal
@@ -532,10 +555,7 @@ mod tests {
         /// can be cleared and reused for a later fitting record.
         #[test]
         fn successful_encode_after_bound_exceeded_reuses_region() {
-            let max_record_bytes =
-                NonZeroUsize::new(16).expect("sixteen must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("a small encode region must be reservable");
+            let mut journal = line_journal(16);
             let region_capacity = journal.region.capacity();
 
             let error = journal
@@ -569,10 +589,7 @@ mod tests {
         /// the reusable region able to encode a subsequent record.
         #[test]
         fn serializer_failure_clears_previous_bytes_and_region_remains_reusable() {
-            let max_record_bytes =
-                NonZeroUsize::new(32).expect("thirty-two must be a valid nonzero record bound");
-            let mut journal = Journal::new(CountingWriter::default(), max_record_bytes)
-                .expect("a small encode region must be reservable");
+            let mut journal = line_journal(32);
 
             journal
                 .encode_raw(&serde_json::json!({"stale": true}))
@@ -988,16 +1005,6 @@ mod tests {
     mod journal_line_errors {
         use super::*;
 
-        struct LineAlwaysFails;
-
-        impl Serialize for LineAlwaysFails {
-            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom(
-                    "intentional line serializer failure",
-                ))
-            }
-        }
-
         /// Invariant: a record that exceeds the raw encode region reports the bound
         /// failure without touching the sink and does not prevent a later valid line.
         #[test]
@@ -1041,7 +1048,7 @@ mod tests {
             let mut journal = line_journal(2);
 
             let error = journal
-                .encode_line(&LineAlwaysFails)
+                .encode_line(&AlwaysFails)
                 .expect_err("the deliberately failing serializer must fail");
             assert!(
                 matches!(error, JournalError::Encode(_)),
@@ -1125,26 +1132,17 @@ mod tests {
                 .write_line()
                 .expect_err("an interrupted write must fail immediately");
 
-            match error {
-                JournalError::Sink { operation, error } => {
-                    assert_eq!(
-                        operation,
-                        SinkOperation::Write,
-                        "an interrupted write must identify the failed operation as Write"
-                    );
-                    assert_eq!(
-                        error.kind(),
-                        io::ErrorKind::Interrupted,
-                        "an interrupted write must preserve the sink's error kind"
-                    );
-                    assert_eq!(
-                        error.to_string(),
-                        "scripted interruption",
-                        "an interrupted write must preserve the sink's returned error"
-                    );
-                }
-                _ => panic!("an interrupted write must return a typed sink error"),
-            }
+            let error = expect_sink_failure(error, SinkOperation::Write);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::Interrupted,
+                "an interrupted write must preserve the sink's error kind"
+            );
+            assert_eq!(
+                error.to_string(),
+                "scripted interruption",
+                "an interrupted write must preserve the sink's returned error"
+            );
             assert_eq!(
                 journal.writer.calls,
                 [SinkCall::Write(b"{}\n".to_vec())],
@@ -1173,21 +1171,12 @@ mod tests {
                 .write_line()
                 .expect_err("a zero-progress write must fail immediately");
 
-            match error {
-                JournalError::Sink { operation, error } => {
-                    assert_eq!(
-                        operation,
-                        SinkOperation::Write,
-                        "a zero-progress write must identify the failed operation as Write"
-                    );
-                    assert_eq!(
-                        error.kind(),
-                        io::ErrorKind::WriteZero,
-                        "a zero-progress write must map to WriteZero"
-                    );
-                }
-                _ => panic!("a zero-progress write must return a typed sink error"),
-            }
+            let error = expect_sink_failure(error, SinkOperation::Write);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::WriteZero,
+                "a zero-progress write must map to WriteZero"
+            );
             assert_eq!(
                 journal.writer.calls,
                 [SinkCall::Write(b"{}\n".to_vec())],
@@ -1216,21 +1205,12 @@ mod tests {
                 .write_line()
                 .expect_err("an over-reported write count must fail immediately");
 
-            match error {
-                JournalError::Sink { operation, error } => {
-                    assert_eq!(
-                        operation,
-                        SinkOperation::Write,
-                        "an over-reported count must identify the failed operation as Write"
-                    );
-                    assert_eq!(
-                        error.kind(),
-                        io::ErrorKind::InvalidData,
-                        "an over-reported count must map to InvalidData"
-                    );
-                }
-                _ => panic!("an over-reported count must return a typed sink error"),
-            }
+            let error = expect_sink_failure(error, SinkOperation::Write);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidData,
+                "an over-reported count must map to InvalidData"
+            );
             assert_eq!(
                 journal.writer.calls,
                 [SinkCall::Write(b"{}\n".to_vec())],
@@ -1258,21 +1238,12 @@ mod tests {
                 .write_line()
                 .expect_err("a count larger than the remaining suffix must fail");
 
-            match error {
-                JournalError::Sink { operation, error } => {
-                    assert_eq!(
-                        operation,
-                        SinkOperation::Write,
-                        "a suffix over-report must identify the failed operation as Write"
-                    );
-                    assert_eq!(
-                        error.kind(),
-                        io::ErrorKind::InvalidData,
-                        "a count larger than the remaining suffix must map to InvalidData"
-                    );
-                }
-                _ => panic!("a count larger than the remaining suffix must return a sink error"),
-            }
+            let error = expect_sink_failure(error, SinkOperation::Write);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidData,
+                "a count larger than the remaining suffix must map to InvalidData"
+            );
             assert_eq!(
                 journal.writer.calls,
                 [
@@ -1295,9 +1266,7 @@ mod tests {
         /// poisoning the sink because there are no bytes to persist.
         #[test]
         fn empty_line_completes_without_sink_calls() {
-            let max_record_bytes =
-                NonZeroUsize::new(1).expect("one must be a valid nonzero record bound");
-            let mut journal = Journal::new(ScriptedSink::new([]), max_record_bytes)
+            let mut journal = Journal::new(ScriptedSink::new([]), NonZeroUsize::MIN)
                 .expect("the minimum encode region must be reservable");
 
             journal
@@ -1342,16 +1311,6 @@ mod tests {
 
     mod journal_commit {
         use super::*;
-
-        struct CommitAlwaysFails;
-
-        impl Serialize for CommitAlwaysFails {
-            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom(
-                    "intentional commit serializer failure",
-                ))
-            }
-        }
 
         /// Invariant: a record becomes committed only after the sink receives the
         /// exact encoded line and successfully flushes it.
@@ -1399,26 +1358,17 @@ mod tests {
                 .commit(&serde_json::json!({}))
                 .expect_err("a failed flush must leave the record uncommitted");
 
-            match error {
-                JournalError::Sink { operation, error } => {
-                    assert_eq!(
-                        operation,
-                        SinkOperation::Flush,
-                        "a flush failure must identify the failed operation as Flush"
-                    );
-                    assert_eq!(
-                        error.kind(),
-                        io::ErrorKind::BrokenPipe,
-                        "a flush failure must preserve the sink's error kind"
-                    );
-                    assert_eq!(
-                        error.to_string(),
-                        "scripted flush failure",
-                        "a flush failure must preserve the sink's returned error"
-                    );
-                }
-                _ => panic!("a flush failure must return a typed sink error"),
-            }
+            let error = expect_sink_failure(error, SinkOperation::Flush);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe,
+                "a flush failure must preserve the sink's error kind"
+            );
+            assert_eq!(
+                error.to_string(),
+                "scripted flush failure",
+                "a flush failure must preserve the sink's returned error"
+            );
             assert_eq!(
                 journal.writer.calls,
                 [SinkCall::Write(b"{}\n".to_vec()), SinkCall::Flush],
@@ -1507,7 +1457,7 @@ mod tests {
             ]);
 
             let serializer_error = journal
-                .commit(&CommitAlwaysFails)
+                .commit(&AlwaysFails)
                 .expect_err("the deliberately failing serializer must fail the commit");
             assert!(
                 matches!(serializer_error, JournalError::Encode(_)),
@@ -1610,6 +1560,37 @@ mod tests {
             );
 
             let _ = journal.commit(&serde_json::json!({}));
+        }
+
+        /// Invariant: a poisoned Journal refuses a commit before it examines the
+        /// record, so a payload that cannot encode still panics instead of reporting
+        /// an encode failure.
+        /// Design Doc: JRN-POISON
+        #[test]
+        #[should_panic(expected = "JRN-POISON")]
+        fn poisoned_commit_panics_before_encoding_the_record() {
+            let mut journal = scripted_line_journal([ScriptedResult::Write(Err(
+                io::Error::other("scripted write failure"),
+            ))]);
+            let error = journal
+                .commit(&serde_json::json!({}))
+                .expect_err("a real sink failure must poison the Journal");
+            assert!(
+                matches!(
+                    error,
+                    JournalError::Sink {
+                        operation: SinkOperation::Write,
+                        ..
+                    }
+                ),
+                "the poisoning setup must fail during the sink write"
+            );
+            assert!(
+                journal.is_poisoned(),
+                "the poisoning setup must leave the Journal poisoned"
+            );
+
+            let _ = journal.commit(&AlwaysFails);
         }
     }
 
@@ -1793,8 +1774,7 @@ mod tests {
                 "a clean second-record failure must remain classified as Write"
             );
             assert_eq!(
-                journal.writer.accepted_bytes,
-                b"{\"a\":1}\n",
+                journal.writer.accepted_bytes, b"{\"a\":1}\n",
                 "a failed first write must contribute no bytes after the prior record"
             );
             assert_eq!(
@@ -1897,14 +1877,10 @@ mod tests {
             expected_accepted: Option<&'static [u8]>,
         }
 
-        /// Invariant: every possible write or flush failure permanently poisons the
-        /// Journal, and a later commit reaches neither operation a second time.
-        /// Design Doc: JRN-POISON
-        #[test]
-        fn every_sink_failure_poisons_exactly_once() {
+        fn failure_cases() -> [FailureCase; 8] {
             let full_line = SinkCall::Write(b"{}\n".to_vec());
             let remaining_after_one = SinkCall::Write(b"}\n".to_vec());
-            let cases = [
+            [
                 FailureCase {
                     name: "returned write error",
                     results: vec![
@@ -1982,7 +1958,7 @@ mod tests {
                     ],
                     expected_operation: SinkOperation::Write,
                     expected_kind: io::ErrorKind::InvalidData,
-                    expected_calls: vec![full_line.clone(), remaining_after_one.clone()],
+                    expected_calls: vec![full_line.clone(), remaining_after_one],
                     expected_accepted: None,
                 },
                 FailureCase {
@@ -1997,30 +1973,27 @@ mod tests {
                     expected_calls: vec![full_line, SinkCall::Flush],
                     expected_accepted: Some(b"{}\n"),
                 },
-            ];
+            ]
+        }
 
-            for case in cases {
+        /// Invariant: every possible write or flush failure permanently poisons the
+        /// Journal, and a later commit reaches neither operation a second time.
+        /// Design Doc: JRN-POISON
+        #[test]
+        fn every_sink_failure_poisons_exactly_once() {
+            for case in failure_cases() {
                 let mut journal = scripted_journal(2, case.results);
 
                 let error = journal
                     .commit(&serde_json::json!({}))
                     .expect_err("every scripted sink failure must fail its commit");
-                match error {
-                    JournalError::Sink { operation, error } => {
-                        assert_eq!(
-                            operation, case.expected_operation,
-                            "{} must preserve the failing sink operation",
-                            case.name
-                        );
-                        assert_eq!(
-                            error.kind(),
-                            case.expected_kind,
-                            "{} must preserve or assign the required error kind",
-                            case.name
-                        );
-                    }
-                    _ => panic!("{} must return a typed sink error", case.name),
-                }
+                let error = expect_sink_failure(error, case.expected_operation);
+                assert_eq!(
+                    error.kind(),
+                    case.expected_kind,
+                    "{} must preserve or assign the required error kind",
+                    case.name
+                );
                 assert!(
                     journal.is_poisoned(),
                     "{} must poison the Journal before returning",
