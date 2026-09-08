@@ -4,6 +4,7 @@ macro_rules! reconstruct_engine {
         mod bounded_buffer {
             use std::vec::Drain;
 
+            #[derive(Debug)]
             pub(crate) struct BoundedBuffer<T> {
                 items: Vec<T>,
                 capacity: usize,
@@ -25,11 +26,11 @@ macro_rules! reconstruct_engine {
                     Ok(())
                 }
 
-                pub(crate) fn is_empty(&self) -> bool {
+                pub(crate) const fn is_empty(&self) -> bool {
                     self.items.is_empty()
                 }
 
-                pub(crate) fn as_slice(&self) -> &[T] {
+                pub(crate) const fn as_slice(&self) -> &[T] {
                     self.items.as_slice()
                 }
 
@@ -55,15 +56,16 @@ macro_rules! reconstruct_engine {
         mod time {
             pub(crate) use kavod::Timestamp;
 
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+            #[serde(transparent)]
             pub(crate) struct EventIndex(u64);
 
             impl EventIndex {
-                pub(crate) fn new(index: u64) -> Self {
+                pub(crate) const fn new(index: u64) -> Self {
                     Self(index)
                 }
 
-                pub(crate) fn as_u64(self) -> u64 {
+                pub(crate) const fn as_u64(self) -> u64 {
                     self.0
                 }
             }

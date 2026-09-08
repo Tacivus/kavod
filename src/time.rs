@@ -2,21 +2,24 @@ use serde::Serialize;
 use std::time::Duration;
 
 /// The accepted turn's ordinal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct EventIndex(u64);
 
 /// A logical timestamp represented as a nanosecond count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct Timestamp(u64);
 
 impl EventIndex {
-    pub(crate) fn new(index: u64) -> Self {
+    pub(crate) const fn new(index: u64) -> Self {
         Self(index)
     }
 
     /// Returns the accepted turn's ordinal: zero for the start turn and one onward
     /// for external events.
-    pub fn as_u64(self) -> u64 {
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
         self.0
     }
 }
@@ -25,19 +28,22 @@ impl Timestamp {
     /// Builds a timestamp from a nanosecond count.
     ///
     /// The count's origin and meaning belong to the stamping Environment.
-    pub fn from_nanos(nanos: u64) -> Self {
+    #[must_use]
+    pub const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
     }
 
     /// Returns the timestamp advanced by `elapsed`, or `None` if the duration or
     /// resulting sum exceeds the nanosecond domain.
+    #[must_use = "returns the advanced timestamp; the original is unchanged"]
     pub fn checked_add(self, elapsed: Duration) -> Option<Self> {
         let elapsed = u64::try_from(elapsed.as_nanos()).ok()?;
         self.0.checked_add(elapsed).map(Self)
     }
 
     /// Returns the timestamp's nanosecond count.
-    pub fn as_nanos(self) -> u64 {
+    #[must_use]
+    pub const fn as_nanos(self) -> u64 {
         self.0
     }
 }
@@ -79,11 +85,10 @@ mod tests {
             );
         }
 
-        /// Invariant: advancing a timestamp by no elapsed time preserves the same
-        /// valid timestamp.
-        /// Design Doc: ENV-TIME
+        /// Invariant: advancing a timestamp by no elapsed time returns the same
+        /// timestamp.
         #[test]
-        fn equal_timestamp_is_valid() {
+        fn zero_elapsed_preserves_the_timestamp() {
             let timestamp = Timestamp::from_nanos(42);
 
             assert_eq!(

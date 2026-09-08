@@ -63,7 +63,7 @@ that would make it enforcement. Three are real absences.
 | `ENV-START` | pinned | `fatal_finalization::a_start_error_skips_shutdown_and_is_quiesced`; `run_startup::a_start_error_exits_fatal_quiesced_without_shutdown` |
 | `ENV-ERRORS` | **gap** — G7 | `environment_fault_matrix::each_operation_error_maps_to_its_cause_and_quiescence` proves the pre-commitment half and cites `VERIFY-FAULTS` only; the post-commitment half is `ENV-LATCH`, pinned. Naming the activation and consumption instants is each implementation's, deferred to C37, C49 |
 | `ENV-LATCH` | pinned | 6 tests in `latch` |
-| `ENV-TIME` | pinned | `event_acceptance::an_equal_stamp_is_accepted`; `timestamp_arithmetic::equal_timestamp_is_valid` |
+| `ENV-TIME` | pinned | `event_acceptance::an_equal_stamp_is_accepted` |
 | `ENV-SHUTDOWN` | deferred — C41, C51 | the Core consumes the report and that half is pinned by `stop_closing::*` and `fatal_finalization::*` under `RUN-FINALIZE`; the window, the signal, and the final observation are the implementations' |
 | `ENV-SEPARATION` | deferred — C37, C49 | |
 | `ENV-BOUNDS` | deferred — C42, C52 | by the row's own words: `VERIFY-SIM` and `VERIFY-LIVE` pin it |

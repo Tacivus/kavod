@@ -1,6 +1,12 @@
 use std::collections::TryReserveError;
+use std::io;
 use std::vec::Drain;
 
+#[derive(Debug)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "crate-private by the layout table; pub would read as an export"
+)]
 pub(crate) struct BoundedBuffer<T> {
     items: Vec<T>,
     capacity: usize,
@@ -12,37 +18,39 @@ impl<T> BoundedBuffer<T> {
         items.try_reserve_exact(capacity)?;
         assert!(
             items.capacity() >= capacity,
-            "a successful bounded-buffer reservation must cover its full logical capacity"
+            "A6: a successful bounded-buffer reservation must cover its full logical capacity"
         );
 
         Ok(Self { items, capacity })
     }
 
     pub(crate) fn try_push(&mut self, value: T) -> Result<(), T> {
-        if self.items.len() == self.capacity {
+        if self.remaining() == 0 {
             return Err(value);
         }
-        assert!(
-            self.items.len() < self.capacity,
-            "bounded-buffer length must never exceed its logical capacity"
-        );
+        let allocation = self.items.capacity();
         self.items.push(value);
+        assert_eq!(
+            self.items.capacity(),
+            allocation,
+            "A6: bounded-buffer pushes must never grow the backing allocation"
+        );
         Ok(())
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.items.len()
     }
 
-    pub(crate) fn capacity(&self) -> usize {
+    pub(crate) const fn capacity(&self) -> usize {
         self.capacity
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    pub(crate) fn as_slice(&self) -> &[T] {
+    pub(crate) const fn as_slice(&self) -> &[T] {
         self.items.as_slice()
     }
 
@@ -53,31 +61,35 @@ impl<T> BoundedBuffer<T> {
     pub(crate) fn drain(&mut self) -> Drain<'_, T> {
         self.items.drain(..)
     }
-}
 
-impl std::io::Write for BoundedBuffer<u8> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    const fn remaining(&self) -> usize {
         assert!(
             self.items.len() <= self.capacity,
-            "bounded-buffer length must never exceed its logical capacity"
+            "A6: bounded-buffer length must never exceed its logical capacity"
         );
-        let remaining = self.capacity - self.items.len();
+        self.capacity - self.items.len()
+    }
+}
+
+impl io::Write for BoundedBuffer<u8> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let remaining = self.remaining();
         if remaining == 0 {
-            return Err(std::io::ErrorKind::WriteZero.into());
+            return Err(io::ErrorKind::WriteZero.into());
         }
 
         let accepted = remaining.min(bytes.len());
-        let allocation_capacity = self.items.capacity();
+        let allocation = self.items.capacity();
         self.items.extend_from_slice(&bytes[..accepted]);
         assert_eq!(
             self.items.capacity(),
-            allocation_capacity,
-            "bounded-buffer writes must never grow the backing allocation"
+            allocation,
+            "A6: bounded-buffer writes must never grow the backing allocation"
         );
         Ok(accepted)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -85,6 +97,10 @@ impl std::io::Write for BoundedBuffer<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reserved<T>(capacity: usize) -> BoundedBuffer<T> {
+        BoundedBuffer::new(capacity).expect("a test capacity must be reservable")
+    }
 
     mod bounded_buffer_capacity {
         use super::*;
@@ -94,7 +110,7 @@ mod tests {
         /// Design Doc: A6
         #[test]
         fn push_beyond_capacity_is_refused_without_growth() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
             buffer.try_push(10).expect("the first value must fit");
             buffer.try_push(20).expect("the second value must fit");
             let allocation_capacity = buffer.items.capacity();
@@ -131,7 +147,7 @@ mod tests {
         /// value offered to it.
         #[test]
         fn zero_capacity_refuses_first_push_and_returns_value() {
-            let mut buffer = BoundedBuffer::new(0).expect("zero capacity must be reservable");
+            let mut buffer = reserved(0);
 
             assert!(buffer.is_empty(), "a zero-capacity buffer must start empty");
             assert_eq!(
@@ -155,7 +171,7 @@ mod tests {
         /// in insertion order.
         #[test]
         fn pushes_up_to_capacity_preserve_order() {
-            let mut buffer = BoundedBuffer::new(3).expect("capacity three must be reservable");
+            let mut buffer = reserved(3);
 
             assert_eq!(buffer.len(), 0, "a new buffer must have length zero");
             assert!(buffer.is_empty(), "a new buffer must report itself empty");
@@ -181,7 +197,7 @@ mod tests {
         /// unchanged.
         #[test]
         fn refused_push_preserves_full_buffer_state() {
-            let mut buffer = BoundedBuffer::new(1).expect("capacity one must be reservable");
+            let mut buffer = reserved(1);
             buffer.try_push(7).expect("the first value must fit");
 
             assert_eq!(
@@ -211,7 +227,7 @@ mod tests {
         /// Design Doc: A6
         #[test]
         fn clear_and_drain_retain_capacity() {
-            let mut buffer = BoundedBuffer::new(3).expect("capacity three must be reservable");
+            let mut buffer = reserved(3);
             buffer.try_push(1).expect("the first value must fit");
             buffer.try_push(2).expect("the second value must fit");
             let allocation_capacity = buffer.items.capacity();
@@ -247,7 +263,7 @@ mod tests {
         /// for subsequent pushes.
         #[test]
         fn clear_empties_buffer_for_reuse() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
             buffer.try_push(1).expect("the first value must fit");
             buffer.try_push(2).expect("the second value must fit");
 
@@ -270,7 +286,7 @@ mod tests {
         /// leaves all logical slots reusable.
         #[test]
         fn drain_yields_owned_values_in_order_and_allows_refill() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
             buffer
                 .try_push(String::from("first"))
                 .expect("the first value must fit");
@@ -299,7 +315,7 @@ mod tests {
         /// buffer and leaves it reusable.
         #[test]
         fn dropped_partial_drain_removes_remaining_values() {
-            let mut buffer = BoundedBuffer::new(3).expect("capacity three must be reservable");
+            let mut buffer = reserved(3);
             for value in [1, 2, 3] {
                 buffer.try_push(value).expect("each value must fit");
             }
@@ -328,7 +344,7 @@ mod tests {
         }
     }
 
-    mod encode_buffer_write {
+    mod encode_region_write {
         use super::*;
         use std::io::{ErrorKind, Write as _};
 
@@ -337,7 +353,7 @@ mod tests {
         /// Design Doc: JRN-ENCODE
         #[test]
         fn full_buffer_returns_write_zero() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
             buffer
                 .write_all(b"ab")
                 .expect("bytes through exact capacity must fit");
@@ -369,7 +385,7 @@ mod tests {
         /// Design Doc: JRN-ENCODE
         #[test]
         fn partial_writes_accumulate_without_loss() {
-            let mut buffer = BoundedBuffer::new(5).expect("capacity five must be reservable");
+            let mut buffer = reserved(5);
             let allocation_capacity = buffer.items.capacity();
 
             assert_eq!(
@@ -403,8 +419,7 @@ mod tests {
         fn serde_json_encode_completes_at_exact_region_size() {
             let value = serde_json::json!({"answer": 42});
             let expected = br#"{"answer":42}"#;
-            let mut buffer =
-                BoundedBuffer::new(expected.len()).expect("the exact region must be reservable");
+            let mut buffer = reserved(expected.len());
 
             serde_json::to_writer(&mut buffer, &value)
                 .expect("encoding at the exact region size must complete");
@@ -425,7 +440,7 @@ mod tests {
         /// retaining bytes.
         #[test]
         fn zero_capacity_rejects_all_writes() {
-            let mut buffer = BoundedBuffer::new(0).expect("zero capacity must be reservable");
+            let mut buffer = reserved(0);
 
             for bytes in [b"x".as_slice(), b"".as_slice()] {
                 let error = buffer
@@ -447,7 +462,7 @@ mod tests {
         /// allocating more storage.
         #[test]
         fn one_byte_capacity_accepts_exactly_one_byte() {
-            let mut buffer = BoundedBuffer::new(1).expect("capacity one must be reservable");
+            let mut buffer = reserved(1);
             let allocation_capacity = buffer.items.capacity();
 
             assert_eq!(
@@ -471,7 +486,7 @@ mod tests {
         /// the same write is rejected once no progress can ever be made.
         #[test]
         fn empty_write_returns_zero_only_while_capacity_remains() {
-            let mut buffer = BoundedBuffer::new(1).expect("capacity one must be reservable");
+            let mut buffer = reserved(1);
 
             assert_eq!(
                 buffer
@@ -499,7 +514,7 @@ mod tests {
         /// retaining the prefix that fit.
         #[test]
         fn write_all_one_past_capacity_retains_accepted_prefix() {
-            let mut buffer = BoundedBuffer::new(3).expect("capacity three must be reservable");
+            let mut buffer = reserved(3);
 
             let error = buffer
                 .write_all(b"abcd")
@@ -521,7 +536,7 @@ mod tests {
         /// logical slot for subsequent writes.
         #[test]
         fn clear_after_write_zero_restores_writes() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
             buffer.write_all(b"ab").expect("the initial bytes must fit");
             buffer
                 .write(b"c")
@@ -540,7 +555,7 @@ mod tests {
         }
     }
 
-    mod encode_buffer_flush {
+    mod encode_region_flush {
         use super::*;
         use std::io::Write as _;
 
@@ -548,7 +563,7 @@ mod tests {
         /// without changing the buffered bytes.
         #[test]
         fn flush_succeeds_without_mutating_any_fill_state() {
-            let mut buffer = BoundedBuffer::new(2).expect("capacity two must be reservable");
+            let mut buffer = reserved(2);
 
             buffer
                 .flush()
