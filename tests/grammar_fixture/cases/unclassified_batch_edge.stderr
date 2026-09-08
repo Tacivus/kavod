@@ -52,7 +52,7 @@ note: the trait `Answer` must be implemented
 error[E0599]: the method `dispatch_batch` exists for struct `Certificate<Vec<u8>, TurnOpen>`, but its trait bounds were not satisfied
   --> tests/grammar_fixture/cases/unclassified_batch_edge.rs:13:25
    |
-13 |             turn_open().dispatch_batch::<_, _, ()>(&mut CleanEnvironment, &mut commands);
+13 |             turn_open().dispatch_batch::<_, ()>(&mut CleanEnvironment, &mut commands);
    |                         ^^^^^^^^^^^^^^ method cannot be called on `Certificate<Vec<u8>, TurnOpen>` due to unsatisfied trait bounds
    |
   ::: tests/grammar_fixture/cases/../../../src/engine/record.rs

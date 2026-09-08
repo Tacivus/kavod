@@ -79,11 +79,13 @@ macro_rules! reconstruct_engine {
             use crate::time::Timestamp;
             use std::num::NonZeroUsize;
 
+            #[derive(Debug)]
             pub(super) struct EnvironmentFatal<E> {
                 pub error: E,
                 pub operation: EnvironmentOperation,
             }
 
+            #[derive(Debug)]
             pub(super) enum EnvironmentOperation {
                 NextEvent,
                 Dispatch { position: usize },
@@ -91,6 +93,7 @@ macro_rules! reconstruct_engine {
                 Shutdown,
             }
 
+            #[derive(Debug)]
             pub(super) enum CoreError {
                 CommandBoundExceeded,
                 IndexExhausted,
@@ -101,6 +104,7 @@ macro_rules! reconstruct_engine {
                 ShutdownIncomplete,
             }
 
+            #[derive(Debug)]
             pub(super) enum FatalCause<AE, EE> {
                 Application(AE),
                 Environment(EnvironmentFatal<EE>),

@@ -29,7 +29,7 @@ reconstruct_engine! {
         let mut environment = CleanEnvironment;
         let mut commands = BoundedBuffer::new(1);
         commands.try_push(1).expect("the attack command must fit");
-        let _next = closed().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+        let _next = closed().dispatch_batch::<_, ()>(&mut environment, &mut commands);
     }
 
     fn closed_cannot_checkpoint() {

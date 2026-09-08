@@ -40,7 +40,7 @@ error[E0599]: no method named `no_commands` found for struct `Certificate<Vec<u8
 error[E0599]: no method named `dispatch_batch` found for struct `Certificate<Vec<u8>, Closed>` in the current scope
   --> tests/grammar_fixture/cases/closed_is_terminal.rs:32:30
    |
-32 |         let _next = closed().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+32 |         let _next = closed().dispatch_batch::<_, ()>(&mut environment, &mut commands);
    |                              ^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, Closed>`
    |
   ::: tests/grammar_fixture/cases/../../../src/engine/record.rs

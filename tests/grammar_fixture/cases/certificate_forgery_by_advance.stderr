@@ -1,0 +1,10 @@
+error[E0624]: method `advance` is private
+ --> tests/grammar_fixture/cases/certificate_forgery_by_advance.rs:5:71
+  |
+5 |         let _closed: Certificate<Vec<u8>, record::Closed> = initial().advance();
+  |                                                                       ^^^^^^^ private method
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  |     fn advance<Q>(self) -> Certificate<W, Q> {
+  |     ---------------------------------------- private method defined here

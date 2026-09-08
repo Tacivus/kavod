@@ -10,7 +10,7 @@ reconstruct_engine! {
         let mut commands = BoundedBuffer::<u8>::new(1);
         let _ = commands.try_push(7);
         let _effects =
-            turn_open().dispatch_batch::<_, _, ()>(&mut CleanEnvironment, &mut commands);
+            turn_open().dispatch_batch::<_, ()>(&mut CleanEnvironment, &mut commands);
     }
 
     fn unclassified_effects_are_not_a_phase(

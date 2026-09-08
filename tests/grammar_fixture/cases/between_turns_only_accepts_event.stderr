@@ -40,7 +40,7 @@ error[E0599]: no method named `no_commands` found for struct `Certificate<Vec<u8
 error[E0599]: no method named `dispatch_batch` found for struct `Certificate<Vec<u8>, BetweenTurns>` in the current scope
   --> tests/grammar_fixture/cases/between_turns_only_accepts_event.rs:28:37
    |
-28 |         let _next = between_turns().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+28 |         let _next = between_turns().dispatch_batch::<_, ()>(&mut environment, &mut commands);
    |                                     ^^^^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, BetweenTurns>`
    |
   ::: tests/grammar_fixture/cases/../../../src/engine/record.rs

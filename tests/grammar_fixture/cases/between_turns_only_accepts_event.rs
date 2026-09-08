@@ -25,7 +25,7 @@ reconstruct_engine! {
         let mut environment = CleanEnvironment;
         let mut commands = BoundedBuffer::new(1);
         commands.try_push(1).expect("the attack command must fit");
-        let _next = between_turns().dispatch_batch::<_, _, ()>(&mut environment, &mut commands);
+        let _next = between_turns().dispatch_batch::<_, ()>(&mut environment, &mut commands);
     }
 
     fn between_turns_cannot_checkpoint() {

@@ -226,3 +226,93 @@ its caller-less state are Wiring's.
   trailing `Err` sentence moved under the heading clippy asks for; no meaning moved.
   Closes the `missing_errors_doc` item the contracts section left open. The export
   audit may reword. Landed.
+
+## record
+
+`src/engine/record.rs`, `tests/compile_fail.rs`, `tests/grammar_fixture/src/lib.rs`, and
+the seventeen cases under `tests/grammar_fixture/cases/`. Landed 2026-09-08,
+uncommitted. Before: 5 pedantic and nursery hits in the production half of
+`record.rs`, about 130 in its tests, 1 in `compile_fail.rs`. After: 0, 0, 0. Gates: all
+suites green (209 lib, two fewer by I15; 273 across the crate), `clippy -D warnings`
+clean, `cargo fmt --check` clean. The `faults.rs` matrices asserted every call list
+unchanged; no record byte, call, exit, or precedence moved. Expectations regenerated
+with `TRYBUILD=overwrite`; every `.stderr` read: the only hunks are the four quoted case
+lines that lost a turbofish argument under I7, and every failure still reaches the
+grammar — E0599 naming the phase, E0277 on `Answer` and `Default`, E0382, E0624 on
+`commit` and `advance`, E0451 on the fields; no E0603.
+
+- **I1 — `Debug`, `Display`, and `Error` with `source()` on `JournalFatal`.** Every
+  field was `Debug`; the journal round's I1 was the precedent and handed this on.
+  `Display` names the record kind, and the outcome for `TurnCompleted`. Unblocked
+  `#[derive(Debug)]` on `FatalCause` and `EnvironmentFatal` in `engine.rs`, taken here
+  as the cost line I13 named. API additive. Landed.
+- **I2 — `Clone, Copy, Hash` on `RecordKind`; `Hash` on `TurnOutcome`.** Both
+  fieldless. API additive. Landed.
+- **I3 — `Debug` on `Kind` and the six payloads.** `Kind` prints its tag through a
+  manual impl bounded on `RecordPayload`, not `P: Debug`; the payload derives bound
+  the borrowed `Ev` and `C` on the impl only. Landed.
+- **I4 — the two batch assertions name `RUN-ENFORCEMENT`.** They cited the tier row,
+  `ASSERT-INVARIANTS`, whose text says each assertion has an owning guarantee; `mint`
+  already cited the owner. Two `should_panic` strings moved with them. Landed.
+- **I5 — `#[must_use]` on `Certificate`, `ClassifiedTurn`, `index`, `logical_time`;
+  the two getters `const fn`.** A dropped bare successor is the affinity hole the
+  design names and now warns. Took the two `missing_const_for_fn` hits. Landed.
+- **I6 — `close` returns `CloseFatal { cause, quiescence }`.** The
+  `review-simplification.md` keep gave churn as its reason, which this round counts as
+  cost. Same call order and precedence; the `type_complexity` allowance went with the
+  tuple. Seven destructures here, one match arm in `engine.rs`, and the fixture's hand
+  copies of `FatalCause`, `EnvironmentFatal`, `EnvironmentOperation`, and `CoreError`
+  gained `#[derive(Debug)]` so `CloseFatal`'s derive resolves there. Landed.
+- **I7 — `dispatch_batch<E, AE>` over `BoundedBuffer<E::Command>`.** The `C`
+  parameter existed only to be equated with `E::Command`. `::<_, _, ()>` became
+  `::<_, ()>` at six sites here and in four case files; three `.stderr` regenerated
+  on those quoted lines alone. Landed.
+- **I8 — `pub(super)` on `RecordPayload`, `Kind`, `Kind::new`, and the six payloads;
+  `tag` private.** The crate layout names the payloads private and this file exports
+  three items. `independent_commands_dispatched` still names the payload from
+  `engine` and still fails on `commit`'s privacy, E0624. Landed.
+- **I9 — `checkpoint` returns early on `Some`.** The `option_if_let_else` hit;
+  `map_or_else` cannot move `self` into two closures, and `close` already reads this
+  way. Landed.
+- **I10 — the next index is one `EventIndex` built once.** Landed.
+- **I11 — two elidable lifetimes on the `RecordPayload` impls.** Landed.
+- **I12 — `allow` on `accept_event` is `expect`.** Verified firing under
+  `clippy -D warnings`; `rustc` alone accepts `#[expect(clippy::…)]` silently, so the
+  fixture never reports it. The fixture's three `allow`s stay `allow`: which items are
+  dead differs per case, so an `expect` would be unfulfilled in some. Landed.
+- **I13 — tests: `.expect` at the 34 `Ok(c) => c, Err(_) => panic!` sites; `let … else`
+  at the four that keep the `Err`.** `match_wild_err_arm` and `manual_let_else`, one
+  fix each. The `.expect` on `FatalCause` results is what I1's two `engine.rs` derives
+  bought. Landed.
+- **I14 — tests: one root of each duplicated helper.** `RUN_STARTED_AT_ZERO` once
+  instead of five times; one `turn_open(writer, start_time)` instead of three; `in_phase`
+  instead of four phase-literal builders; `continue_answer` and `stop_answer` instead
+  of twelve `ClassifiedTurn` matches; `journal_fatal` and `environment_fatal` generic
+  over the successor, their non-matching arm naming every variant; `record_calls`
+  instead of its duplicate; `use crate::{…}` instead of `super::super::super::` and
+  `crate::environment::ShutdownReport` spelled out. The "C21" plan-step citation left
+  three messages. Every assertion stayed. Landed.
+- **I15 — tests: `journal_fatal_metadata::outcome_is_present_only_for_turn_completed`
+  and `turn_outcome_traits::outcome_is_clone_and_copy` deleted.** The first built each
+  `JournalFatal` from its own table and asserted the table; the behavior is pinned in
+  `faults::journal_fault_matrix::only_turn_completed_carries_an_outcome`. The second
+  pinned a derive, the shape environment I6 deleted. Both modules went with their only
+  test. Landed.
+- **I16 — tests: the remaining pedantic hits.** Nine `doc_markdown` backticks; four
+  `fn require_*` declared mid-body became a binding annotation naming the phase;
+  `assert_state` takes a reference. Landed.
+- **I17 — `compile_fail.rs` lost its `#[cfg(test)] mod tests` wrapper; one
+  `doc_markdown` backtick.** The shape contracts I10 set for `ports_macro.rs`. Landed.
+
+Design notes, not proposals:
+
+- `mint` asserts `index == 0` on the line after writing the literal `0`;
+  `RUN-ENFORCEMENT` names this assertion as the induction base, so it stays.
+- The Run API block derives `TurnOutcome` as `Debug, PartialEq, Eq, Serialize`; the
+  code has carried `Clone, Copy` since S3 and now `Hash`. Shape, not behavior; the
+  export audit may sync the block.
+
+Handed on, not this group's files: `FatalCause`, `EnvironmentFatal`, `EngineExit`,
+`BuildError`, and `CoreError` in `engine.rs` still lack `Display` and `Error`; I1 and
+journal I1 are the precedent. `EngineExit` has no `Debug` yet either; with I1 and the
+two derives taken here, nothing blocks it.

@@ -290,3 +290,97 @@ changed. Two observations, no action, are recorded below.
 - **On a `start` failure the Environment is dropped when `run` returns**, after
   `finalize` builds the exit at `engine.rs:183`. `ENV-START` says only that the drop is
   safe, so no row fixes the instant.
+
+## record
+
+Reviewed 2026-09-08: `src/engine/record.rs`, `tests/compile_fail.rs`, the fourteen
+cases and one legal case under `tests/grammar_fixture/cases/`, and
+`tests/grammar_fixture/src/lib.rs`. Design rows `RUN-GRAMMAR`, `RUN-ENFORCEMENT`,
+`RUN-RECORDS`, `RUN-INDEX`, `RUN-CHECKPOINT`, `ASSERT-INVARIANTS`, `VERIFY-GRAMMAR`,
+A1, A3, A5, and the `JRN-*` rows as consumed. Green before the round opened. Suites
+read: the file's eleven test modules, `golden_journal.rs`, `faults.rs`, the harness
+tests for the scripted Environment and sink, and every `.stderr` in the fixture.
+
+**Result: no defects, two open attacks, both landed.** Both are compile-fail cases;
+`record.rs` and the fixture's hand copies are unchanged.
+
+### Record grammar
+
+| # | Attack | Resolution |
+|---|---|---|
+| T1 | six kind tags; field order per record; `schema_version` 1; `outcome` a bare tag | pinned — `record_kind_wire::kind_tags_match_their_variant_names`, `record_payload_wire::every_payload_leads_with_its_kind_in_table_order`, `::turn_completed_outcome_is_a_bare_tag_for_both_answers` |
+| T2 | serialized tag and `JournalFatal.record_kind` disagree | by construction — both read `P::KIND` (S3); `record_payload_wire::payload_tag_and_kind_share_one_source` |
+| T3 | `JournalFatal.outcome` `Some` exactly for `TurnCompleted`, with the attempted outcome, at all seven commit sites | pinned — `faults::journal_fault_matrix::only_turn_completed_carries_an_outcome` |
+| T4 | index and time at 0, 1, `u64::MAX` in every record | pinned — `certificate_minting::run_started_preserves_frozen_time_boundaries`, `record_payload_wire::remaining_payloads_preserve_maximum_index`, `::event_accepted_serializes_maximum_index_and_time_without_loss`, `stop_closing::closing_preserves_index_and_time_boundaries` |
+| T5 | `Send`/`Sync` depend on the phase or payload marker | pinned — `certificate_auto_traits::phase_marker_does_not_control_send_or_sync`, `record_payload_wire::kind_marker_auto_traits_do_not_depend_on_payload_type` |
+| T6 | certificate, phases, or transitions nameable outside `engine` | by construction — `engine/mod.rs` and `lib.rs` re-export only `JournalFatal`, `RecordKind`, `TurnOutcome` |
+| M1 | minted index is 0 for any start time | asserted — `mint`; pinned `certificate_minting::minting_asserts_the_prospective_index_base` |
+| M2 | a sink call before the `RunStarted` write | pinned — `faults::journal_fault_matrix::each_record_kind_maps_to_its_journal_fatal`, `RunStarted` row: the sink script holds one step, so an earlier call panics the sink |
+| M3 | `RunStarted` at exact capacity; one past with nothing written | pinned — both tests in `certificate_bounds` |
+| M4 | `RunStarted` commit failure: kind, no outcome, Journal destroyed, no handler, one shutdown | pinned — `certificate_fatal_path::commit_failure_names_run_started_and_destroys_the_journal`; matrix `RunStarted` row |
+| M5 | after `run_started`, `index()` is 0 and `logical_time()` the start time | pinned — `certificate_minting::run_started_commits_the_versioned_first_record` |
+| C1 | either answer: matching variant, nothing committed, no Environment call, index and time kept | pinned — `turn_classification::classify_fixes_the_answer_in_the_phase_type`, `::classify_commits_nothing_for_either_answer`, `::classify_preserves_certificate_state_for_both_answers` |
+| C2 | a classified certificate classified again with the other answer | **open — E2, landed** |
+| C3 | `no_commands` on a nonempty buffer: panic, buffer and Journal untouched | asserted — `no_commands`; pinned `turn_classification::no_commands_panics_on_a_nonempty_buffer`, `::full_batch_rejection_preserves_buffer_and_journal` |
+| C4 | empty buffer at capacity 0 and 2: no record, state kept | pinned — `turn_classification::the_empty_batch_edge_commits_nothing`, `::zero_capacity_empty_batch_advances_without_a_record`, `::no_commands_preserves_certificate_state` |
+| D1 | empty buffer: panic, no record, no Environment call, buffer reusable | asserted — `dispatch_batch`; pinned `batch_dispatch::an_empty_buffer_is_an_invariant_panic`, `::empty_batch_panic_has_no_record_or_environment_side_effect` |
+| D2 | one and capacity commands: ordered Prepared bytes, ordered handoffs, Dispatched after the last, buffer drained, slot reusable | pinned — `batch_dispatch::prepared_then_each_handoff_in_order_then_dispatched`, `::one_command_batch_preserves_phase_state_and_reusable_capacity`; `golden_journal::golden_sequences::a_command_run_writes_exactly_its_records` |
+| D3 | Prepared commit fails by flush, write, partial write, `Encode`, `NotAnObject`, `BoundExceeded`: no handoff, buffer intact | pinned — `batch_dispatch::prepared_commit_failure_precedes_any_handoff`, `::command_serialization_failure_leaves_the_batch_undrained`, `::prepared_record_one_byte_past_capacity_hands_off_nothing`; `faults::journal_fault_matrix::a_partial_write_failure_preserves_the_prior_commit_boundary`; `golden_journal::encoding_rejection::an_interior_newline_payload_is_rejected_with_nothing_written` |
+| D4 | dispatch `Err` at 0, at a middle k, at N−1: prefix handed off, `position == k`, buffer empty, no Dispatched, no `take_error` | pinned — `batch_dispatch::first_position_failure_hands_off_nothing_and_discards_all_commands`, `::error_at_position_k_keeps_the_prefix_and_discards_the_suffix`, `::last_position_failure_keeps_the_full_prefix_and_discards_the_failed_command`; `faults::environment_fault_matrix::a_failed_dispatch_retains_only_the_successful_handoff_prefix` |
+| D5 | Dispatched commit fails: every handoff done, buffer empty, kind certifies the batch | pinned — `batch_dispatch::dispatched_commit_failure_follows_every_handoff`; matrix `CommandsDispatched` row |
+| D6 | Prepared at exact capacity; one past | pinned — `batch_dispatch::prepared_record_succeeds_at_exact_record_capacity`, `::prepared_record_one_byte_past_capacity_hands_off_nothing` (S1) |
+| D7 | Dispatched at the bound | derived — S1's argument: always shorter than the Prepared record the bound just admitted |
+| D8 | a Command failing to serialize at k > 0 through the transition | derived — the `?` precedes the drain for every k (D3); `record_payload_wire::commands_prepared_serialization_failure_leaves_batch_and_record_reusable` pins k = 1 at the payload; region clearing is the journal group's C15 |
+| D9 | `position` overflow | by construction — `enumerate` over at most `capacity` items; a `Vec` holds fewer than `isize::MAX` |
+| D10 | Stop answer through `dispatch_batch`; dispatch `Err` under Stop | by construction — one generic body over `A`; the Stop success path is `one_command_batch_preserves_phase_state_and_reusable_capacity` |
+| K1 | checkpoint `Some` under Continue and under Stop: `Environment(Checkpoint)`, no record; `None`: no record, state kept | pinned — `turn_checkpoint::a_pending_error_is_checkpoint_fatal_and_consumes_the_certificate`, `::a_stop_path_pending_error_commits_nothing`, `::a_clean_snapshot_preserves_state_for_both_answers` |
+| K2 | `take_error` exactly once, after the last handoff and its record, before the completion record | pinned — `turn_checkpoint::the_snapshot_is_taken_exactly_once`, `::a_dispatched_batch_checkpoints_after_the_last_handoff` |
+| K3 | no snapshot on an earlier Fatal: dispatch `Err`, overflow, handler `Fatal`, Prepared failure | pinned — D4's matrix test; `faults::application_fault_matrix::an_over_emitting_application_is_command_bound_exceeded`; `engine::run_turn_loop::a_start_handler_fatal_performs_no_effect_phase_or_event_request`; `prepared_commit_failure_precedes_any_handoff` |
+| K4 | `CommandsDispatched` as the final record, both answers | pinned — `golden_journal::fatal_tails::commands_dispatched_can_be_the_final_record` (Stop); matrix `Checkpoint` row commits three records (Continue) |
+| P1 | `TurnCompleted(Continue)` and `StopRequested` bytes; outcome from the marker, not a caller | pinned — `turn_completion::continue_commits_turn_completed_continue`, `::stop_commits_stop_requested`, `::the_committed_outcome_is_the_phase_marker_not_a_caller_value` |
+| P2 | completion records at exact capacity; one past with metadata kept | pinned — `turn_completion::completion_records_succeed_at_exact_record_capacity`, `::completion_records_one_byte_past_capacity_fail_without_output` |
+| P3 | `StopRequested` commits before `shutdown`; its failure still shuts down once | pinned — `stop_commits_stop_requested`; matrix `StopRequested` row |
+| S1 | the four reports; `shutdown` before the commit; exactly once | pinned — `stop_closing::a_clean_report_commits_turn_completed_stop`, `::a_report_error_outranks_incomplete`, `::incomplete_without_error_is_shutdown_incomplete`, `::a_quiesced_report_error_is_shutdown_fatal`; `faults::environment_fault_matrix::each_operation_error_maps_to_its_cause_and_quiescence`, `::environment_failures_commit_no_records_after_their_boundary` |
+| S2 | commit failure after a clean report by write, flush, bound: `Some(Stop)`, `Quiesced` retained, no second shutdown, `StopRequested` last committed | pinned — `stop_closing::commit_failure_after_a_clean_report_retains_quiesced`, `::completion_record_one_byte_past_capacity_retains_quiesced`; `faults::journal_fault_matrix::a_stop_commit_failure_retains_quiesced` |
+| S3 | `TurnCompleted(Stop)` at exact capacity | pinned — `stop_closing::completion_record_succeeds_at_exact_capacity` |
+| E1 | index `MAX`: `IndexExhausted`, `next_event` uncalled, no sink call; `MAX − 1` accepts to `MAX` | pinned — `event_acceptance::the_domain_check_precedes_next_event` |
+| E2 | overflow past the domain check | asserted — the `expect` in `accept_event`; unreachable after E1 |
+| E3 | `next_event` `Err`: `Environment(NextEvent)`, nothing committed, no sink call | pinned — `NextEvent` row of `environment_failures_commit_no_records_after_their_boundary` |
+| E4 | regression against the start time and against a later accepted time; equal accepted; candidate consumed; nothing committed; no handler | pinned — `event_acceptance::a_decreasing_stamp_is_time_regression_with_the_candidate_consumed`, `::an_equal_stamp_is_accepted`; `faults::environment_fault_matrix::a_decreasing_stamp_is_time_regression`; `golden_journal::golden_sequences::repeated_events_advance_indices_and_preserve_time_boundaries` |
+| E5 | commit failure by flush, write, bound, `Encode`, `NotAnObject`: candidate consumed once, nothing committed, kind `EventAccepted`, no `on_event` | pinned — `event_acceptance::acceptance_advances_index_and_time_only_on_commit`, `::event_record_one_byte_past_capacity_fails_after_consuming_candidate`, `::event_serialization_failure_is_journal_fatal_after_consumption`; matrix `EventAccepted` row; `golden_journal::encoding_rejection::an_interior_newline_event_preserves_the_committed_prefix` |
+| E6 | success: record carries n+1 and the offered time; certificate updated; the returned Event is the recorded one, without `Clone` | pinned — `event_acceptance::event_accepted_bytes_carry_the_new_index_and_time`, `::a_non_clone_event_is_returned_after_commit` |
+| E7 | `EventAccepted` at exact capacity | pinned — `event_acceptance::event_record_succeeds_at_exact_record_capacity` |
+| H1 | `Ok(0)`, over-report, `Interrupted`, short write, error after progress at a record commit | derived — the journal group's W1–W6 fix the `JournalError`; `Certificate::commit` maps every `JournalError` one way, pinned per kind by the fault matrix; `a_partial_write_failure_preserves_the_prior_commit_boundary` walks one through `CommandsPrepared` |
+| H2 | a `{Quiesced, Some}` report; `take_error` `Some` at the start turn | pinned — S1, K1 |
+| H3 | a fabricated certificate from the fixture's position, by `advance` or by a struct literal | **open — E1, landed** |
+| H4 | wrong-phase methods on `Initial`, unclassified `TurnOpen`, `EffectsComplete`, `Checkpointed<A>`, `BetweenTurns`, `Closed` | pinned — the fourteen cases in `compile_fail::grammar_compile_fail`; every `.stderr` read: E0599 naming the phase, E0382, E0277, E0624 on `commit`; no E0603 |
+| H5 | fixture drift from `record.rs`'s use of `BoundedBuffer` and `EventIndex` | by construction — `legal.rs` compiles the real file against the hand copies, so any new call fails `the_fixture_reconstruction_itself_compiles` |
+| H6 | a dropped certificate performs a sink operation | derived — no `Drop` impl (journal L3); every fault test drops one on a sink whose next unscripted call panics |
+| G1 | "no handler runs before its acceptance record" | pinned — matrix `RunStarted` row (state `[0]`), `EventAccepted` row (state `[0, 1]`), `a_decreasing_stamp_is_time_regression` app calls |
+| G2 | "`RunStarted` is the only possible first record" | derived — `mint` yields `Initial`, whose only transition is `run_started` (`illegal_transition_order`, `initial_context_access`), plus M2 |
+| G3 | "`Stopped` implies a clean report" | by construction — `Closed` is produced only by `close`, after both report checks (`premature_stop_completion`) |
+| G4 | "after `classify` no transition accepts an answer" | **open — E2, landed**; the same gap as C2 |
+
+### Items decided
+
+**E1 — landed.** `advance` is private and the certificate's four fields are private,
+so a forgery from the Engine's position fails either way, but no case attempted one.
+Two cases, not one: rustc reports E0451 field privacy in a later pass than E0624, so a
+file carrying both attacks records only the `advance` error and leaves the literal
+unpinned. `certificate_forgery_by_advance.rs` expects E0624 on `advance`;
+`certificate_forgery_by_literal.rs` expects E0451 on all four fields. Driven by
+`grammar_compile_fail::certificate_forgery_does_not_compile`. Mutations: `advance` made
+`pub(super)` failed only the advance case; the four fields made `pub(super)` failed only
+the literal case. Both reverted.
+
+**E2 — landed.** `classify` lives on the unclassified `TurnOpen` alone, so an
+answer-typed phase cannot be classified again, but no case attempted it; moving
+`classify` into the `TurnOpen<A>` block beside the batch edges would compile a Stop-typed
+successor from a Continue turn. `reclassified_turn.rs` expects E0599 on both
+`TurnOpen<answer::Continue>` and `TurnOpen<answer::Stop>`. Driven by
+`grammar_compile_fail::a_classified_turn_cannot_be_reclassified`. Mutation: the
+`TurnOpen` impl block made generic over `A`; the new case compiled and failed the test,
+and three sibling cases failed on the changed `found for` note. Reverted.
+
+After the batch: `cargo test` green at 211 in-file tests plus every cross-file suite,
+`cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean.

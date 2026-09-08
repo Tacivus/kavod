@@ -1,6 +1,6 @@
 use super::record::{
-    Certificate, Checkpointed, ClassifiedTurn, Initial, JournalFatal, StopPending, TurnOpen,
-    TurnOutcome, answer,
+    Certificate, Checkpointed, ClassifiedTurn, CloseFatal, Initial, JournalFatal, StopPending,
+    TurnOpen, TurnOutcome, answer,
 };
 use crate::application::{Application, Context, Outcome};
 use crate::bounded_buffer::BoundedBuffer;
@@ -192,7 +192,7 @@ where
 
         match stop_pending.close(env) {
             Ok(_closed) => EngineExit::Stopped { state },
-            Err((cause, quiescence)) => {
+            Err(CloseFatal { cause, quiescence }) => {
                 Self::finalize(state, cause, Finalization::Retained(quiescence))
             }
         }
@@ -210,6 +210,7 @@ pub enum EngineExit<S, AE, EE> {
     },
 }
 
+#[derive(Debug)]
 pub enum FatalCause<AE, EE> {
     Application(AE),
     Environment(EnvironmentFatal<EE>),
@@ -226,6 +227,7 @@ impl<AE, EE> FatalCause<AE, EE> {
 
 /// Names the operation where the Error was observed - not necessarily where it was
 /// caused (`ENV-LATCH`).
+#[derive(Debug)]
 pub struct EnvironmentFatal<EE> {
     pub error: EE,
     pub operation: EnvironmentOperation,

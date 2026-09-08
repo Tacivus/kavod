@@ -7,7 +7,7 @@ reconstruct_engine! {
         commands
             .try_push(7)
             .expect("the legal fixture command must fit");
-        let effects = match continue_turn().dispatch_batch::<_, _, ()>(
+        let effects = match continue_turn().dispatch_batch::<_, ()>(
             &mut environment,
             &mut commands,
         ) {
