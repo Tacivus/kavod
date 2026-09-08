@@ -15,7 +15,7 @@ pub use engine::{
 };
 pub use environment::{Environment, Quiescence, ShutdownReport};
 pub use journal::{Journal, JournalBuildError, JournalError, SinkOperation};
-#[allow(unused_imports, reason = "used by later Environment build steps")]
+#[expect(unused_imports, reason = "used by later Environment build steps")]
 pub(crate) use latch::Latch;
 pub use port::{Never, PortContract};
 pub use time::{EventIndex, Timestamp};

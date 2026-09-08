@@ -2,10 +2,15 @@ mod support;
 
 #[cfg(test)]
 mod tests {
-    use super::support::*;
+    use super::support::{
+        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedEnv, ScriptedSink, ScriptedTurn,
+        SinkCall, SinkStep, expect_application_fatal, expect_core_fatal, expect_environment_fatal,
+        expect_journal_fatal, stopped,
+    };
     use kavod::{
-        Engine, EngineConfig, EngineExit, Environment, FatalCause, Outcome, Quiescence,
-        ShutdownReport, Timestamp,
+        CoreError, Engine, EngineConfig, EngineExit, Environment, EnvironmentFatal,
+        EnvironmentOperation, FatalCause, JournalError, JournalFatal, Outcome, Quiescence,
+        RecordKind, ShutdownReport, Timestamp,
     };
     use std::io::{self, Write};
     use std::num::NonZeroUsize;
@@ -112,7 +117,7 @@ mod tests {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Incomplete,
+                        quiescence: Quiescence::Incomplete,
                         returned_error: true,
                     },
                 ],
@@ -597,14 +602,9 @@ mod tests {
             );
             let mut bytes = Vec::new();
             let engine = Engine::new(config(2), app, environment, &mut bytes)
-                .unwrap_or_else(|_| panic!("the recording Application fixture must construct"));
+                .expect("the recording Application fixture must construct");
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => {
-                    panic!("the Continue-then-Stop Application script must stop cleanly")
-                }
-            };
+            let state = stopped(engine.run());
 
             assert_eq!(
                 state,
@@ -648,31 +648,23 @@ mod tests {
                 ScriptedEnv::new(Ok(Timestamp::from_nanos(10)), [], [], [], clean_shutdown());
             let mut bytes = Vec::new();
             let engine = Engine::new(config(1), app, environment, &mut bytes)
-                .unwrap_or_else(|_| panic!("the fatal Application fixture must construct"));
+                .expect("the fatal Application fixture must construct");
 
-            match engine.run() {
-                EngineExit::Fatal {
-                    state,
-                    cause: FatalCause::Application(error),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [1, 9],
-                        "the Fatal handler's mutation must remain in returned State"
-                    );
-                    assert_eq!(
-                        error, "application failed",
-                        "the Engine must return the scripted Application Error"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "fatal finalization must retain the scripted clean shutdown account"
-                    );
-                }
-                _ => panic!("a scripted Fatal answer must produce an Application fatal exit"),
-            }
+            let (state, error, quiescence) = expect_application_fatal(engine.run());
+            assert_eq!(
+                state,
+                [1, 9],
+                "the Fatal handler's mutation must remain in returned State"
+            );
+            assert_eq!(
+                error, "application failed",
+                "the Engine must return the scripted Application Error"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "fatal finalization must retain the scripted clean shutdown account"
+            );
             assert!(
                 env_trace.borrow().handoffs.is_empty(),
                 "Commands staged by a Fatal handler must never become handoffs"
@@ -701,8 +693,98 @@ mod tests {
             );
             let mut bytes = Vec::new();
             let engine = Engine::new(config(1), app, environment, &mut bytes)
-                .unwrap_or_else(|_| panic!("the exhausted Application fixture must construct"));
+                .expect("the exhausted Application fixture must construct");
             let _exit = engine.run();
+        }
+    }
+
+    mod exit_helpers {
+        use super::*;
+
+        type Exit = EngineExit<u8, &'static str, &'static str>;
+
+        fn fatal(cause: FatalCause<&'static str, &'static str>) -> Exit {
+            EngineExit::Fatal {
+                state: 1,
+                cause,
+                quiescence: Quiescence::Incomplete,
+            }
+        }
+
+        /// Invariant: each exit helper returns exactly its variant's State, payload,
+        /// and quiescence.
+        #[test]
+        fn each_helper_returns_its_variants_payloads() {
+            assert_eq!(
+                stopped(Exit::Stopped { state: 1 }),
+                1,
+                "stopped must return the Stopped State"
+            );
+            assert_eq!(
+                expect_application_fatal(fatal(FatalCause::Application("handler failed"))),
+                (1, "handler failed", Quiescence::Incomplete),
+                "expect_application_fatal must return the Application payload"
+            );
+            assert_eq!(
+                expect_environment_fatal(fatal(FatalCause::Environment(EnvironmentFatal {
+                    error: "checkpoint failed",
+                    operation: EnvironmentOperation::Checkpoint,
+                }))),
+                (
+                    1,
+                    EnvironmentFatal {
+                        error: "checkpoint failed",
+                        operation: EnvironmentOperation::Checkpoint,
+                    },
+                    Quiescence::Incomplete,
+                ),
+                "expect_environment_fatal must return the Environment payload"
+            );
+            assert_eq!(
+                expect_core_fatal(fatal(FatalCause::Core(CoreError::IndexExhausted))),
+                (1, CoreError::IndexExhausted, Quiescence::Incomplete),
+                "expect_core_fatal must return the Core payload"
+            );
+            let (state, journal_fatal, quiescence) =
+                expect_journal_fatal(fatal(FatalCause::Journal(JournalFatal {
+                    record_kind: RecordKind::StopRequested,
+                    outcome: None,
+                    error: JournalError::NotAnObject,
+                })));
+            assert_eq!(
+                (
+                    state,
+                    journal_fatal.record_kind,
+                    journal_fatal.outcome,
+                    quiescence
+                ),
+                (1, RecordKind::StopRequested, None, Quiescence::Incomplete),
+                "expect_journal_fatal must return the Journal payload"
+            );
+            assert!(
+                matches!(journal_fatal.error, JournalError::NotAnObject),
+                "expect_journal_fatal must return the Journal Error unchanged"
+            );
+        }
+
+        /// Invariant: each exit helper rejects every exit that is not its variant.
+        #[test]
+        fn each_helper_rejects_every_other_exit() {
+            assert_panics(|| {
+                let _ = stopped(fatal(FatalCause::Core(CoreError::IndexExhausted)));
+            });
+            assert_panics(|| {
+                let _ = expect_application_fatal(Exit::Stopped { state: 1 });
+            });
+            assert_panics(|| {
+                let _ = expect_environment_fatal(fatal(FatalCause::Application("handler failed")));
+            });
+            assert_panics(|| {
+                let _ = expect_core_fatal(fatal(FatalCause::Application("handler failed")));
+            });
+            assert_panics(|| {
+                let _ = expect_journal_fatal(fatal(FatalCause::Core(CoreError::IndexExhausted)));
+            });
         }
     }
 

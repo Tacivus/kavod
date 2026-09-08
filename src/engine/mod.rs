@@ -1,4 +1,4 @@
-#[allow(
+#[expect(
     clippy::module_inception,
     reason = "the prescribed engine directory keeps declarations in engine.rs"
 )]

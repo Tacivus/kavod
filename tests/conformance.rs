@@ -1,4 +1,4 @@
-#[allow(dead_code, unused_imports)]
+#[expect(dead_code, unused_imports)]
 mod support;
 
 #[cfg(test)]
@@ -79,6 +79,7 @@ mod tests {
             Self::IncompleteShutdown,
         ];
 
+        #[expect(clippy::too_many_lines, reason = "one arm per catalogued trace")]
         fn script(self) -> TraceScript {
             let clean_shutdown = || ShutdownReport {
                 quiescence: Quiescence::Quiesced,
@@ -248,9 +249,8 @@ mod tests {
                 self.checkpoints,
                 self.shutdown,
             );
-            let engine = Engine::new(config, app, environment, writer).unwrap_or_else(|_| {
-                panic!("conformance fixture invariant: the Engine must construct")
-            });
+            let engine = Engine::new(config, app, environment, writer)
+                .expect("conformance fixture invariant: the Engine must construct");
             let (state_transitions, exit) = summarize_exit(engine.run());
             let app_calls = app_trace.borrow().calls.clone();
             let environment_trace = environment_trace.borrow();
@@ -410,18 +410,15 @@ mod tests {
 
     fn run(trace: ScriptedTrace) -> RunObservation {
         let mut script = trace.script();
-        match script.sink_steps.take() {
-            Some(steps) => {
-                let (sink, sink_trace) = ScriptedSink::new(steps);
-                let core = script.run(sink);
-                let journal_bytes = sink_trace.borrow().committed_bytes().to_vec();
-                RunObservation::from_core(core, journal_bytes)
-            }
-            None => {
-                let mut journal_bytes = Vec::new();
-                let core = script.run(&mut journal_bytes);
-                RunObservation::from_core(core, journal_bytes)
-            }
+        if let Some(steps) = script.sink_steps.take() {
+            let (sink, sink_trace) = ScriptedSink::new(steps);
+            let core = script.run(sink);
+            let journal_bytes = sink_trace.borrow().committed_bytes().to_vec();
+            RunObservation::from_core(core, journal_bytes)
+        } else {
+            let mut journal_bytes = Vec::new();
+            let core = script.run(&mut journal_bytes);
+            RunObservation::from_core(core, journal_bytes)
         }
     }
 

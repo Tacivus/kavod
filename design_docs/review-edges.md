@@ -384,3 +384,102 @@ and three sibling cases failed on the changed `found for` note. Reverted.
 
 After the batch: `cargo test` green at 211 in-file tests plus every cross-file suite,
 `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean.
+
+## engine
+
+Reviewed 2026-09-08: `src/engine/engine.rs`, `src/engine/mod.rs`, `src/lib.rs`, with
+`record.rs`, `application.rs`, `bounded_buffer.rs`, `environment.rs`, `journal.rs`, and
+`time.rs` read as callees. Design rows `RUN-SERIAL`, `RUN-FINALIZE`, `RUN-CHECKPOINT`,
+`DET-RUN`, `BOUND-NONZERO`, `VERIFY-FAULTS`, `VERIFY-JOURNAL`, `VERIFY-CONFORMANCE`,
+`ENV-START`, `ENV-SHUTDOWN`, `APP-OVERFLOW`, A2, A4, A9, and the Run section's startup,
+phase, edge, and Notes tables. Green before the round opened. Suites read: the twelve
+modules of `engine::tests`, `faults.rs`, `golden_journal.rs`, `conformance.rs`,
+`harness_contract.rs`, `tests/support/*`, and `record::batch_dispatch`. Greps:
+`Dispatch { position`, `position: [1-9]`, `EventIndex::new(` across `src/` and `tests/`.
+Prior: the Engine table, Considered list, and Observations in `review-adversarial.md`;
+S1, S2, and the kept items in `review-simplification.md`; ledger G1–G14 not re-raised.
+`CRATE-EXPORTS` and the missing derives on `BuildError` and `EngineExit` wait on Wiring
+and were not attacked.
+
+**Result: no defects, one open attack, landed.** One test in `tests/faults.rs`; no file
+under `src/` changed.
+
+### Engine
+
+| # | Attack | Resolution |
+|---|---|---|
+| N1 | `new` at capacity 1; `usize::MAX` commands → `CommandBuffer` | pinned — `engine_construction::one_slot_bounds_construct_an_empty_unpoisoned_engine`, `::batch_reservation_failure_is_command_buffer` |
+| N2 | `usize::MAX` record bytes → `Journal(MaxBytesTooLarge)`; record bytes 1 builds, then `BoundExceeded` at `RunStarted` | pinned — `::journal_build_failure_is_journal`, `::one_slot_bounds_construct_an_empty_unpoisoned_engine`; the run derived from `record::certificate_bounds` plus the matrix `RunStarted` row (one `?` in `run_started`) |
+| N3 | both unreservable → step 1 wins | pinned — `::command_buffer_failure_precedes_journal_failure` |
+| N4 | `new` and a failed `new` call no Application, Environment, or sink method | pinned — `::construction_invokes_no_application_or_environment_method`, `::failures_invoke_no_application_or_environment_method`; sink by `startup_faults::a_start_error_invokes_no_handler_or_sink` (zero-step sink) |
+| R1 | `initial_state` once, before `start`, on every path | pinned — `run_startup::state_is_created_before_any_fallible_step`; every full call list holds one `InitialState` first |
+| R2 | `start` `Err`: `Environment(Start)`, `Quiesced`, no shutdown, no handler, no sink call, State carried | pinned — `run_startup::a_start_error_exits_fatal_quiesced_without_shutdown`, `::a_start_error_invokes_no_handler_and_writes_no_record`, `startup_faults::*` |
+| R3 | start time 0 and `u64::MAX` through handler and `RunStarted` | pinned — `run_startup::boundary_start_times_reach_the_handler_and_journal_unchanged` |
+| R4 | `RunStarted` commit fails by write, flush: no handler, shutdown once | pinned — matrix `RunStarted` row in `each_record_kind_maps_to_its_journal_fatal`, `flush_failures_leave_the_failed_record_uncommitted` |
+| T1 | index 0 with an Event; index ≥ 1 without: panic before any handler | asserted — `engine.rs:75`; pinned `turn_event_invariant::*` |
+| T2 | handler sees index and time equal to its acceptance record | pinned — `run_turn_loop::continue_turns_accept_events_in_sequence`; `golden::graph_sequences::an_event_turn_with_commands_uses_the_accepted_index` (trace and bytes) |
+| T3 | overflow × {Continue, Stop, Fatal}, start and Event turn: `CommandBoundExceeded`, batch cleared, payload dropped, no dispatch or checkpoint | pinned — `turn_overflow_precedence::*`, `run_turn_loop::overflow_beats_the_returned_outcome_and_discards_the_batch`, `application_fault_matrix::event_turn_overflow_preserves_prior_effects_and_dispatches_nothing_new` |
+| T4 | `Fatal` with an exactly full batch, start and Event turn: `Application`, batch cleared, State stands, payload owned | pinned — `turn_application_fatal::*`, `run_turn_loop::a_start_handler_fatal_performs_no_effect_phase_or_event_request`, `::a_handler_fatal_discards_the_batch_and_carries_the_error` (capacity 1, one Command) |
+| T5 | {empty, one, capacity} × {Continue, Stop} record sequences, start and Event turn | pinned — `golden::graph_sequences::every_empty_and_command_turn_shape_has_its_required_sequence`, `::an_event_turn_with_commands_uses_the_accepted_index`, `golden_sequences::*`; Event-turn nonempty Continue derived from the index-1 `CommandsPrepared`/`CommandsDispatched` bytes and the index-1 `TurnCompleted(Continue)` bytes in `repeated_events_advance_indices_and_preserve_time_boundaries` |
+| T6 | Stop at index 0 with and without Commands | pinned — `run_stop_path::stop_at_start_produces_the_three_record_journal`, `golden_sequences::a_command_run_writes_exactly_its_records` |
+| T7 | the Event handed to `on_event` is the one returned and recorded | pinned — the three-way match of `AppCall::OnEvent`, `EnvCall::NextEvent`, and `"event":7` in every golden test |
+| T8 | `on_start` once per run, `on_event` once per accepted Event, none after Fatal | pinned — the exact call lists in `run_turn_loop` and `golden_sequences` |
+| F1 | empty → recordless edge; nonempty → dispatch; checkpoint once after, both answers | pinned — every call list shows `TakeError` after the last `Dispatch`, on empty turns too |
+| F2 | dispatch `Err` on an accepted Event turn: `position` is batch-relative, the prior turn's handoffs stand | **open — E1, landed** |
+| F3 | checkpoint `Some` after Commands and after none, under Continue and Stop | pinned — matrix `Checkpoint` point; `golden::fatal_tails::commands_dispatched_can_be_the_final_record`; `record::turn_checkpoint::a_stop_path_pending_error_commits_nothing` |
+| D1 | `TurnCompleted(Continue)` commit fails: `Some(Continue)`, no `next_event`, shutdown once | pinned — matrix `TurnCompleted` row; no `next_event` derived — a commit on the poisoned Journal panics |
+| D2 | `StopRequested` commit fails: `Unconsumed` arm, shutdown once | pinned — matrix `StopRequested` row |
+| D3 | `TimeRegression` through `run`: `previous` the last accepted time, candidate consumed, no handler, nothing committed | pinned — `environment_fault_matrix::a_decreasing_stamp_is_time_regression`; a later `previous` by `record::event_acceptance::a_decreasing_stamp_is_time_regression_with_the_candidate_consumed` |
+| D4 | `IndexExhausted` reaches the `Unconsumed` arm | derived — `record::event_acceptance::the_domain_check_precedes_next_event` plus `fatal_finalization::a_started_environment_is_shutdown_exactly_once`, which finalizes that cause |
+| D5 | A2: the completion record commits before `next_event` | by construction — `accept_event` exists only on `BetweenTurns`, produced only by `complete_continue`; a stray call would fail the scripted Environment's phase assertion |
+| Z1 | `StartFailed` → `Quiesced`, no shutdown | pinned — `fatal_finalization::a_start_error_skips_shutdown_and_is_quiesced` |
+| Z2 | `Unconsumed` × all four reports: quiescence taken, Error dropped, cause kept | pinned — `::a_started_environment_is_shutdown_exactly_once` ({Incomplete, None}), `::the_shutdown_error_never_replaces_the_fixed_cause` ({Quiesced, Some}, drop-tracked), `the_operation_error_outranks_the_report_error` ({Incomplete, Some}, four points) |
+| Z3 | `Retained` with either quiescence; through `run` after a `TurnCompleted(Stop)` write or flush failure | pinned — `::a_consumed_environment_uses_the_retained_quiescence`, `::a_consumed_environment_preserves_retained_quiesced`, `journal_fault_matrix::a_stop_commit_failure_retains_quiesced` |
+| Z4 | one finalize, one shutdown, per run | by construction — three return sites; `shutdown_count == 1` in every post-start test |
+| Z5 | every exit carries the post-handler State | pinned — `run_stop_path::stopped_carries_the_final_state`, `application_fault_matrix::state_mutations_survive_each_post_handler_fatal_exit` |
+| C1 | `Stopped` only after a clean report and a committed `TurnCompleted(Stop)` | by construction — `Closed` comes only from `close`; pinned `environment_fault_matrix::each_operation_error_maps_to_its_cause_and_quiescence` |
+| B1 | `Encode`, `NotAnObject`, `BoundExceeded` at `CommandsPrepared` and `EventAccepted` through `run` | pinned for `NotAnObject` — `golden::encoding_rejection::*`; the rest derived, one `?` per transition and the kind pinned in `record::batch_dispatch`, `::event_acceptance` |
+| B2 | `Ok(0)`, over-count, `Interrupted`, short write, error after progress through `run` | derived — the journal group's sink rows fix the `JournalError`; the matrix pins the mapping per record; `a_partial_write_failure_preserves_the_prior_commit_boundary` walks one through |
+| B3 | a bespoke `dispatch` that takes the Command and returns `Err`; `Drop` with effects | trusted — `TRUST-ENV`, `TRUST-PURE`; the environment group's T9 |
+| G1 | `DET-RUN` via two runs: handler calls, State, Command intent, Journal bytes, exit discriminants and payloads (`position`, `previous`/`offered`, kind, outcome, sink operation, quiescence) | pinned — `conformance_within_type::*`; `ExitShape` carries every Core-owned payload |
+| G2 | every scripted call checked against the graph, handoffs included | pinned — `::every_environment_call_is_graph_conformant` plus the fake's phase machine in `scripted_environment_graph` |
+| G3 | `VERIFY-FAULTS`: each post-`start` `Err` × `{Incomplete, Some}`; `start Err` performs no shutdown; over-emitter; both bad reports | pinned — `the_operation_error_outranks_the_report_error`, `a_start_error_performs_no_shutdown`, `an_over_emitting_application_is_command_bound_exceeded`, `each_operation_error_maps_to_its_cause_and_quiescence` |
+| G4 | `VERIFY-JOURNAL`: each answer at the `classify` call site | pinned — `golden::classify_call_site::each_non_fatal_answer_yields_its_required_outcome_records` |
+| G5 | `RUN-SERIAL`, `BOUND-NONZERO` | by construction — owned by value, consuming `shutdown`, `NonZeroUsize` fields |
+
+### Items decided
+
+**E1 — landed.** `record.rs:285` restarts `enumerate()` for each turn's batch and the
+Engine keeps no handoff count, so `position` names the failing Command within that
+turn's `CommandsPrepared` record. Every pinned dispatch failure — the five
+`record::batch_dispatch` tests, both `environment_fault_matrix` points, and the two
+conformance traces — runs on the start turn, where "position in this batch" and
+"handoffs so far in the run" are the same number.
+`environment_fault_matrix::a_later_turn_dispatch_failure_reports_its_batch_relative_position`
+runs a full Continue turn with two Commands, then an Event turn whose second handoff
+fails: `Dispatch { position: 1 }`, handoffs `[10, 11, 20]`, the exact Environment call
+list, and the Journal ending at the index-1 `CommandsPrepared` record. Mutation:
+`position` offset by the certificate index in `dispatch_batch`; the new test was the only
+failure in the workspace. Reverted.
+
+### Observations, no action
+
+- **The adversarial Considered entry "Discarded Commands are dropped before shutdown"
+  has one exception.** When `CommandsPrepared` fails to commit, `dispatch_batch` returns
+  before the drain, so the batch stays populated
+  (`record::batch_dispatch::prepared_commit_failure_precedes_any_handoff`) and is dropped
+  when `run` returns, after the finalizing `shutdown`. No row fixes the instant; under
+  `TRUST-PURE` a Command's `Drop` observes nothing.
+- **The adversarial observation on the accepted Event's lifetime is stale since S1.**
+  `accepted_event` is a local of `drive`, so on a Fatal exit it drops when `drive`
+  returns, before `finalize` and `shutdown`, not after.
+- **The sink drops on different sides of `shutdown`.** A failure inside `drive` drops
+  the certificate, Journal, and writer before `finalize` calls `shutdown`; on the Stop
+  path `close` calls `shutdown` first and the writer drops after. No row names the
+  instant.
+- **`BuildError` and `EngineExit` derive nothing**, so a caller cannot `unwrap` or
+  `assert_eq!` them. Export policy waits on Wiring.
+
+After the batch: `cargo test` green at 209 in-file tests plus every cross-file suite
+(`faults` now 17), `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check`
+clean.

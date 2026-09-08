@@ -1,16 +1,16 @@
-#[allow(dead_code, unused_imports)]
+#[expect(dead_code, unused_imports)]
 mod support;
 
 #[cfg(test)]
 mod tests {
     use super::support::{
         AppCall, EnvCall, RecordingApp, ScriptedEnv, ScriptedSink, ScriptedTurn, SinkStep,
-        TraceQuiescence,
+        expect_application_fatal, expect_core_fatal, expect_environment_fatal,
+        expect_journal_fatal,
     };
     use kavod::{
-        CoreError, Engine, EngineConfig, EngineExit, EnvironmentFatal, EnvironmentOperation,
-        FatalCause, JournalError, JournalFatal, Outcome, Quiescence, RecordKind, ShutdownReport,
-        SinkOperation, Timestamp, TurnOutcome,
+        CoreError, Engine, EngineConfig, EngineExit, EnvironmentOperation, JournalError, Outcome,
+        Quiescence, RecordKind, ShutdownReport, SinkOperation, Timestamp, TurnOutcome,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -237,24 +237,26 @@ mod tests {
         steps
     }
 
-    fn run_with_sink_steps(steps: impl IntoIterator<Item = SinkStep>) -> RunObservation {
-        let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-            vec![0],
-            [
-                ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
-                ScriptedTurn::new(2, Vec::new(), Outcome::Stop),
-            ],
-        );
+    fn observe(
+        turns: Vec<ScriptedTurn<u8, &'static str>>,
+        start: Result<Timestamp, &'static str>,
+        next_events: Vec<Result<(u8, Timestamp), &'static str>>,
+        dispatches: Vec<Result<(), &'static str>>,
+        checkpoints: Vec<Option<&'static str>>,
+        shutdown: ShutdownReport<&'static str>,
+        steps: impl IntoIterator<Item = SinkStep>,
+    ) -> RunObservation {
+        let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(vec![0], turns);
         let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-            Ok(Timestamp::from_nanos(100)),
-            [Ok((7, Timestamp::from_nanos(105)))],
-            [Ok(()), Ok(())],
-            [None, None],
-            clean_shutdown(),
+            start,
+            next_events,
+            dispatches,
+            checkpoints,
+            shutdown,
         );
         let (sink, sink_trace) = ScriptedSink::new(steps);
         let engine = Engine::new(config(), app, environment, sink)
-            .unwrap_or_else(|_| panic!("fault fixture invariant: the Engine must construct"));
+            .expect("fault fixture invariant: the Engine must construct");
         let exit = engine.run();
         let sink_trace = sink_trace.borrow();
         let env_trace = env_trace.borrow();
@@ -269,6 +271,21 @@ mod tests {
             handoffs: env_trace.handoffs.clone(),
             shutdown_count: env_trace.shutdown_count,
         }
+    }
+
+    fn run_with_sink_steps(steps: impl IntoIterator<Item = SinkStep>) -> RunObservation {
+        observe(
+            vec![
+                ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
+                ScriptedTurn::new(2, Vec::new(), Outcome::Stop),
+            ],
+            Ok(Timestamp::from_nanos(100)),
+            vec![Ok((7, Timestamp::from_nanos(105)))],
+            vec![Ok(()), Ok(())],
+            vec![None, None],
+            clean_shutdown(),
+            steps,
+        )
     }
 
     fn run_journal_fault(failed_record: usize, failure: SinkFailure) -> RunObservation {
@@ -276,32 +293,15 @@ mod tests {
     }
 
     fn run_startup_fault() -> RunObservation {
-        let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(vec![0], []);
-        let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
+        observe(
+            Vec::new(),
             Err("start failed"),
-            [],
-            [],
-            [],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
             clean_shutdown(),
-        );
-        let (sink, sink_trace) = ScriptedSink::new([]);
-        let engine = Engine::new(config(), app, environment, sink).unwrap_or_else(|_| {
-            panic!("startup fault fixture invariant: the Engine must construct")
-        });
-        let exit = engine.run();
-        let sink_trace = sink_trace.borrow();
-        let env_trace = env_trace.borrow();
-
-        RunObservation {
-            exit,
-            committed_bytes: sink_trace.committed_bytes().to_vec(),
-            uncertain_suffix: sink_trace.uncertain_suffix().to_vec(),
-            sink_call_count: sink_trace.calls.len(),
-            app_calls: app_trace.borrow().calls.clone(),
-            env_calls: env_trace.calls.clone(),
-            handoffs: env_trace.handoffs.clone(),
-            shutdown_count: env_trace.shutdown_count,
-        }
+            [],
+        )
     }
 
     fn run_scripted_scenario(
@@ -312,32 +312,15 @@ mod tests {
         shutdown: ShutdownReport<&'static str>,
         record_count: usize,
     ) -> RunObservation {
-        let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(vec![0], turns);
-        let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
+        observe(
+            turns,
             Ok(Timestamp::from_nanos(100)),
             next_events,
             dispatches,
             checkpoints,
             shutdown,
-        );
-        let (sink, sink_trace) = ScriptedSink::new(successful_sink_steps(record_count));
-        let engine = Engine::new(config(), app, environment, sink).unwrap_or_else(|_| {
-            panic!("scripted fault fixture invariant: the Engine must construct")
-        });
-        let exit = engine.run();
-        let sink_trace = sink_trace.borrow();
-        let env_trace = env_trace.borrow();
-
-        RunObservation {
-            exit,
-            committed_bytes: sink_trace.committed_bytes().to_vec(),
-            uncertain_suffix: sink_trace.uncertain_suffix().to_vec(),
-            sink_call_count: sink_trace.calls.len(),
-            app_calls: app_trace.borrow().calls.clone(),
-            env_calls: env_trace.calls.clone(),
-            handoffs: env_trace.handoffs.clone(),
-            shutdown_count: env_trace.shutdown_count,
-        }
+            successful_sink_steps(record_count),
+        )
     }
 
     fn run_environment_fault(
@@ -461,58 +444,6 @@ mod tests {
         )
     }
 
-    fn expect_journal_fatal(exit: TestExit) -> (Vec<u8>, JournalFatal, Quiescence) {
-        match exit {
-            EngineExit::Fatal {
-                state,
-                cause: FatalCause::Journal(fatal),
-                quiescence,
-            } => (state, fatal, quiescence),
-            _ => {
-                panic!("journal fault invariant: a sink failure must produce a Journal fatal exit")
-            }
-        }
-    }
-
-    fn expect_environment_fatal(
-        exit: TestExit,
-    ) -> (Vec<u8>, EnvironmentFatal<&'static str>, Quiescence) {
-        match exit {
-            EngineExit::Fatal {
-                state,
-                cause: FatalCause::Environment(fatal),
-                quiescence,
-            } => (state, fatal, quiescence),
-            _ => panic!(
-                "environment fault invariant: an Environment failure must produce an Environment fatal exit"
-            ),
-        }
-    }
-
-    fn expect_core_fatal(exit: TestExit) -> (Vec<u8>, CoreError, Quiescence) {
-        match exit {
-            EngineExit::Fatal {
-                state,
-                cause: FatalCause::Core(error),
-                quiescence,
-            } => (state, error, quiescence),
-            _ => panic!("core fault invariant: a Core failure must produce a Core fatal exit"),
-        }
-    }
-
-    fn expect_application_fatal(exit: TestExit) -> (Vec<u8>, &'static str, Quiescence) {
-        match exit {
-            EngineExit::Fatal {
-                state,
-                cause: FatalCause::Application(error),
-                quiescence,
-            } => (state, error, quiescence),
-            _ => panic!(
-                "application fault invariant: an Application failure must produce an Application fatal exit"
-            ),
-        }
-    }
-
     fn assert_sink_failure(error: JournalError, expected_operation: SinkOperation) {
         match error {
             JournalError::Sink { operation, error } => {
@@ -595,7 +526,7 @@ mod tests {
 
         /// Invariant: failed turn-completion records carry their attempted answer,
         /// while failures of every other record carry no answer.
-        /// Design Doc: JournalFatal
+        /// Design Doc: `JournalFatal`
         #[test]
         fn only_turn_completed_carries_an_outcome() {
             for case in fault_cases() {
@@ -803,35 +734,26 @@ mod tests {
         fn a_start_error_performs_no_shutdown() {
             let observation = run_startup_fault();
 
-            match observation.exit {
-                EngineExit::Fatal {
-                    state,
-                    cause:
-                        FatalCause::Environment(EnvironmentFatal {
-                            error,
-                            operation: EnvironmentOperation::Start,
-                        }),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [0],
-                        "startup fault invariant: the initial State must be returned unchanged"
-                    );
-                    assert_eq!(
-                        error, "start failed",
-                        "startup fault invariant: the exact start Error must remain the fatal cause"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "startup fault invariant: a failed start must be treated as already quiesced"
-                    );
-                }
-                _ => panic!(
-                    "startup fault invariant: a start Error must produce an Environment Start fatal exit"
-                ),
-            }
+            let (state, fatal, quiescence) = expect_environment_fatal(observation.exit);
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Start,
+                "startup fault invariant: a start Error must produce an Environment Start fatal exit"
+            );
+            assert_eq!(
+                state,
+                [0],
+                "startup fault invariant: the initial State must be returned unchanged"
+            );
+            assert_eq!(
+                fatal.error, "start failed",
+                "startup fault invariant: the exact start Error must remain the fatal cause"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "startup fault invariant: a failed start must be treated as already quiesced"
+            );
             assert_eq!(
                 observation.shutdown_count, 0,
                 "startup fault invariant: a failed start must perform no shutdown call"
@@ -1004,7 +926,7 @@ mod tests {
                 assert_eq!(
                     observation.env_calls.last(),
                     Some(&EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Incomplete,
+                        quiescence: Quiescence::Incomplete,
                         returned_error: true,
                     }),
                     "failure precedence invariant: finalization must consume the secondary report"
@@ -1091,7 +1013,7 @@ mod tests {
                             result: Err(()),
                         },
                         EnvCall::Shutdown {
-                            quiescence: TraceQuiescence::Quiesced,
+                            quiescence: Quiescence::Quiesced,
                             returned_error: false,
                         },
                     ],
@@ -1106,7 +1028,7 @@ mod tests {
                             result: Err(()),
                         },
                         EnvCall::Shutdown {
-                            quiescence: TraceQuiescence::Quiesced,
+                            quiescence: Quiescence::Quiesced,
                             returned_error: false,
                         },
                     ],
@@ -1125,6 +1047,103 @@ mod tests {
                     "dispatch prefix invariant: shutdown must immediately follow the failed dispatch"
                 );
             }
+        }
+
+        /// Invariant: a handoff failure on an accepted Event turn reports the
+        /// failing command's position within that turn's batch, not a count of
+        /// every handoff in the run, and the earlier turn's handoffs all stand.
+        /// Design Doc: the Prepared phase row, by name
+        #[test]
+        fn a_later_turn_dispatch_failure_reports_its_batch_relative_position() {
+            const EXPECTED: &[u8] =
+                br#"{"record_kind":"RunStarted","index":0,"schema_version":1,"logical_time":100}
+{"record_kind":"CommandsPrepared","index":0,"commands":[10,11]}
+{"record_kind":"CommandsDispatched","index":0}
+{"record_kind":"TurnCompleted","index":0,"outcome":"Continue"}
+{"record_kind":"EventAccepted","index":1,"logical_time":105,"event":7}
+{"record_kind":"CommandsPrepared","index":1,"commands":[20,21]}
+"#;
+
+            let (app, _) = RecordingApp::<u8, u8, &'static str>::new(
+                vec![0],
+                [
+                    ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
+                    ScriptedTurn::new(2, vec![20, 21], Outcome::Continue),
+                ],
+            );
+            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
+                Ok(Timestamp::from_nanos(100)),
+                [Ok((7, Timestamp::from_nanos(105)))],
+                [Ok(()), Ok(()), Ok(()), Err("later turn dispatch failed")],
+                [None],
+                clean_shutdown(),
+            );
+            let mut bytes = Vec::new();
+            let engine = Engine::new(config(), app, environment, &mut bytes)
+                .expect("later-turn dispatch fixture invariant: the Engine must construct");
+
+            let (state, fatal, quiescence) = expect_environment_fatal(engine.run());
+
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Dispatch { position: 1 },
+                "later-turn dispatch invariant: the position must be zero-based within the failing turn's batch"
+            );
+            assert_eq!(
+                fatal.error, "later turn dispatch failed",
+                "later-turn dispatch invariant: the dispatch Error must remain the cause"
+            );
+            assert_eq!(
+                state,
+                [0, 1, 2],
+                "later-turn dispatch invariant: both completed handler mutations must survive"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "later-turn dispatch invariant: clean finalization must report Quiesced"
+            );
+            assert_eq!(
+                env_trace.borrow().handoffs,
+                [10, 11, 20],
+                "later-turn dispatch invariant: the prior turn's batch and this turn's prefix must stand handed off"
+            );
+            assert_eq!(
+                env_trace.borrow().calls,
+                [
+                    EnvCall::Start(Ok(Timestamp::from_nanos(100))),
+                    EnvCall::Dispatch {
+                        command: 10,
+                        result: Ok(()),
+                    },
+                    EnvCall::Dispatch {
+                        command: 11,
+                        result: Ok(()),
+                    },
+                    EnvCall::TakeError {
+                        returned_error: false,
+                    },
+                    EnvCall::NextEvent(Ok((7, Timestamp::from_nanos(105)))),
+                    EnvCall::Dispatch {
+                        command: 20,
+                        result: Ok(()),
+                    },
+                    EnvCall::Dispatch {
+                        command: 21,
+                        result: Err(()),
+                    },
+                    EnvCall::Shutdown {
+                        quiescence: Quiescence::Quiesced,
+                        returned_error: false,
+                    },
+                ],
+                "later-turn dispatch invariant: the failed handoff must be followed only by shutdown"
+            );
+            assert_eq!(
+                bytes.as_slice(),
+                EXPECTED,
+                "later-turn dispatch invariant: the failing turn's intent record must be the last committed"
+            );
         }
 
         /// Invariant: each Environment-side fatal condition leaves exactly the
@@ -1218,7 +1237,7 @@ mod tests {
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(100))),
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
@@ -1398,7 +1417,7 @@ mod tests {
                     },
                     EnvCall::NextEvent(Ok((7, Timestamp::from_nanos(105)))),
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],

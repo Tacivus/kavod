@@ -25,6 +25,7 @@ pub struct AppTrace<E> {
 
 pub type SharedAppTrace<E> = Rc<RefCell<AppTrace<E>>>;
 
+#[derive(Debug)]
 pub struct ScriptedTurn<C, Err> {
     mutation: u8,
     commands: Vec<C>,
@@ -41,6 +42,7 @@ impl<C, Err> ScriptedTurn<C, Err> {
     }
 }
 
+#[derive(Debug)]
 pub struct RecordingApp<E, C, Err> {
     initial_state: Vec<u8>,
     turns: RefCell<VecDeque<ScriptedTurn<C, Err>>>,

@@ -1,19 +1,31 @@
-#[allow(dead_code, unused_imports)]
+#[expect(dead_code, unused_imports)]
 mod support;
 
 #[cfg(test)]
 mod tests {
     use super::support::{
-        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedEnv, ScriptedTurn, TraceQuiescence,
+        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedEnv, ScriptedTurn,
+        expect_environment_fatal, expect_journal_fatal, stopped,
     };
     use kavod::{
-        Engine, EngineConfig, EngineExit, EnvironmentOperation, FatalCause, JournalError, Outcome,
-        Quiescence, RecordKind, ShutdownReport, Timestamp, TurnOutcome,
+        Engine, EngineConfig, EngineExit, EnvironmentOperation, JournalError, Outcome, Quiescence,
+        RecordKind, ShutdownReport, Timestamp, TurnOutcome,
     };
+    use serde::Serialize;
     use serde_json::value::RawValue;
     use std::num::NonZeroUsize;
 
     type TestExit = EngineExit<Vec<u8>, &'static str, &'static str>;
+
+    /// Everything one golden run leaves behind.
+    struct Golden<E, C> {
+        exit: TestExit,
+        bytes: Vec<u8>,
+        app_calls: Vec<AppCall<E>>,
+        env_calls: Vec<EnvCall<E, C>>,
+        handoffs: Vec<C>,
+        shutdown_count: usize,
+    }
 
     fn config() -> EngineConfig {
         EngineConfig {
@@ -31,9 +43,42 @@ mod tests {
         }
     }
 
+    /// Runs one Application script against a clean-shutdown Environment script
+    /// started at `start`, journaling into a `Vec`.
+    fn run_golden<E: Clone + Serialize, C: Clone + Serialize>(
+        start: Timestamp,
+        turns: Vec<ScriptedTurn<C, &'static str>>,
+        next_events: Vec<Result<(E, Timestamp), &'static str>>,
+        dispatches: Vec<Result<(), &'static str>>,
+        checkpoints: Vec<Option<&'static str>>,
+    ) -> Golden<E, C> {
+        let (app, app_trace) = RecordingApp::new(vec![0], turns);
+        let (environment, env_trace) = ScriptedEnv::new(
+            Ok(start),
+            next_events,
+            dispatches,
+            checkpoints,
+            clean_shutdown(),
+        );
+        let mut bytes = Vec::new();
+        let engine = Engine::new(config(), app, environment, &mut bytes)
+            .expect("golden fixture invariant: the Engine must construct");
+        let exit = engine.run();
+        let env_trace = env_trace.borrow();
+
+        Golden {
+            exit,
+            bytes,
+            app_calls: app_trace.borrow().calls.clone(),
+            env_calls: env_trace.calls.clone(),
+            handoffs: env_trace.handoffs.clone(),
+            shutdown_count: env_trace.shutdown_count,
+        }
+    }
+
     fn run_start_turn(commands: Vec<u8>, answer: TurnOutcome) -> (TestExit, Vec<u8>) {
         let command_count = commands.len();
-        let next_events: Vec<Result<(u8, Timestamp), &'static str>> = match answer {
+        let next_events = match answer {
             TurnOutcome::Continue => vec![Err("end after tested Continue turn")],
             TurnOutcome::Stop => Vec::new(),
         };
@@ -41,23 +86,14 @@ mod tests {
             TurnOutcome::Continue => Outcome::Continue,
             TurnOutcome::Stop => Outcome::Stop,
         };
-        let (app, _) = RecordingApp::<u8, u8, &'static str>::new(
-            vec![0],
-            [ScriptedTurn::new(1, commands, scripted_answer)],
-        );
-        let (environment, _) = ScriptedEnv::<u8, u8, &'static str>::new(
-            Ok(Timestamp::from_nanos(100)),
+        let golden = run_golden::<u8, u8>(
+            Timestamp::from_nanos(100),
+            vec![ScriptedTurn::new(1, commands, scripted_answer)],
             next_events,
-            (0..command_count).map(|_| Ok(())),
-            [None],
-            clean_shutdown(),
+            (0..command_count).map(|_| Ok(())).collect(),
+            vec![None],
         );
-        let mut bytes = Vec::new();
-        let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-            panic!("turn-shape construction invariant: the Engine must construct")
-        });
-        let exit = engine.run();
-        (exit, bytes)
+        (golden.exit, golden.bytes)
     }
 
     mod golden_sequences {
@@ -74,36 +110,22 @@ mod tests {
 {"record_kind":"TurnCompleted","index":0,"outcome":"Stop"}
 "#;
 
-            let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Stop)],
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(100),
+                vec![ScriptedTurn::new(1, Vec::new(), Outcome::Stop)],
+                Vec::new(),
+                Vec::new(),
+                vec![None],
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [],
-                [],
-                [None],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("stop-run construction invariant: the Engine must construct")
-            });
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => {
-                    panic!("stop-run exit invariant: a clean Stop answer must return Stopped")
-                }
-            };
-
+            let state = stopped(golden.exit);
             assert_eq!(
                 state,
                 [0, 1],
                 "stop-run state invariant: the sole start-turn mutation must be retained"
             );
             assert_eq!(
-                app_trace.borrow().calls,
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -114,35 +136,34 @@ mod tests {
                 "stop-run application invariant: the complete Application script must be consumed"
             );
             assert_eq!(
-                env_trace.borrow().calls,
+                golden.env_calls,
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(100))),
                     EnvCall::TakeError {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
                 "stop-run environment invariant: the complete Environment script must be consumed"
             );
             assert!(
-                env_trace.borrow().handoffs.is_empty(),
+                golden.handoffs.is_empty(),
                 "stop-run handoff invariant: a commandless turn must hand off no Commands"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "stop-run shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                GoldenLines::split(&bytes).len(),
+                GoldenLines::split(&golden.bytes).len(),
                 3,
                 "stop-run record invariant: the Journal must contain three complete lines"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "stop-run byte invariant: the complete Journal must match the golden sequence"
             );
@@ -161,36 +182,22 @@ mod tests {
 {"record_kind":"TurnCompleted","index":0,"outcome":"Stop"}
 "#;
 
-            let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [ScriptedTurn::new(1, vec![10, 11], Outcome::Stop)],
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(100),
+                vec![ScriptedTurn::new(1, vec![10, 11], Outcome::Stop)],
+                Vec::new(),
+                vec![Ok(()), Ok(())],
+                vec![None],
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [],
-                [Ok(()), Ok(())],
-                [None],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("command-run construction invariant: the Engine must construct")
-            });
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => panic!(
-                    "command-run exit invariant: an exact-capacity command turn must return Stopped"
-                ),
-            };
-
+            let state = stopped(golden.exit);
             assert_eq!(
                 state,
                 [0, 1],
                 "command-run state invariant: the sole start-turn mutation must be retained"
             );
             assert_eq!(
-                app_trace.borrow().calls,
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -201,7 +208,7 @@ mod tests {
                 "command-run application invariant: the complete Application script must be consumed"
             );
             assert_eq!(
-                env_trace.borrow().calls,
+                golden.env_calls,
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(100))),
                     EnvCall::Dispatch {
@@ -216,29 +223,28 @@ mod tests {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
                 "command-run environment invariant: the complete Environment script must be consumed"
             );
             assert_eq!(
-                env_trace.borrow().handoffs,
+                golden.handoffs,
                 [10, 11],
                 "command-run handoff invariant: every Command must be handed off once in order"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "command-run shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                GoldenLines::split(&bytes).len(),
+                GoldenLines::split(&golden.bytes).len(),
                 5,
                 "command-run record invariant: the Journal must contain five complete lines"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "command-run byte invariant: the complete Journal must match the golden sequence"
             );
@@ -257,39 +263,25 @@ mod tests {
 {"record_kind":"TurnCompleted","index":1,"outcome":"Stop"}
 "#;
 
-            let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [
-                    ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Continue),
-                    ScriptedTurn::new(2, Vec::<u8>::new(), Outcome::Stop),
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(100),
+                vec![
+                    ScriptedTurn::new(1, Vec::new(), Outcome::Continue),
+                    ScriptedTurn::new(2, Vec::new(), Outcome::Stop),
                 ],
+                vec![Ok((7, Timestamp::from_nanos(105)))],
+                Vec::new(),
+                vec![None, None],
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [Ok((7, Timestamp::from_nanos(105)))],
-                [],
-                [None, None],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("event-run construction invariant: the Engine must construct")
-            });
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => {
-                    panic!("event-run exit invariant: a clean event-turn Stop must return Stopped")
-                }
-            };
-
+            let state = stopped(golden.exit);
             assert_eq!(
                 state,
                 [0, 1, 2],
                 "event-run state invariant: both turn mutations must be retained"
             );
             assert_eq!(
-                app_trace.borrow().calls,
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -305,7 +297,7 @@ mod tests {
                 "event-run application invariant: the complete Application script must be consumed"
             );
             assert_eq!(
-                env_trace.borrow().calls,
+                golden.env_calls,
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(100))),
                     EnvCall::TakeError {
@@ -316,28 +308,27 @@ mod tests {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
                 "event-run environment invariant: the complete Environment script must be consumed"
             );
             assert!(
-                env_trace.borrow().handoffs.is_empty(),
+                golden.handoffs.is_empty(),
                 "event-run handoff invariant: commandless turns must hand off no Commands"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "event-run shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                GoldenLines::split(&bytes).len(),
+                GoldenLines::split(&golden.bytes).len(),
                 5,
                 "event-run record invariant: the Journal must contain five complete lines"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "event-run byte invariant: the complete Journal must match the golden sequence"
             );
@@ -357,43 +348,29 @@ mod tests {
 {"record_kind":"TurnCompleted","index":2,"outcome":"Stop"}
 "#;
 
-            let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [
-                    ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Continue),
-                    ScriptedTurn::new(2, Vec::<u8>::new(), Outcome::Continue),
-                    ScriptedTurn::new(3, Vec::<u8>::new(), Outcome::Stop),
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(0),
+                vec![
+                    ScriptedTurn::new(1, Vec::new(), Outcome::Continue),
+                    ScriptedTurn::new(2, Vec::new(), Outcome::Continue),
+                    ScriptedTurn::new(3, Vec::new(), Outcome::Stop),
                 ],
-            );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(0)),
-                [
+                vec![
                     Ok((7, Timestamp::from_nanos(0))),
                     Ok((8, Timestamp::from_nanos(1))),
                 ],
-                [],
-                [None, None, None],
-                clean_shutdown(),
+                Vec::new(),
+                vec![None, None, None],
             );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("repeated-event construction invariant: the Engine must construct")
-            });
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => panic!(
-                    "repeated-event exit invariant: two clean Events ending in Stop must return Stopped"
-                ),
-            };
-
+            let state = stopped(golden.exit);
             assert_eq!(
                 state,
                 [0, 1, 2, 3],
                 "repeated-event state invariant: all three turn mutations must be retained"
             );
             assert_eq!(
-                app_trace.borrow().calls,
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -414,7 +391,7 @@ mod tests {
                 "repeated-event application invariant: each indexed turn must consume one scripted handler"
             );
             assert_eq!(
-                env_trace.borrow().calls,
+                golden.env_calls,
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(0))),
                     EnvCall::TakeError {
@@ -429,28 +406,27 @@ mod tests {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
                 "repeated-event environment invariant: both Events and all checkpoints must be consumed in order"
             );
             assert!(
-                env_trace.borrow().handoffs.is_empty(),
+                golden.handoffs.is_empty(),
                 "repeated-event handoff invariant: commandless turns must hand off no Commands"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "repeated-event shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                GoldenLines::split(&bytes).len(),
+                GoldenLines::split(&golden.bytes).len(),
                 7,
                 "repeated-event record invariant: the Journal must contain seven complete lines"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "repeated-event byte invariant: every repeated Event record must match the golden sequence"
             );
@@ -466,32 +442,22 @@ mod tests {
         #[test]
         fn each_non_fatal_answer_yields_its_required_outcome_records() {
             let (continue_exit, continue_bytes) = run_start_turn(Vec::new(), TurnOutcome::Continue);
-            match continue_exit {
-                EngineExit::Fatal {
-                    state,
-                    cause: FatalCause::Environment(fatal),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [0, 1],
-                        "Continue classification state invariant: the tested turn mutation must survive termination"
-                    );
-                    assert_eq!(
-                        fatal.operation,
-                        EnvironmentOperation::NextEvent,
-                        "Continue classification termination invariant: the fixture must end only after recording the outcome"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "Continue classification shutdown invariant: fixture termination must quiesce"
-                    );
-                }
-                _ => panic!(
-                    "Continue classification exit invariant: the fixture must reach its scripted next-event failure"
-                ),
-            }
+            let (state, fatal, quiescence) = expect_environment_fatal(continue_exit);
+            assert_eq!(
+                state,
+                [0, 1],
+                "Continue classification state invariant: the tested turn mutation must survive termination"
+            );
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::NextEvent,
+                "Continue classification termination invariant: the fixture must end only after recording the outcome"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "Continue classification shutdown invariant: fixture termination must quiesce"
+            );
             let continue_lines = GoldenLines::split(&continue_bytes);
             assert_eq!(
                 continue_lines.last().copied(),
@@ -503,12 +469,7 @@ mod tests {
             );
 
             let (stop_exit, stop_bytes) = run_start_turn(Vec::new(), TurnOutcome::Stop);
-            let stop_state = match stop_exit {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => panic!(
-                    "Stop classification exit invariant: a clean Stop fixture must return Stopped"
-                ),
-            };
+            let stop_state = stopped(stop_exit);
             assert_eq!(
                 stop_state,
                 [0, 1],
@@ -545,59 +506,40 @@ mod tests {
 
             let raw = RawValue::from_string(String::from("{\"a\":\n1}"))
                 .expect("interior-newline fixture invariant: the raw JSON must be valid");
-            let (app, app_trace) = RecordingApp::<u8, Box<RawValue>, &'static str>::new(
-                vec![0],
-                [ScriptedTurn::new(1, vec![raw], Outcome::Continue)],
+            let golden = run_golden::<u8, Box<RawValue>>(
+                Timestamp::from_nanos(100),
+                vec![ScriptedTurn::new(1, vec![raw], Outcome::Continue)],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, Box<RawValue>, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [],
-                [],
-                [],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("newline-command construction invariant: the Engine must construct")
-            });
 
-            match engine.run() {
-                EngineExit::Fatal {
-                    state,
-                    cause: FatalCause::Journal(fatal),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [0, 1],
-                        "newline-command state invariant: the handler mutation must survive encoding rejection"
-                    );
-                    assert_eq!(
-                        fatal.record_kind,
-                        RecordKind::CommandsPrepared,
-                        "newline-command record invariant: rejection must identify CommandsPrepared"
-                    );
-                    assert_eq!(
-                        fatal.outcome, None,
-                        "newline-command outcome invariant: CommandsPrepared must carry no outcome"
-                    );
-                    assert!(
-                        matches!(fatal.error, JournalError::NotAnObject),
-                        "newline-command error invariant: a literal newline must be NotAnObject"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "newline-command shutdown invariant: finalization must retain clean quiescence"
-                    );
-                }
-                _ => panic!(
-                    "newline-command exit invariant: the invalid record must be Journal-fatal"
-                ),
-            }
-
+            let (state, fatal, quiescence) = expect_journal_fatal(golden.exit);
             assert_eq!(
-                app_trace.borrow().calls,
+                state,
+                [0, 1],
+                "newline-command state invariant: the handler mutation must survive encoding rejection"
+            );
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::CommandsPrepared,
+                "newline-command record invariant: rejection must identify CommandsPrepared"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "newline-command outcome invariant: CommandsPrepared must carry no outcome"
+            );
+            assert!(
+                matches!(fatal.error, JournalError::NotAnObject),
+                "newline-command error invariant: a literal newline must be NotAnObject"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "newline-command shutdown invariant: finalization must retain clean quiescence"
+            );
+            assert_eq!(
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -608,16 +550,15 @@ mod tests {
                 "newline-command application invariant: only the start handler must run"
             );
             assert!(
-                env_trace.borrow().handoffs.is_empty(),
+                golden.handoffs.is_empty(),
                 "newline-command handoff invariant: an unrecordable batch must hand off no Commands"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "newline-command shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED_PREFIX,
                 "newline-command byte invariant: the rejected record must add nothing to the committed prefix"
             );
@@ -634,73 +575,53 @@ mod tests {
 
             let raw = RawValue::from_string(String::from("{\"a\":\n1}"))
                 .expect("newline-event fixture invariant: the raw JSON must be valid");
-            let (app, app_trace) = RecordingApp::<Box<RawValue>, u8, &'static str>::new(
-                vec![0],
-                [ScriptedTurn::new(1, Vec::new(), Outcome::Continue)],
+            let golden = run_golden::<Box<RawValue>, u8>(
+                Timestamp::from_nanos(100),
+                vec![ScriptedTurn::new(1, Vec::new(), Outcome::Continue)],
+                vec![Ok((raw, Timestamp::from_nanos(105)))],
+                Vec::new(),
+                vec![None],
             );
-            let (environment, env_trace) = ScriptedEnv::<Box<RawValue>, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [Ok((raw, Timestamp::from_nanos(105)))],
-                [],
-                [None],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("newline-event construction invariant: the Engine must construct")
-            });
 
-            match engine.run() {
-                EngineExit::Fatal {
-                    state,
-                    cause: FatalCause::Journal(fatal),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [0, 1],
-                        "newline-event state invariant: an unaccepted Event must not run another handler"
-                    );
-                    assert_eq!(
-                        fatal.record_kind,
-                        RecordKind::EventAccepted,
-                        "newline-event record invariant: rejection must identify EventAccepted"
-                    );
-                    assert_eq!(
-                        fatal.outcome, None,
-                        "newline-event outcome invariant: EventAccepted must carry no outcome"
-                    );
-                    assert!(
-                        matches!(fatal.error, JournalError::NotAnObject),
-                        "newline-event error invariant: a literal newline must be NotAnObject"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "newline-event shutdown invariant: finalization must retain clean quiescence"
-                    );
-                }
-                _ => {
-                    panic!("newline-event exit invariant: the invalid record must be Journal-fatal")
-                }
-            }
-
+            let (state, fatal, quiescence) = expect_journal_fatal(golden.exit);
             assert_eq!(
-                app_trace.borrow().calls.len(),
+                state,
+                [0, 1],
+                "newline-event state invariant: an unaccepted Event must not run another handler"
+            );
+            assert_eq!(
+                fatal.record_kind,
+                RecordKind::EventAccepted,
+                "newline-event record invariant: rejection must identify EventAccepted"
+            );
+            assert_eq!(
+                fatal.outcome, None,
+                "newline-event outcome invariant: EventAccepted must carry no outcome"
+            );
+            assert!(
+                matches!(fatal.error, JournalError::NotAnObject),
+                "newline-event error invariant: a literal newline must be NotAnObject"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "newline-event shutdown invariant: finalization must retain clean quiescence"
+            );
+            assert_eq!(
+                golden.app_calls.len(),
                 2,
                 "newline-event handler invariant: the rejected Event must not reach on_event"
             );
             assert!(
-                env_trace.borrow().handoffs.is_empty(),
+                golden.handoffs.is_empty(),
                 "newline-event handoff invariant: commandless turns must hand off nothing"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "newline-event shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED_PREFIX,
                 "newline-event byte invariant: rejection must preserve the complete committed prefix"
             );
@@ -711,7 +632,7 @@ mod tests {
         use super::*;
 
         /// Invariant: when the post-dispatch checkpoint reports an Error, every
-        /// command remains handed off and CommandsDispatched is the final record.
+        /// command remains handed off and `CommandsDispatched` is the final record.
         /// Design Doc: RUN-CHECKPOINT
         #[test]
         fn commands_dispatched_can_be_the_final_record() {
@@ -721,70 +642,50 @@ mod tests {
 {"record_kind":"CommandsDispatched","index":0}
 "#;
 
-            let (app, _) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [ScriptedTurn::new(1, vec![10], Outcome::Stop)],
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(100),
+                vec![ScriptedTurn::new(1, vec![10], Outcome::Stop)],
+                Vec::new(),
+                vec![Ok(())],
+                vec![Some("checkpoint failed")],
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [],
-                [Ok(())],
-                [Some("checkpoint failed")],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("fatal-tail construction invariant: the Engine must construct")
-            });
 
-            match engine.run() {
-                EngineExit::Fatal {
-                    state,
-                    cause: FatalCause::Environment(fatal),
-                    quiescence,
-                } => {
-                    assert_eq!(
-                        state,
-                        [0, 1],
-                        "fatal-tail state invariant: the completed handler mutation must survive the checkpoint Error"
-                    );
-                    assert_eq!(
-                        fatal.error, "checkpoint failed",
-                        "fatal-tail error invariant: the checkpoint Error must remain the cause"
-                    );
-                    assert_eq!(
-                        fatal.operation,
-                        EnvironmentOperation::Checkpoint,
-                        "fatal-tail operation invariant: the Error must be localized to the checkpoint"
-                    );
-                    assert_eq!(
-                        quiescence,
-                        Quiescence::Quiesced,
-                        "fatal-tail shutdown invariant: finalization must retain clean quiescence"
-                    );
-                }
-                _ => panic!(
-                    "fatal-tail exit invariant: a pending checkpoint Error must be Environment-fatal"
-                ),
-            }
-
+            let (state, fatal, quiescence) = expect_environment_fatal(golden.exit);
             assert_eq!(
-                env_trace.borrow().handoffs,
+                state,
+                [0, 1],
+                "fatal-tail state invariant: the completed handler mutation must survive the checkpoint Error"
+            );
+            assert_eq!(
+                fatal.error, "checkpoint failed",
+                "fatal-tail error invariant: the checkpoint Error must remain the cause"
+            );
+            assert_eq!(
+                fatal.operation,
+                EnvironmentOperation::Checkpoint,
+                "fatal-tail operation invariant: the Error must be localized to the checkpoint"
+            );
+            assert_eq!(
+                quiescence,
+                Quiescence::Quiesced,
+                "fatal-tail shutdown invariant: finalization must retain clean quiescence"
+            );
+            assert_eq!(
+                golden.handoffs,
                 [10],
                 "fatal-tail handoff invariant: the complete batch must be handed off before checkpoint"
             );
             assert_eq!(
-                env_trace.borrow().shutdown_count,
-                1,
+                golden.shutdown_count, 1,
                 "fatal-tail shutdown invariant: the Environment must be shut down exactly once"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "fatal-tail byte invariant: CommandsDispatched must be the exact final committed record"
             );
             assert_eq!(
-                GoldenLines::split(&bytes).last().copied(),
+                GoldenLines::split(&golden.bytes).last().copied(),
                 Some(b"{\"record_kind\":\"CommandsDispatched\",\"index\":0}\n".as_slice()),
                 "fatal-tail record invariant: the Journal must end at CommandsDispatched"
             );
@@ -850,42 +751,29 @@ mod tests {
             for case in cases {
                 let (exit, bytes) = run_start_turn(case.commands.to_vec(), case.answer);
                 match case.answer {
-                    TurnOutcome::Continue => match exit {
-                        EngineExit::Fatal {
-                            state,
-                            cause: FatalCause::Environment(fatal),
-                            quiescence,
-                        } => {
-                            assert_eq!(
-                                state,
-                                [0, 1],
-                                "graph-sequence state invariant: a Continue turn mutation must survive fixture termination"
-                            );
-                            assert_eq!(
-                                fatal.operation,
-                                EnvironmentOperation::NextEvent,
-                                "graph-sequence termination invariant: Continue fixtures must end after completing the tested turn"
-                            );
-                            assert_eq!(
-                                quiescence,
-                                Quiescence::Quiesced,
-                                "graph-sequence shutdown invariant: Continue fixture termination must quiesce"
-                            );
-                        }
-                        _ => panic!(
-                            "graph-sequence Continue exit invariant: the fixture must reach its next-event terminator"
-                        ),
-                    },
-                    TurnOutcome::Stop => match exit {
-                        EngineExit::Stopped { state } => assert_eq!(
+                    TurnOutcome::Continue => {
+                        let (state, fatal, quiescence) = expect_environment_fatal(exit);
+                        assert_eq!(
                             state,
                             [0, 1],
-                            "graph-sequence state invariant: a Stop turn mutation must survive completion"
-                        ),
-                        EngineExit::Fatal { .. } => panic!(
-                            "graph-sequence Stop exit invariant: a clean Stop fixture must return Stopped"
-                        ),
-                    },
+                            "graph-sequence state invariant: a Continue turn mutation must survive fixture termination"
+                        );
+                        assert_eq!(
+                            fatal.operation,
+                            EnvironmentOperation::NextEvent,
+                            "graph-sequence termination invariant: Continue fixtures must end after completing the tested turn"
+                        );
+                        assert_eq!(
+                            quiescence,
+                            Quiescence::Quiesced,
+                            "graph-sequence shutdown invariant: Continue fixture termination must quiesce"
+                        );
+                    }
+                    TurnOutcome::Stop => assert_eq!(
+                        stopped(exit),
+                        [0, 1],
+                        "graph-sequence state invariant: a Stop turn mutation must survive completion"
+                    ),
                 }
                 assert_eq!(
                     bytes.as_slice(),
@@ -910,39 +798,25 @@ mod tests {
 {"record_kind":"TurnCompleted","index":1,"outcome":"Stop"}
 "#;
 
-            let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
-                vec![0],
-                [
+            let golden = run_golden::<u8, u8>(
+                Timestamp::from_nanos(100),
+                vec![
                     ScriptedTurn::new(1, Vec::new(), Outcome::Continue),
                     ScriptedTurn::new(2, vec![10], Outcome::Stop),
                 ],
+                vec![Ok((7, Timestamp::from_nanos(105)))],
+                vec![Ok(())],
+                vec![None, None],
             );
-            let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
-                Ok(Timestamp::from_nanos(100)),
-                [Ok((7, Timestamp::from_nanos(105)))],
-                [Ok(())],
-                [None, None],
-                clean_shutdown(),
-            );
-            let mut bytes = Vec::new();
-            let engine = Engine::new(config(), app, environment, &mut bytes).unwrap_or_else(|_| {
-                panic!("event-command construction invariant: the Engine must construct")
-            });
 
-            let state = match engine.run() {
-                EngineExit::Stopped { state } => state,
-                EngineExit::Fatal { .. } => panic!(
-                    "event-command exit invariant: a clean command-emitting Event turn must return Stopped"
-                ),
-            };
-
+            let state = stopped(golden.exit);
             assert_eq!(
                 state,
                 [0, 1, 2],
                 "event-command state invariant: both turn mutations must survive completion"
             );
             assert_eq!(
-                app_trace.borrow().calls,
+                golden.app_calls,
                 [
                     AppCall::InitialState,
                     AppCall::OnStart {
@@ -958,7 +832,7 @@ mod tests {
                 "event-command application invariant: the Event handler must observe the accepted index and time"
             );
             assert_eq!(
-                env_trace.borrow().calls,
+                golden.env_calls,
                 [
                     EnvCall::Start(Ok(Timestamp::from_nanos(100))),
                     EnvCall::TakeError {
@@ -973,19 +847,19 @@ mod tests {
                         returned_error: false,
                     },
                     EnvCall::Shutdown {
-                        quiescence: TraceQuiescence::Quiesced,
+                        quiescence: Quiescence::Quiesced,
                         returned_error: false,
                     },
                 ],
                 "event-command environment invariant: acceptance, handoff, checkpoint, and shutdown must remain ordered"
             );
             assert_eq!(
-                env_trace.borrow().handoffs,
+                golden.handoffs,
                 [10],
                 "event-command handoff invariant: the Event turn's Command must be handed off exactly once"
             );
             assert_eq!(
-                bytes.as_slice(),
+                golden.bytes.as_slice(),
                 EXPECTED,
                 "event-command byte invariant: every Event-turn record must use the accepted index"
             );

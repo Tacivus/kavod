@@ -15,15 +15,9 @@ pub enum EnvCall<E, C> {
         returned_error: bool,
     },
     Shutdown {
-        quiescence: TraceQuiescence,
+        quiescence: Quiescence,
         returned_error: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TraceQuiescence {
-    Quiesced,
-    Incomplete,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -35,7 +29,7 @@ pub struct EnvTrace<E, C> {
 
 pub type SharedEnvTrace<E, C> = Rc<RefCell<EnvTrace<E, C>>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     BeforeStart,
     Turn,
@@ -44,6 +38,7 @@ enum Phase {
     StartFailed,
 }
 
+#[derive(Debug)]
 pub struct ScriptedEnv<E, C, Err> {
     start: Option<Result<Timestamp, Err>>,
     next_events: VecDeque<Result<(E, Timestamp), Err>>,
@@ -147,7 +142,7 @@ impl<E: Clone, C: Clone, Err> Environment for ScriptedEnv<E, C, Err> {
         }
         self.trace.borrow_mut().calls.push(EnvCall::Dispatch {
             command,
-            result: result.as_ref().map(|_| ()).map_err(|_| ()),
+            result: result.as_ref().copied().map_err(|_| ()),
         });
         result
     }
@@ -180,14 +175,10 @@ impl<E: Clone, C: Clone, Err> Environment for ScriptedEnv<E, C, Err> {
             ),
             "shutdown must follow successful startup and be the final Environment operation"
         );
-        let quiescence = match &self.shutdown.quiescence {
-            Quiescence::Quiesced => TraceQuiescence::Quiesced,
-            Quiescence::Incomplete => TraceQuiescence::Incomplete,
-        };
         let mut trace = self.trace.borrow_mut();
         trace.shutdown_count += 1;
         trace.calls.push(EnvCall::Shutdown {
-            quiescence,
+            quiescence: self.shutdown.quiescence,
             returned_error: self.shutdown.error.is_some(),
         });
         drop(trace);

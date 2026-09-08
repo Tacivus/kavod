@@ -316,3 +316,108 @@ Handed on, not this group's files: `FatalCause`, `EnvironmentFatal`, `EngineExit
 `BuildError`, and `CoreError` in `engine.rs` still lack `Display` and `Error`; I1 and
 journal I1 are the precedent. `EngineExit` has no `Debug` yet either; with I1 and the
 two derives taken here, nothing blocks it.
+
+## engine
+
+`src/engine/engine.rs`, `src/engine/mod.rs`, `src/lib.rs`, `tests/faults.rs`,
+`tests/golden_journal.rs`, `tests/conformance.rs`, `tests/harness_contract.rs`, and
+`tests/support/`. Landed 2026-09-08, uncommitted. Before: 3 pedantic and nursery hits in
+the production half of `engine.rs`, 37 in its tests, 3 across the suites, 2 in
+`support/`. After: 0 everywhere. Gates: all suites green (209 lib, the 36 engine tests
+intact; 20 in `harness_contract`, two more by I17), `clippy -D warnings` clean, `cargo
+fmt --check` clean with no hunk outside the group's files. The `faults.rs` matrices
+asserted every call list unchanged; no record byte, call, exit, or precedence moved.
+Net: 1,497 lines in, 1,812 out. The uncommitted `faults.rs` hunk was treated as part of
+the file and touched only by I3's `.expect` and I19's rename.
+
+- **I1 — `Display` and `Error` with `source()` on `BuildError`, `FatalCause`,
+  `EnvironmentFatal`, `CoreError`; `Display` on `EnvironmentOperation`.** Journal I1
+  and record I1 were the precedent and handed these on. Each `Display` names its own
+  level and leaves the payload to `source()`; the bounds sit on the `Error` impls only,
+  so the suites' `&'static str` payloads still build. API additive. Landed.
+- **I2 — `Debug, Clone, Copy, PartialEq, Eq, Hash` on `EngineConfig`.** `Copy` also
+  retired the `needless_pass_by_value` on `new`'s `config`. API additive. Landed.
+- **I3 — `Debug, Clone, PartialEq, Eq` on `BuildError`.** Twenty-one
+  `match … Err(_) => panic!` and `unwrap_or_else(|_| panic!(..))` sites across the
+  module and the suites are `.expect(..)`. API additive. Landed.
+- **I4 — `Debug` on `Engine` and `EngineExit`; `#[must_use]` on `EngineExit`.** The
+  `ShutdownReport` precedent; the `Engine` derive bounds only its impl. API additive.
+  Landed.
+- **I5 — `Clone, Copy, Hash` on `EnvironmentOperation` and `CoreError`; `Clone,
+  PartialEq, Eq, Hash` on `EnvironmentFatal`.** API additive. Landed.
+- **I6 — `turn`'s assertion names `RUN-GRAMMAR`.** The engine's share of the ledger's
+  G6, the last file with an unnamed site; the two `turn_event_invariant` tests check
+  only that it panics. Landed.
+- **I7 — `turn` without the scoping block.** NLL ends `context`'s borrow at its last
+  use; the tuple existed only to escape the block. Landed.
+- **I8 — the `E: Environment<…>` bound off the `Engine` struct.** Only the impl needs
+  it, as the API block already has it. API loosens. Landed.
+- **I9 — `const fn` on `FatalCause::environment`.** Landed.
+- **I10 — `allow` → `expect` in `mod.rs` and on `effects`; `# Errors` on `Engine::new`;
+  `lib.rs`'s `allow(unused_imports)` on `Latch` also `expect`.** All three verified
+  fulfilled under `-D warnings`; the `lib.rs` one fails the day Wiring uses `Latch`,
+  which is the point. The environment round had kept it `allow` on its own heads-up;
+  taken here at Devon's word. Landed.
+- **I11 — tests: one `ScriptedApplication`, `ScriptedEnvironment`, `Call`, and
+  drop-counted `ScriptedError` for the module.** Five Application fakes, five
+  Environment fakes, three call enums with one variant set, and three drop-tracked
+  Errors became one of each behind `scripted(turns, start, events, report)`; `run`,
+  `run_loop`, `stop_at_start`, `one_turn`, and `inputs` are thin wrappers. `RunState {
+  value }` became `Vec<u8>` State, so `41 → 42` reads `[] → [1]`; the `bool` drop flags
+  became one `usize` counter, and `the_shutdown_error_never_replaces_the_fixed_cause`
+  asserts `1` with the cause in hand, then `2`. Every test and assertion kept its
+  value; `count() == 0` on `Shutdown` is `!contains`. Landed.
+- **I12 — tests: `.expect` and `let … else` at the wildcard-`Err` sites.** The twelve
+  `match_wild_err_arm`, eight `option_if_let_else`, and six `manual_let_else` hits; the
+  `Debug` on the fixture Error came with I11. Landed.
+- **I13 — tests: `assert_continue` and `assert_stop` take `&TurnResult`, one
+  `assert!(matches!(..))` each.** Landed.
+- **I14 — tests: aliases replace the two `type_complexity` allowances.** `Calls`,
+  `Drops`, `TestExit`, `TestCause`, `TurnResult`, `TestEngine`; the lint stopped
+  firing, so no `expect` remains. Landed.
+- **I15 — the remaining pedantic hits in the group's tests.** Seven `doc_markdown`
+  backticks and one `bool_to_int_with_if`; a `needless_pass_by_value` on the new
+  `run(.., events, ..)` surfaced after I11 and `events` is a slice. Landed.
+- **I16 — `golden_journal.rs`: `run_golden(start, turns, next_events, dispatches,
+  checkpoints) -> Golden<E, C>`.** Eight identical setups and six `Stopped` matches
+  became one call each; `run_start_turn` rides on it; the two `RawValue` tests fit the
+  generic form. The `too_many_lines` hit went with the setup. Landed.
+- **I17 — `support/exits.rs`: `stopped` and the four `expect_*` helpers, generic over
+  `EngineExit<S, AE, EE>`.** Moved out of `faults.rs`; `golden_journal.rs` lost six
+  hand-written exit matches and `harness_contract.rs` two. `harness_contract.rs` is the
+  suite that pins the fixtures, so it gained `exit_helpers`, two tests that pin each
+  helper's payload and rejection; without them three helpers are dead there, and
+  `dead_code` and `unused_imports` trade places under `expect` in a way that cannot be
+  made stable. Landed.
+- **I18 — `faults.rs`: one `observe(..)` behind the three fixture constructors.** The
+  startup test's hand-written Environment-fatal match uses `expect_environment_fatal`
+  too. The uncommitted later-turn dispatch test needs a `Vec` sink and stays as written.
+  Landed.
+- **I19 — `TraceQuiescence` deleted; `EnvCall::Shutdown` carries `Quiescence`.** The
+  environment round's hand-on; fourteen sites renamed. Landed.
+- **I20 — `conformance.rs`: `if let … else` at the sink split; `#[expect(too_many_lines)]`
+  on `script`.** Landed.
+- **I21 — `support/`: `.copied()` at the two unit maps; `Debug` on the seven fixture
+  types.** Landed.
+- **I22 — `allow(dead_code, unused_imports)` → `expect` on `mod support` in `faults.rs`,
+  `golden_journal.rs`, `conformance.rs`.** Verified fulfilled in each. `harness_contract.rs`
+  carries none: after I17 it uses every export, and its glob import became the explicit
+  list the other suites use. Landed.
+
+Design notes, not proposals:
+
+- I6's assertion is the design's "asserted" tier for a pairing the types could make
+  unrepresentable: `accept_event` hands back `(TurnOpen, Event)` as two values the
+  Engine must keep together. A `TurnOpen` carrying its accepted Event, consumed by
+  `turn`, would delete the assertion. That is `record.rs`'s shape, reviewed and landed;
+  recorded, not proposed.
+- After I5 the API block's `#[derive(Debug, PartialEq, Eq)]` on `EnvironmentOperation`
+  and `CoreError` trails the code, as the record round noted for `TurnOutcome`. Export
+  audit's sync.
+- `EngineExit` and `FatalCause` cannot derive `PartialEq`: `JournalError` holds
+  `io::Error` and `serde_json::Error`. The conformance suite's `ExitShape` projection
+  exists for that and stays.
+
+Incident: a scratch-probe command's `cd` failed on a mistyped path and its edit landed
+on the real `engine.rs` before the report was written; it was reverted with `git
+checkout` at once and the tree verified against `git status` before any approved edit.

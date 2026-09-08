@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 
+#[derive(Debug)]
 pub enum SinkStep {
     Write(io::Result<usize>),
     Flush(io::Result<()>),
@@ -42,6 +43,7 @@ impl SinkTrace {
 
 pub type SharedSinkTrace = Rc<RefCell<SinkTrace>>;
 
+#[derive(Debug)]
 pub struct ScriptedSink {
     steps: VecDeque<SinkStep>,
     trace: SharedSinkTrace,
@@ -94,7 +96,7 @@ impl io::Write for ScriptedSink {
             SinkStep::Flush(result) => result,
             SinkStep::Write(_) => panic!("a sink flush call must consume a flush result"),
         };
-        let traced_result = result.as_ref().map(|_| ()).map_err(|_| ());
+        let traced_result = result.as_ref().copied().map_err(|_| ());
         let mut trace = self.trace.borrow_mut();
         if result.is_ok() {
             trace.committed_len = trace.accepted_bytes.len();
