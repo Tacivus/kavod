@@ -4,12 +4,12 @@ mod support;
 #[cfg(test)]
 mod tests {
     use super::support::{
-        AppCall, EnvCall, RecordingApp, ScriptedAnswer, ScriptedEnv, ScriptedSink, ScriptedTurn,
-        SinkStep, TraceQuiescence,
+        AppCall, EnvCall, RecordingApp, ScriptedEnv, ScriptedSink, ScriptedTurn, SinkStep,
+        TraceQuiescence,
     };
     use kavod::{
         CoreError, Engine, EngineConfig, EngineExit, EnvironmentFatal, EnvironmentOperation,
-        FatalCause, JournalError, JournalFatal, Quiescence, RecordKind, ShutdownReport,
+        FatalCause, JournalError, JournalFatal, Outcome, Quiescence, RecordKind, ShutdownReport,
         SinkOperation, Timestamp, TurnOutcome,
     };
     use std::io;
@@ -241,8 +241,8 @@ mod tests {
         let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
             vec![0],
             [
-                ScriptedTurn::new(1, COMMANDS.to_vec(), ScriptedAnswer::Continue),
-                ScriptedTurn::new(2, Vec::new(), ScriptedAnswer::Stop),
+                ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
+                ScriptedTurn::new(2, Vec::new(), Outcome::Stop),
             ],
         );
         let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
@@ -377,11 +377,7 @@ mod tests {
         };
 
         run_scripted_scenario(
-            vec![ScriptedTurn::new(
-                1,
-                COMMANDS.to_vec(),
-                ScriptedAnswer::Continue,
-            )],
+            vec![ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue)],
             next_events,
             dispatches,
             checkpoints,
@@ -393,8 +389,8 @@ mod tests {
     fn run_shutdown_fault(shutdown: ShutdownReport<&'static str>) -> RunObservation {
         run_scripted_scenario(
             vec![
-                ScriptedTurn::new(1, COMMANDS.to_vec(), ScriptedAnswer::Continue),
-                ScriptedTurn::new(2, Vec::new(), ScriptedAnswer::Stop),
+                ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
+                ScriptedTurn::new(2, Vec::new(), Outcome::Stop),
             ],
             vec![Ok((7, Timestamp::from_nanos(105)))],
             vec![Ok(()), Ok(())],
@@ -406,11 +402,7 @@ mod tests {
 
     fn run_time_regression() -> RunObservation {
         run_scripted_scenario(
-            vec![ScriptedTurn::new(
-                1,
-                COMMANDS.to_vec(),
-                ScriptedAnswer::Continue,
-            )],
+            vec![ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue)],
             vec![Ok((7, Timestamp::from_nanos(99)))],
             vec![Ok(()), Ok(())],
             vec![None],
@@ -426,7 +418,7 @@ mod tests {
         if on_event {
             run_scripted_scenario(
                 vec![
-                    ScriptedTurn::new(1, COMMANDS.to_vec(), ScriptedAnswer::Continue),
+                    ScriptedTurn::new(1, COMMANDS.to_vec(), Outcome::Continue),
                     failing_turn,
                 ],
                 vec![Ok((7, Timestamp::from_nanos(105)))],
@@ -453,7 +445,7 @@ mod tests {
             ScriptedTurn::new(
                 if on_event { 2 } else { 1 },
                 vec![20],
-                ScriptedAnswer::Fatal("application failed"),
+                Outcome::Fatal("application failed"),
             ),
         )
     }
@@ -464,7 +456,7 @@ mod tests {
             ScriptedTurn::new(
                 if on_event { 2 } else { 1 },
                 vec![20, 21, 22],
-                ScriptedAnswer::Continue,
+                Outcome::Continue,
             ),
         )
     }

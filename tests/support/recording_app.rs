@@ -25,20 +25,14 @@ pub struct AppTrace<E> {
 
 pub type SharedAppTrace<E> = Rc<RefCell<AppTrace<E>>>;
 
-pub enum ScriptedAnswer<Err> {
-    Continue,
-    Stop,
-    Fatal(Err),
-}
-
 pub struct ScriptedTurn<C, Err> {
     mutation: u8,
     commands: Vec<C>,
-    answer: ScriptedAnswer<Err>,
+    answer: Outcome<Err>,
 }
 
 impl<C, Err> ScriptedTurn<C, Err> {
-    pub fn new(mutation: u8, commands: Vec<C>, answer: ScriptedAnswer<Err>) -> Self {
+    pub const fn new(mutation: u8, commands: Vec<C>, answer: Outcome<Err>) -> Self {
         Self {
             mutation,
             commands,
@@ -79,11 +73,7 @@ impl<E, C, Err> RecordingApp<E, C, Err> {
         for command in turn.commands {
             context.emit(command);
         }
-        match turn.answer {
-            ScriptedAnswer::Continue => Outcome::Continue,
-            ScriptedAnswer::Stop => Outcome::Stop,
-            ScriptedAnswer::Fatal(error) => Outcome::Fatal(error),
-        }
+        turn.answer
     }
 }
 

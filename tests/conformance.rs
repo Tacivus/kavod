@@ -4,12 +4,12 @@ mod support;
 #[cfg(test)]
 mod tests {
     use super::support::{
-        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedAnswer, ScriptedEnv, ScriptedSink,
-        ScriptedTurn, SinkStep,
+        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedEnv, ScriptedSink, ScriptedTurn,
+        SinkStep,
     };
     use kavod::{
         CoreError, Engine, EngineConfig, EngineExit, EnvironmentOperation, FatalCause,
-        JournalError, Quiescence, RecordKind, ShutdownReport, SinkOperation, Timestamp,
+        JournalError, Outcome, Quiescence, RecordKind, ShutdownReport, SinkOperation, Timestamp,
         TurnOutcome,
     };
     use serde_json::Value;
@@ -100,20 +100,20 @@ mod tests {
                 Self::EmptyStop => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Stop));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Stop));
                     script.checkpoints.push(None);
                 }
                 Self::OneCommandStop => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![10], ScriptedAnswer::Stop));
+                        .push(ScriptedTurn::new(1, vec![10], Outcome::Stop));
                     script.dispatches.push(Ok(()));
                     script.checkpoints.push(None);
                 }
                 Self::CapacityEventStop => {
                     script.turns.extend([
-                        ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Continue),
-                        ScriptedTurn::new(2, vec![], ScriptedAnswer::Stop),
+                        ScriptedTurn::new(1, vec![10, 11], Outcome::Continue),
+                        ScriptedTurn::new(2, vec![], Outcome::Stop),
                     ]);
                     script.next_events.push(Ok((7, Timestamp::from_nanos(105))));
                     script.dispatches.extend([Ok(()), Ok(())]);
@@ -123,20 +123,20 @@ mod tests {
                     script.turns.push(ScriptedTurn::new(
                         1,
                         vec![10],
-                        ScriptedAnswer::Fatal("application failure"),
+                        Outcome::Fatal("application failure"),
                     ));
                 }
                 Self::StartFailure => script.start = Err("start failure"),
                 Self::FirstDispatchFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![10, 11], Outcome::Continue));
                     script.dispatches.push(Err("first dispatch failure"));
                 }
                 Self::LaterDispatchFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![10, 11], Outcome::Continue));
                     script
                         .dispatches
                         .extend([Ok(()), Err("later dispatch failure")]);
@@ -144,20 +144,20 @@ mod tests {
                 Self::CheckpointFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Continue));
                     script.checkpoints.push(Some("checkpoint failure"));
                 }
                 Self::NextEventFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Continue));
                     script.next_events.push(Err("next event failure"));
                     script.checkpoints.push(None);
                 }
                 Self::ShutdownFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Stop));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Stop));
                     script.checkpoints.push(None);
                     script.shutdown = ShutdownReport {
                         quiescence: Quiescence::Incomplete,
@@ -168,7 +168,7 @@ mod tests {
                 Self::JournalSinkWriteFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![10, 11], Outcome::Continue));
                     script.sink_steps = Some(vec![
                         SinkStep::Write(Ok(RUN_STARTED.len())),
                         SinkStep::Flush(Ok(())),
@@ -181,7 +181,7 @@ mod tests {
                 Self::JournalSinkFlushFailure => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![10, 11], Outcome::Continue));
                     script.sink_steps = Some(vec![
                         SinkStep::Write(Ok(RUN_STARTED.len())),
                         SinkStep::Flush(Ok(())),
@@ -195,21 +195,19 @@ mod tests {
                 Self::TimeRegression => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Continue));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Continue));
                     script.next_events.push(Ok((7, Timestamp::from_nanos(99))));
                     script.checkpoints.push(None);
                 }
                 Self::CommandOverflow => {
-                    script.turns.push(ScriptedTurn::new(
-                        1,
-                        vec![10, 11, 12],
-                        ScriptedAnswer::Continue,
-                    ));
+                    script
+                        .turns
+                        .push(ScriptedTurn::new(1, vec![10, 11, 12], Outcome::Continue));
                 }
                 Self::IncompleteShutdown => {
                     script
                         .turns
-                        .push(ScriptedTurn::new(1, vec![], ScriptedAnswer::Stop));
+                        .push(ScriptedTurn::new(1, vec![], Outcome::Stop));
                     script.checkpoints.push(None);
                     script.shutdown = ShutdownReport {
                         quiescence: Quiescence::Incomplete,

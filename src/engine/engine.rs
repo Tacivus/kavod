@@ -279,13 +279,6 @@ mod tests {
         },
     }
 
-    #[derive(Clone, Copy)]
-    enum ScriptedAnswer {
-        Continue,
-        Stop,
-        Fatal,
-    }
-
     struct ScriptedError {
         label: &'static str,
         dropped: Rc<Cell<bool>>,
@@ -299,7 +292,7 @@ mod tests {
 
     struct TurnApplication {
         calls: Rc<RefCell<Vec<HandlerCall>>>,
-        answer: ScriptedAnswer,
+        answer: Outcome<()>,
         emissions: usize,
         fatal_dropped: Rc<Cell<bool>>,
     }
@@ -319,9 +312,9 @@ mod tests {
             }
 
             match self.answer {
-                ScriptedAnswer::Continue => Outcome::Continue,
-                ScriptedAnswer::Stop => Outcome::Stop,
-                ScriptedAnswer::Fatal => Outcome::Fatal(ScriptedError {
+                Outcome::Continue => Outcome::Continue,
+                Outcome::Stop => Outcome::Stop,
+                Outcome::Fatal(()) => Outcome::Fatal(ScriptedError {
                     label: "scripted application fatal",
                     dropped: Rc::clone(&self.fatal_dropped),
                 }),
@@ -407,7 +400,7 @@ mod tests {
         reason = "the fixture returns the Application with both shared observation handles"
     )]
     fn turn_application(
-        answer: ScriptedAnswer,
+        answer: Outcome<()>,
         emissions: usize,
     ) -> (
         TurnApplication,
@@ -741,7 +734,7 @@ mod tests {
         /// Design Doc: the Phases table, by name
         #[test]
         fn index_zero_calls_on_start_once() {
-            let (app, calls, _) = turn_application(ScriptedAnswer::Continue, 0);
+            let (app, calls, _) = turn_application(Outcome::Continue, 0);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("a start-turn test must reserve one command");
@@ -775,7 +768,7 @@ mod tests {
         /// Design Doc: the Phases table, by name
         #[test]
         fn a_later_index_calls_on_event_once() {
-            let (app, calls, _) = turn_application(ScriptedAnswer::Stop, 0);
+            let (app, calls, _) = turn_application(Outcome::Stop, 0);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("an event-turn test must reserve one command");
@@ -814,11 +807,7 @@ mod tests {
         /// Design Doc: APP-OVERFLOW, A4
         #[test]
         fn overflow_outranks_the_returned_outcome() {
-            for answer in [
-                ScriptedAnswer::Continue,
-                ScriptedAnswer::Stop,
-                ScriptedAnswer::Fatal,
-            ] {
+            for answer in [Outcome::Continue, Outcome::Stop, Outcome::Fatal(())] {
                 let (app, calls, fatal_dropped) = turn_application(answer, 2);
                 let mut state = 0;
                 let mut batch =
@@ -863,7 +852,7 @@ mod tests {
                 );
                 assert_eq!(
                     fatal_dropped.get(),
-                    matches!(answer, ScriptedAnswer::Fatal),
+                    matches!(answer, Outcome::Fatal(())),
                     "an Application Fatal payload must be discarded when command overflow outranks it"
                 );
             }
@@ -873,7 +862,7 @@ mod tests {
         /// precedence and batch-discard rules as overflow during the start turn.
         #[test]
         fn later_index_overflow_outranks_a_fatal_outcome() {
-            let (app, calls, fatal_dropped) = turn_application(ScriptedAnswer::Fatal, 2);
+            let (app, calls, fatal_dropped) = turn_application(Outcome::Fatal(()), 2);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("an event-overflow test must reserve one command");
@@ -926,7 +915,7 @@ mod tests {
         /// Design Doc: APP-STATE
         #[test]
         fn state_mutation_and_the_fatal_payload_both_stand() {
-            let (app, calls, fatal_dropped) = turn_application(ScriptedAnswer::Fatal, 1);
+            let (app, calls, fatal_dropped) = turn_application(Outcome::Fatal(()), 1);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(2).expect("an application-fatal test must reserve commands");
@@ -980,7 +969,7 @@ mod tests {
         /// and Error payload while discarding that event turn's staged commands.
         #[test]
         fn later_index_state_mutation_and_fatal_payload_both_stand() {
-            let (app, calls, fatal_dropped) = turn_application(ScriptedAnswer::Fatal, 1);
+            let (app, calls, fatal_dropped) = turn_application(Outcome::Fatal(()), 1);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(2).expect("an event-handler fatal test must reserve commands");
@@ -1041,7 +1030,7 @@ mod tests {
         /// batch and retains only commands emitted by the current handler.
         #[test]
         fn fresh_turn_replaces_stale_batch_at_exact_capacity() {
-            let (app, _, _) = turn_application(ScriptedAnswer::Continue, 1);
+            let (app, _, _) = turn_application(Outcome::Continue, 1);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("a batch-reuse test must reserve one command");
@@ -1080,7 +1069,7 @@ mod tests {
         /// invalid input is rejected before either handler runs.
         #[test]
         fn start_turn_with_event_panics_before_handler() {
-            let (app, calls, _) = turn_application(ScriptedAnswer::Continue, 0);
+            let (app, calls, _) = turn_application(Outcome::Continue, 0);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("an event-invariant test must reserve one command");
@@ -1115,7 +1104,7 @@ mod tests {
         /// Event, and missing input is rejected before either handler runs.
         #[test]
         fn later_turn_without_event_panics_before_handler() {
-            let (app, calls, _) = turn_application(ScriptedAnswer::Continue, 0);
+            let (app, calls, _) = turn_application(Outcome::Continue, 0);
             let mut state = 0;
             let mut batch =
                 BoundedBuffer::new(1).expect("an event-invariant test must reserve one command");

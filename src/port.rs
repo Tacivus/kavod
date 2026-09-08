@@ -5,9 +5,14 @@ pub trait PortContract {
     type Command: Serialize;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Never {}
 
 impl Serialize for Never {
+    #[expect(
+        clippy::uninhabited_references,
+        reason = "the Port Mechanism names `match *self {}`; `match self {}` is non-exhaustive over `&Never`"
+    )]
     fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
         match *self {}
     }
@@ -73,7 +78,7 @@ mod tests {
         Secondary(<Duplex as PortContract>::Command),
     }
 
-    #[allow(
+    #[expect(
         dead_code,
         reason = "the generated command variant is uninhabited by design"
     )]
@@ -89,7 +94,7 @@ mod tests {
 
         crate::ports!(
             pub(super) enum ReceiveOnly<Event = ReceiveOnlyEvent, Command = ReceiveOnlyCommand> {
-                Feed(EventOnly)
+                Feed(EventOnly),
             }
         );
     }
@@ -132,17 +137,25 @@ mod tests {
             );
             assert_eq!(
                 serialized(&ReusedEvent::Secondary(EventPayload { event_value: 2 })),
-                serialized(&HandWrittenEvent::Secondary(EventPayload { event_value: 2 })),
+                serialized(&HandWrittenEvent::Secondary(EventPayload {
+                    event_value: 2
+                })),
                 "a generated secondary Event variant must match its hand-written equivalent"
             );
             assert_eq!(
                 serialized(&ReusedCommand::Primary(CommandPayload { command_code: 3 })),
-                serialized(&HandWrittenCommand::Primary(CommandPayload { command_code: 3 })),
+                serialized(&HandWrittenCommand::Primary(CommandPayload {
+                    command_code: 3
+                })),
                 "a generated primary Command variant must match its hand-written equivalent"
             );
             assert_eq!(
-                serialized(&ReusedCommand::Secondary(CommandPayload { command_code: 4 })),
-                serialized(&HandWrittenCommand::Secondary(CommandPayload { command_code: 4 })),
+                serialized(&ReusedCommand::Secondary(CommandPayload {
+                    command_code: 4
+                })),
+                serialized(&HandWrittenCommand::Secondary(CommandPayload {
+                    command_code: 4
+                })),
                 "a generated secondary Command variant must match its hand-written equivalent"
             );
         }
@@ -152,7 +165,7 @@ mod tests {
         /// Design Doc: PORT-SUMS
         #[test]
         fn contract_bound_at_two_slots_yields_two_variants() {
-            fn slot(event: ReusedEvent) -> &'static str {
+            fn slot(event: &ReusedEvent) -> &'static str {
                 match event {
                     ReusedEvent::Primary(_) => "primary",
                     ReusedEvent::Secondary(_) => "secondary",
@@ -160,12 +173,12 @@ mod tests {
             }
 
             assert_eq!(
-                slot(ReusedEvent::Primary(EventPayload { event_value: 0 })),
+                slot(&ReusedEvent::Primary(EventPayload { event_value: 0 })),
                 "primary",
                 "the first binding of a reused Contract must retain its own variant"
             );
             assert_eq!(
-                slot(ReusedEvent::Secondary(EventPayload { event_value: 0 })),
+                slot(&ReusedEvent::Secondary(EventPayload { event_value: 0 })),
                 "secondary",
                 "the second binding of a reused Contract must retain its own variant"
             );
@@ -175,27 +188,29 @@ mod tests {
         /// distinct associated payload types without crossing them.
         #[test]
         fn event_and_command_associated_payloads_remain_distinct() {
-            fn event_value(event: ReusedEvent) -> u64 {
+            fn event_value(event: &ReusedEvent) -> u64 {
                 match event {
                     ReusedEvent::Primary(EventPayload { event_value })
-                    | ReusedEvent::Secondary(EventPayload { event_value }) => event_value,
+                    | ReusedEvent::Secondary(EventPayload { event_value }) => *event_value,
                 }
             }
 
-            fn command_code(command: ReusedCommand) -> u64 {
+            fn command_code(command: &ReusedCommand) -> u64 {
                 match command {
                     ReusedCommand::Primary(CommandPayload { command_code })
-                    | ReusedCommand::Secondary(CommandPayload { command_code }) => command_code,
+                    | ReusedCommand::Secondary(CommandPayload { command_code }) => *command_code,
                 }
             }
 
             assert_eq!(
-                event_value(ReusedEvent::Primary(EventPayload { event_value: 11 })),
+                event_value(&ReusedEvent::Primary(EventPayload { event_value: 11 })),
                 11,
                 "an Event variant must contain the Contract's Event payload"
             );
             assert_eq!(
-                command_code(ReusedCommand::Secondary(CommandPayload { command_code: 13 })),
+                command_code(&ReusedCommand::Secondary(CommandPayload {
+                    command_code: 13
+                })),
                 13,
                 "a Command variant must contain the Contract's Command payload"
             );
@@ -233,13 +248,44 @@ mod tests {
         /// Design Doc: Never, by name
         #[test]
         fn never_command_arm_is_discharged_by_match() {
+            #[expect(
+                clippy::needless_pass_by_value,
+                reason = "a Never arm is discharged by value; through a reference it is uninhabited_references"
+            )]
             fn fan_out(command: ReceiveOnlyCommand) {
                 match command {
                     ReceiveOnlyCommand::Feed(never) => match never {},
                 }
             }
 
-            let _exhaustive_fan_out: fn(ReceiveOnlyCommand) = fan_out;
+            let _: fn(ReceiveOnlyCommand) = fan_out;
+        }
+    }
+
+    mod never_derives {
+        use super::*;
+        use std::fmt::Debug;
+        use std::hash::Hash;
+
+        #[expect(
+            dead_code,
+            reason = "the absent direction's variant is uninhabited by design"
+        )]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        enum DerivedReceiveOnlyCommand {
+            Feed(Never),
+        }
+
+        /// Invariant: a hand-written sum whose absent direction carries the
+        /// uninhabited type can add the standard derives alongside Serialize.
+        #[test]
+        fn a_hand_written_sum_over_never_accepts_the_standard_derives() {
+            fn carries_standard_derives<
+                T: Debug + Clone + Copy + PartialEq + Eq + PartialOrd + Ord + Hash,
+            >() {
+            }
+
+            carries_standard_derives::<DerivedReceiveOnlyCommand>();
         }
     }
 }

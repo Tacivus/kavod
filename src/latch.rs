@@ -1,11 +1,17 @@
 use crate::{Quiescence, ShutdownReport};
 use std::mem;
 
+#[derive(Debug)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "crate-private reach is deliberate until Wiring settles the export"
+)]
 #[allow(dead_code, reason = "used by later Environment build steps")]
 pub(crate) struct Latch<E> {
     state: State<E>,
 }
 
+#[derive(Debug)]
 enum State<E> {
     Empty,
     Pending(E),
@@ -14,19 +20,30 @@ enum State<E> {
 }
 
 #[allow(dead_code, reason = "used by later Environment build steps")]
+impl<E> Default for Latch<E> {
+    fn default() -> Self {
+        Self {
+            state: State::Empty,
+        }
+    }
+}
+
+#[allow(dead_code, reason = "used by later Environment build steps")]
 impl<E> Latch<E> {
-    pub(crate) fn new() -> Self {
+    #[must_use]
+    pub(crate) const fn new() -> Self {
         Self {
             state: State::Empty,
         }
     }
 
     pub(crate) fn publish(&mut self, error: E) {
-        if let State::Empty = &self.state {
+        if matches!(self.state, State::Empty) {
             self.state = State::Pending(error);
         }
     }
 
+    #[must_use = "the first Error leaves the latch exactly once"]
     pub(crate) fn take(&mut self) -> Option<E> {
         match mem::replace(&mut self.state, State::Reported) {
             State::Pending(error) => Some(error),
@@ -42,6 +59,7 @@ impl<E> Latch<E> {
         }
     }
 
+    #[must_use = "the first Error leaves the latch exactly once"]
     pub(crate) fn close(&mut self) -> Option<E> {
         match mem::replace(&mut self.state, State::Closed) {
             State::Pending(error) => Some(error),
@@ -49,10 +67,12 @@ impl<E> Latch<E> {
         }
     }
 
-    pub(crate) fn is_pending(&self) -> bool {
+    #[must_use]
+    pub(crate) const fn is_pending(&self) -> bool {
         matches!(&self.state, State::Pending(_))
     }
 
+    #[must_use = "one of the two Errors is the operation's result"]
     pub(crate) fn resolve_local_error(&mut self, local_error: E) -> E {
         self.take().unwrap_or(local_error)
     }
@@ -218,26 +238,29 @@ mod tests {
             }
         }
 
+        fn tracked(name: &'static str) -> (TrackedError, Rc<Cell<usize>>) {
+            let drops = Rc::new(Cell::new(0));
+            let error = TrackedError {
+                name,
+                drops: Rc::clone(&drops),
+            };
+            (error, drops)
+        }
+
         /// Invariant: a pending published error is returned instead of a local
         /// failure, permanently reports the latch, and cannot be replaced by a
         /// later publication.
         /// Design Doc: ENV-LATCH, A4
         #[test]
         fn a_pending_error_wins_and_discards_the_local_error() {
-            let pending_drops = Rc::new(Cell::new(0));
-            let local_drops = Rc::new(Cell::new(0));
-            let later_drops = Rc::new(Cell::new(0));
-            let second_local_drops = Rc::new(Cell::new(0));
+            let (pending, pending_drops) = tracked("pending");
+            let (local, local_drops) = tracked("local");
+            let (later, later_drops) = tracked("later");
+            let (second_local, second_local_drops) = tracked("second local");
             let mut latch = Latch::new();
-            latch.publish(TrackedError {
-                name: "pending",
-                drops: Rc::clone(&pending_drops),
-            });
+            latch.publish(pending);
 
-            let winner = latch.resolve_local_error(TrackedError {
-                name: "local",
-                drops: Rc::clone(&local_drops),
-            });
+            let winner = latch.resolve_local_error(local);
 
             assert_eq!(
                 winner.name, "pending",
@@ -258,10 +281,7 @@ mod tests {
                 "returning the pending error must permanently report the latch"
             );
 
-            latch.publish(TrackedError {
-                name: "later",
-                drops: Rc::clone(&later_drops),
-            });
+            latch.publish(later);
 
             assert_eq!(
                 later_drops.get(),
@@ -273,10 +293,7 @@ mod tests {
                 "a publication after reporting must not make the latch pending again"
             );
 
-            let second_winner = latch.resolve_local_error(TrackedError {
-                name: "second local",
-                drops: Rc::clone(&second_local_drops),
-            });
+            let second_winner = latch.resolve_local_error(second_local);
 
             assert_eq!(
                 second_winner.name, "second local",
@@ -313,19 +330,13 @@ mod tests {
         /// Design Doc: ENV-LATCH
         #[test]
         fn a_local_error_leaves_the_latch_open_for_a_later_publication() {
-            let local_drops = Rc::new(Cell::new(0));
-            let later_drops = Rc::new(Cell::new(0));
-            let discarded_drops = Rc::new(Cell::new(0));
+            let (local, local_drops) = tracked("local");
+            let (later, later_drops) = tracked("later");
+            let (discarded, discarded_drops) = tracked("discarded");
             let mut latch = Latch::new();
 
-            let winner = latch.resolve_local_error(TrackedError {
-                name: "local",
-                drops: Rc::clone(&local_drops),
-            });
-            latch.publish(TrackedError {
-                name: "later",
-                drops: Rc::clone(&later_drops),
-            });
+            let winner = latch.resolve_local_error(local);
+            latch.publish(later);
 
             assert_eq!(
                 winner.name, "local",
@@ -355,10 +366,7 @@ mod tests {
                 "the reported error must remain owned by the report's receiver"
             );
 
-            latch.publish(TrackedError {
-                name: "discarded",
-                drops: Rc::clone(&discarded_drops),
-            });
+            latch.publish(discarded);
             assert_eq!(
                 discarded_drops.get(),
                 1,

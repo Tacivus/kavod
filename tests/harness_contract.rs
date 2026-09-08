@@ -4,8 +4,8 @@ mod support;
 mod tests {
     use super::support::*;
     use kavod::{
-        Engine, EngineConfig, EngineExit, Environment, FatalCause, Quiescence, ShutdownReport,
-        Timestamp,
+        Engine, EngineConfig, EngineExit, Environment, FatalCause, Outcome, Quiescence,
+        ShutdownReport, Timestamp,
     };
     use std::io::{self, Write};
     use std::num::NonZeroUsize;
@@ -584,8 +584,8 @@ mod tests {
         #[test]
         fn records_handlers_mutates_state_and_emits_in_order() {
             let turns = [
-                ScriptedTurn::new(1, vec![10], ScriptedAnswer::Continue),
-                ScriptedTurn::new(2, vec![20, 21], ScriptedAnswer::Stop),
+                ScriptedTurn::new(1, vec![10], Outcome::Continue),
+                ScriptedTurn::new(2, vec![20, 21], Outcome::Stop),
             ];
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(vec![0], turns);
             let (environment, env_trace) = ScriptedEnv::new(
@@ -641,7 +641,7 @@ mod tests {
             let turns = [ScriptedTurn::new(
                 9,
                 vec![30],
-                ScriptedAnswer::Fatal("application failed"),
+                Outcome::Fatal("application failed"),
             )];
             let (app, _) = RecordingApp::<u8, u8, &'static str>::new(vec![1], turns);
             let (environment, env_trace) =
@@ -689,7 +689,7 @@ mod tests {
             let turns = [ScriptedTurn::new(
                 1,
                 Vec::<u8>::new(),
-                ScriptedAnswer::<&'static str>::Continue,
+                Outcome::<&'static str>::Continue,
             )];
             let (app, _) = RecordingApp::<u8, u8, &'static str>::new(Vec::new(), turns);
             let (environment, _) = ScriptedEnv::new(

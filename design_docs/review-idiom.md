@@ -116,3 +116,113 @@ Handed on, not this group's files:
   every field has it.
 - `tests/faults.rs:606` cites `/// Design Doc: JournalFatal` without backticks, the
   same `doc_markdown` shape as I12.
+
+## contracts
+
+`src/application.rs`, `src/port.rs`, `tests/ports_macro.rs`. Landed 2026-09-08,
+uncommitted. Before: 8 pedantic and nursery hits in `application.rs`, 7 in `port.rs`,
+4 in `ports_macro.rs`. After: 0, 0, 0. Gates: all suites green (212 lib), `clippy -D
+warnings` clean, `cargo fmt --check` clean except the pre-existing `environment.rs`
+hunk, which is not this group's. The `faults.rs` matrices asserted every call list
+unchanged on every batch.
+
+- **I1 — `Debug, Clone, Copy, PartialEq, Eq, Hash` on `Outcome`.** No caller outside
+  the crate could print or compare a handler's answer, and every fake re-declared the
+  enum to get around it. Derives bound only their impl. API additive. Landed.
+- **I2 — `Debug` on `Context`.** What foundations I6 prepared; the derive bounds
+  `C: Debug` on the impl only. API additive. Landed.
+- **I3 — `Context::remaining` calls `BoundedBuffer::remaining`.** The third spelling of
+  capacity minus length and its `expect` are gone; A6 is asserted at one site. The
+  helper is now `pub(crate)`, as foundations handed on. `BoundedBuffer::capacity` lost
+  its only production caller and is `#[cfg(test)]`; its test callers in three groups'
+  files are untouched. Landed.
+- **I4 — the fake's `ScriptedAnswer` is `Outcome`.** `ScriptedTurn` holds the answer it
+  returns and the match that rebuilt it is gone. `ScriptedAnswer::` became `Outcome::`
+  at 46 sites in `conformance.rs`, `golden_journal.rs`, `faults.rs`, and
+  `harness_contract.rs`; the `support/mod.rs` export went. The engine's private
+  payload-less `ScriptedAnswer` is the engine group's. Landed.
+- **I5 — tests: `reserved(n)` and `fresh(&mut buffer)`.** Eleven reservation messages
+  and thirteen `Context::new` calls at an index and time no test asserted.
+  `context_observers` keeps calling `new` because it asserts both. Landed.
+- **I6 — `#[must_use] const fn` on `index`, `logical_time`, `remaining`; `const fn
+  overflowed`.** Seven hits with one fix each; foundations I2 and I7 set the shape.
+  API additive. Landed.
+- **I7 — `#[expect(clippy::uninhabited_references)]` on `Never::serialize`.** The
+  Port Mechanism names `match *self {}`, and `match self {}` does not compile:
+  references to empty types are never exhaustive (probed on edition 2024). Landed.
+- **I8 — `allow(dead_code)` → `expect` twice in `port.rs`; deleted in
+  `ports_macro.rs`.** The two in-crate ones suppress a real "variant `Feed` is never
+  constructed". The downstream one suppressed nothing: as `expect` it was reported
+  unfulfilled. Landed.
+- **I9 — five test accessors take references; the two `fan_out` over `Never` keep
+  by-value with one `expect` each; `let _: fn(..) = fan_out`.** Exhaustiveness and
+  payload typing prove the same through a reference; `match *never {}` on a reference
+  is I7's lint, so those two stay by value. Landed.
+- **I10 — `tests/ports_macro.rs` lost its `#[cfg(test)] mod tests` wrapper.** An
+  integration test is built only under test; test names no longer carry a `tests::`
+  prefix the other suites lack. Dedenting exposed three more hits, taken here: the two
+  destination helpers are `const fn`, and `pub(super) struct ReceiveOnly` carries
+  `#[expect(clippy::redundant_pub_crate)]` because its associated `Event` type is
+  private to the file and `pub` fails E0446. `compile_fail.rs` shares the wrapper and is
+  another group's. Landed.
+
+Handed on and then taken, at Devon's word, 2026-09-08:
+
+- `tests/support/recording_app.rs` — `ScriptedTurn::new` is `const fn`. Landed.
+- `src/environment.rs:153` and `:161` — the standing `cargo fmt --check` hunk applied;
+  nothing else in the file moved. Landed.
+- `src/engine/engine.rs` — the engine tests' private `ScriptedAnswer` is gone;
+  `TurnApplication` holds `Outcome<()>` and the one remaining match maps the unit
+  payload to the drop-tracked `ScriptedError`. Sixteen sites. Landed.
+
+Still open, not this group's: `src/environment.rs:20`, `:25`, `:31` carry
+`missing_errors_doc`, the same shape as journal I11.
+
+## environment
+
+`src/environment.rs`, `src/latch.rs`. Landed 2026-09-08, uncommitted. Before: 3
+pedantic and nursery hits in `environment.rs`, 4 in `latch.rs`. After: 0, 0. Gates: all
+suites green (211 lib, one fewer by I6), `clippy -D warnings` clean, `cargo fmt --check`
+clean. The `faults.rs` matrices asserted every call list unchanged; no record byte,
+call, exit, or precedence moved. The `allow(dead_code)` pair in `latch.rs` and the
+`allow(unused_imports)` in `lib.rs` stay `allow` per the heads-up; `Latch`'s reach and
+its caller-less state are Wiring's.
+
+- **I1 — `Debug, Clone, Copy, PartialEq, Eq, Hash` and `#[must_use]` on
+  `ShutdownReport`.** The run's only witness of quiescence and of the latched Error had
+  no derives, so a test could not compare or print a whole report, and a dropped one
+  lost both facts silently. `Default` stays off: a default report would mint
+  `Quiesced` unearned. API additive. Landed.
+- **I2 — `Clone, Copy, Hash` on `Quiescence`.** The Environment fake had minted a
+  parallel `TraceQuiescence` and a two-arm mapping match because `EnvCall` derives
+  `Clone` and `Quiescence` did not. The derives landed; the fake still carries
+  `TraceQuiescence` because deleting it renames six sites in `golden_journal.rs`, the
+  journal group's suite. Handed on. API additive. Landed.
+- **I3 — `Debug` on `Latch` and `State`; `impl Default for Latch`.** An Environment
+  holding a `Latch` could not derive `Debug`; `new_without_default` was silent only
+  because the type is crate-private. The `Default` impl carries its own `allow(dead_code)`
+  under the heads-up regime. Landed.
+- **I4 — `#[must_use]` on `new`, `take`, `close`, `is_pending`, `resolve_local_error`.**
+  Dropping `take` or `close`'s return discards the run's first Error, which A4 forbids;
+  `must_use_candidate` was silent for the same reason as I3. `close_into_report` did
+  not take it: I1's attribute on `ShutdownReport` already covers it and clippy's
+  `double_must_use` said so under `-D warnings`. Landed, one attribute short of the
+  report.
+- **I5 — tests: `tracked(name)` returns the drop-tracked Error and its counter.**
+  Seven four-line `TrackedError` literals in `latch_precedence` are one call each;
+  every assertion stayed. Landed.
+- **I6 — `quiescence_variants::both_states_are_distinct_and_comparable` deleted.** Its
+  three assertions hold for any two-variant `derive(PartialEq)`; behavior on
+  `Quiescence` is pinned where it is decided, in `faults.rs` and `conformance.rs`.
+  Landed.
+- **I7 — `const fn` on `Latch::new` and `Latch::is_pending`.** Two hits, one fix.
+  Landed.
+- **I8 — `publish` guards with `matches!`.** `equatable_if_let`; the `if let` bound
+  nothing. Landed.
+- **I9 — `#[expect(clippy::redundant_pub_crate)]` on `Latch`.** The module is private,
+  so `pub(crate)` on the struct is `pub`'s reach; the gate is `lib.rs`'s `pub(crate)
+  use`, which the heads-up keeps. `expect` fails the day Wiring settles it. Landed.
+- **I10 — `# Errors` sections on `start`, `next_event`, `dispatch`.** Each doc's
+  trailing `Err` sentence moved under the heading clippy asks for; no meaning moved.
+  Closes the `missing_errors_doc` item the contracts section left open. The export
+  audit may reword. Landed.

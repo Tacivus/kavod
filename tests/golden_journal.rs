@@ -4,11 +4,10 @@ mod support;
 #[cfg(test)]
 mod tests {
     use super::support::{
-        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedAnswer, ScriptedEnv, ScriptedTurn,
-        TraceQuiescence,
+        AppCall, EnvCall, GoldenLines, RecordingApp, ScriptedEnv, ScriptedTurn, TraceQuiescence,
     };
     use kavod::{
-        Engine, EngineConfig, EngineExit, EnvironmentOperation, FatalCause, JournalError,
+        Engine, EngineConfig, EngineExit, EnvironmentOperation, FatalCause, JournalError, Outcome,
         Quiescence, RecordKind, ShutdownReport, Timestamp, TurnOutcome,
     };
     use serde_json::value::RawValue;
@@ -39,8 +38,8 @@ mod tests {
             TurnOutcome::Stop => Vec::new(),
         };
         let scripted_answer = match answer {
-            TurnOutcome::Continue => ScriptedAnswer::Continue,
-            TurnOutcome::Stop => ScriptedAnswer::Stop,
+            TurnOutcome::Continue => Outcome::Continue,
+            TurnOutcome::Stop => Outcome::Stop,
         };
         let (app, _) = RecordingApp::<u8, u8, &'static str>::new(
             vec![0],
@@ -77,7 +76,7 @@ mod tests {
 
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
-                [ScriptedTurn::new(1, Vec::<u8>::new(), ScriptedAnswer::Stop)],
+                [ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Stop)],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
                 Ok(Timestamp::from_nanos(100)),
@@ -164,7 +163,7 @@ mod tests {
 
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
-                [ScriptedTurn::new(1, vec![10, 11], ScriptedAnswer::Stop)],
+                [ScriptedTurn::new(1, vec![10, 11], Outcome::Stop)],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
                 Ok(Timestamp::from_nanos(100)),
@@ -261,8 +260,8 @@ mod tests {
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
                 [
-                    ScriptedTurn::new(1, Vec::<u8>::new(), ScriptedAnswer::Continue),
-                    ScriptedTurn::new(2, Vec::<u8>::new(), ScriptedAnswer::Stop),
+                    ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Continue),
+                    ScriptedTurn::new(2, Vec::<u8>::new(), Outcome::Stop),
                 ],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
@@ -361,9 +360,9 @@ mod tests {
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
                 [
-                    ScriptedTurn::new(1, Vec::<u8>::new(), ScriptedAnswer::Continue),
-                    ScriptedTurn::new(2, Vec::<u8>::new(), ScriptedAnswer::Continue),
-                    ScriptedTurn::new(3, Vec::<u8>::new(), ScriptedAnswer::Stop),
+                    ScriptedTurn::new(1, Vec::<u8>::new(), Outcome::Continue),
+                    ScriptedTurn::new(2, Vec::<u8>::new(), Outcome::Continue),
+                    ScriptedTurn::new(3, Vec::<u8>::new(), Outcome::Stop),
                 ],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
@@ -548,7 +547,7 @@ mod tests {
                 .expect("interior-newline fixture invariant: the raw JSON must be valid");
             let (app, app_trace) = RecordingApp::<u8, Box<RawValue>, &'static str>::new(
                 vec![0],
-                [ScriptedTurn::new(1, vec![raw], ScriptedAnswer::Continue)],
+                [ScriptedTurn::new(1, vec![raw], Outcome::Continue)],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, Box<RawValue>, &'static str>::new(
                 Ok(Timestamp::from_nanos(100)),
@@ -637,7 +636,7 @@ mod tests {
                 .expect("newline-event fixture invariant: the raw JSON must be valid");
             let (app, app_trace) = RecordingApp::<Box<RawValue>, u8, &'static str>::new(
                 vec![0],
-                [ScriptedTurn::new(1, Vec::new(), ScriptedAnswer::Continue)],
+                [ScriptedTurn::new(1, Vec::new(), Outcome::Continue)],
             );
             let (environment, env_trace) = ScriptedEnv::<Box<RawValue>, u8, &'static str>::new(
                 Ok(Timestamp::from_nanos(100)),
@@ -724,7 +723,7 @@ mod tests {
 
             let (app, _) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
-                [ScriptedTurn::new(1, vec![10], ScriptedAnswer::Stop)],
+                [ScriptedTurn::new(1, vec![10], Outcome::Stop)],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(
                 Ok(Timestamp::from_nanos(100)),
@@ -914,8 +913,8 @@ mod tests {
             let (app, app_trace) = RecordingApp::<u8, u8, &'static str>::new(
                 vec![0],
                 [
-                    ScriptedTurn::new(1, Vec::new(), ScriptedAnswer::Continue),
-                    ScriptedTurn::new(2, vec![10], ScriptedAnswer::Stop),
+                    ScriptedTurn::new(1, Vec::new(), Outcome::Continue),
+                    ScriptedTurn::new(2, vec![10], Outcome::Stop),
                 ],
             );
             let (environment, env_trace) = ScriptedEnv::<u8, u8, &'static str>::new(

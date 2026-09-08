@@ -148,3 +148,145 @@ cleanly, so nothing pinned that the poison check precedes encoding. New test
 payload whose `Serialize` always fails on a poisoned Journal and expects the
 `JRN-POISON` panic. Mutation: the assertion moved below `encode_line`; the new test
 failed alone, the other 50 journal tests stayed green. Reverted.
+
+## contracts
+
+Reviewed 2026-09-08: `src/application.rs`, `src/port.rs`, `tests/ports_macro.rs`.
+Design rows `APP-CONTEXT`, `APP-EMIT`, `APP-OVERFLOW`, `APP-FUTURE`, `APP-STATE`,
+`PORT-SUMS`, `PORT-ROUTING` (Core half), `TRUST-PURE`, `VERIFY-CONTEXT`. Green before
+the round opened. Suites read: both files' test modules, `tests/ports_macro.rs`,
+`faults::application_fault_matrix`, `tests/conformance.rs`,
+`tests/support/recording_app.rs`, `tests/compile_fail.rs`; the Context and Port macro
+tables in `review-adversarial.md`. G9 (`APP-FUTURE` has no named enforcement site) is
+open and Devon's decision; not re-raised.
+
+The `io::Write` contract and serde mid-serialization corners are unreachable here:
+nothing in the group writes or serializes, and `Never::serialize` is uninhabited.
+
+**Result: one defect, landed.** No signature moved; the fixture is untouched.
+
+### Context
+
+| # | Attack | Resolution |
+|---|---|---|
+| C1 | fresh `Context` over a buffer holding leftovers, after an overflowed and after a clean turn | pinned — `context_reuse::fresh_invocation_starts_empty_with_a_clear_marker`, `::fresh_invocation_clears_a_non_overflowed_batch` |
+| C2 | N emits at capacity N: call order kept, marker clear, `remaining` counts N..0 | pinned — `context_emit::commands_append_in_call_order_through_exact_capacity`, `::remaining_reports_exact_free_capacity`; `context_overflow::exact_capacity_keeps_overflow_marker_clear` |
+| C3 | emit N+1 stores nothing and sets the marker; N+2 stores nothing; `remaining` is 0 | pinned — `context_overflow::first_over_bound_emit_stores_nothing_and_sets_the_marker`, `::every_later_emit_stores_nothing`, `::remaining_is_zero_once_the_marker_is_set` |
+| C4 | smallest capacity (1) with one and two emits | pinned — `context_emit::one_slot_capacity_accepts_one_command_without_overflow`; two emits inside `every_later_emit_stores_nothing` |
+| C5 | capacity 0: `remaining` 0 with the marker clear, first emit sets it | pinned in-crate — `context_emit::zero_capacity_rejects_first_command_and_sets_marker`; unreachable through the Engine (`NonZeroUsize`) |
+| C6 | ownership of a rejected Command, first and later: dropped before `emit` returns | pinned — `context_overflow::rejected_commands_are_dropped_immediately` |
+| C7 | index and time at 0 and `u64::MAX`; unchanged after overflow | pinned — `context_observers::index_and_logical_time_report_exact_boundary_values`, `::index_and_logical_time_remain_stable_after_overflow` |
+| C8 | a handler that reads `remaining() == 0` at exact capacity and stops emitting sees no Fatal | derived — C2's zero `remaining` composed with the clear marker in `exact_capacity_keeps_overflow_marker_clear` |
+| C9 | a zero-sized Command type at capacity: the bound still counts | by construction — `BoundedBuffer::try_push` checks the logical count, never `Vec::capacity` |
+| C10 | buffer length above capacity inside `Context` | by construction — `BoundedBuffer` is the only constructor; asserted besides at `application.rs:74` |
+| C11 | overflow with `Continue`, `Stop`, `Fatal`; the Fatal payload's drop; State stands; batch cleared; start turn and later index | pinned — `turn_overflow_precedence::overflow_outranks_the_returned_outcome`, `::later_index_overflow_outranks_a_fatal_outcome` |
+| C12 | overflow through the Engine on the start turn and an Event turn: nothing handed off, the prior turn's handoffs and records stand | pinned — `application_fault_matrix::an_over_emitting_application_is_command_bound_exceeded`, `::event_turn_overflow_preserves_prior_effects_and_dispatches_nothing_new` |
+| C13 | State mutation stands on every Fatal exit, the failing handler's own included | pinned — `application_fault_matrix::state_mutations_survive_each_post_handler_fatal_exit` |
+| C14 | State mutation stands on `Stop` and `Continue` exits | pinned — `graph_sequences::every_empty_and_command_turn_shape_has_its_required_sequence` |
+| C15 | Application `Fatal` at exact capacity, start and Event turn: exact Error kept, batch discarded, one shutdown | pinned — `application_fault_matrix::an_application_fatal_preserves_its_error_and_discards_its_batch` |
+| C16 | `Context` reports the certificate's index and time through the Engine: 0 with the start stamp, k with the Event's stamp | pinned — `app_calls` in `event_turn_overflow_preserves_prior_effects_and_dispatches_nothing_new`; every `golden_journal` trace |
+| C17 | `initial_state` called exactly once, before `on_start` | pinned — every `AppCall` trace opens with one `InitialState` |
+| C18 | `TRUST-PURE`'s stated verification: two runs, same scripted Environment and sink, identical bytes and `DET-RUN`-equal exits | pinned — `conformance_within_type::the_same_trace_reproduces_identical_journal_bytes`, `::the_same_trace_reproduces_det_run_equal_exits` |
+| C19 | a handler reaches capabilities through `&self` (the recording fake itself does) | trusted — `TRUST-PURE`; the Core has no guard and claims none |
+| C20 | a handler panics mid-emit | by construction — no Core site catches unwinding; no row claims otherwise |
+| C21 | `APP-FUTURE`: a channel other than an External Event | G9, open, Devon's decision |
+
+### Port macro
+
+| # | Attack | Resolution |
+|---|---|---|
+| P1 | one Slot without a trailing comma; two Slots with one | pinned — `ports_macro_expansion::single_slot_without_trailing_comma_expands`; the `Reused` fixture |
+| P2 | private, `pub(super)`, and downstream visibility | pinned — `Reused` (no vis), `receive_only_fixture` (`pub(super)`), `ports_macro_downstream::consumer_invocation_compiles_and_serializes` |
+| P3 | two Slots of one Contract are distinct variants | pinned — `ports_macro_expansion::contract_bound_at_two_slots_yields_two_variants` |
+| P4 | `Command = Never` arm discharged, in-crate and downstream | pinned — `never_direction::never_command_arm_is_discharged_by_match`, `ports_macro_downstream::receive_only_never_arm_is_discharged_downstream` |
+| P5 | `Event = Never` | by construction — the same substitution into the other generated enum |
+| P6 | Slot name as the sole outer tag; hand-written sum byte-identical | pinned — `ports_macro_expansion::generated_sums_are_externally_tagged`, `::hand_written_equivalent_is_byte_identical`, `ports_macro_downstream::every_generated_variant_serializes_with_its_own_slot_tag` |
+| P7 | frozen fan-in constructors and an exhaustive fan-out downstream | pinned — `ports_macro_downstream::the_fanout_match_is_exhaustive` |
+| P8 | `$crate::PortContract` resolves with nothing imported downstream | pinned — `tests/ports_macro.rs` compiles with no `use` of the trait |
+| P9 | zero Slots; a duplicate Slot name; a Contract type outside `PortContract`; a payload without `Serialize` | by construction — the `+` repetition, E0428, the trait bounds on `PortContract::Event` and `::Command` |
+| P10 | the declaration ident binds no item | pinned — `ports_macro_expansion::declaration_name_is_available_for_an_independent_item` |
+| P11 | `Never::serialize` reached | by construction — uninhabited |
+| P12 | a hand-written sum over `Never` "may add derives freely" (Port Mechanism prose) | **open — E1, landed** |
+| P13 | a consumer without a direct `serde` dependency | unreachable in this package; doc-noted at the Port Mechanism |
+
+### Items decided
+
+**E1 — landed.** `Never` derived nothing, so a hand-written sum with a `Never` payload
+failed `#[derive(Debug)]`, `Clone`, `PartialEq`, and the rest — E0277 and E0369 for
+every receive-only or send-only Contract, against the Port Mechanism's "may add derives
+freely". `Never` now derives `Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash`,
+the set `core::convert::Infallible` carries. New test
+`never_derives::a_hand_written_sum_over_never_accepts_the_standard_derives` derives that
+set on a hand-written receive-only Command sum and requires it through a bound. Mutation:
+the test was landed before the derive line; the lib test binary failed to compile with
+eight errors, one per missing trait plus E0204 for `Copy`. The derive line was then
+added and every test passed.
+
+`src/port.rs` and `tests/ports_macro.rs` carried pre-existing `rustfmt` drift and were
+formatted; `src/environment.rs` carries the same drift and was left alone.
+
+## environment
+
+Reviewed 2026-09-08: `src/environment.rs`, `src/latch.rs`. Design rows `ENV-SERIAL`,
+`ENV-START`, `ENV-ERRORS`, `ENV-LATCH`, `ENV-TIME`, `ENV-SHUTDOWN`, A4. Green before the
+round opened. Suites read: `latch::tests` (five modules), `environment::tests`,
+`tests/support/scripted_env.rs`, `harness_contract::scripted_environment_{trace,graph}`,
+`faults::{startup_faults,environment_fault_matrix}`, the `stop_pending` and
+`accept_event` tests in `record.rs`, the `conformance.rs` scripts, the `golden_journal`
+call lists; the Latch and Environment tables and S3 in `review-adversarial.md`. Greps:
+`take_error`, `TimeRegression`, `ShutdownIncomplete`, `Incomplete`,
+`EnvCall::TakeError`, `equal.*stamp` across `src/` and `tests/`. `Latch` has no caller
+yet; its `dead_code` allowance and `lib.rs` re-export were left alone. The `io::Write`
+and serde corners are unreachable: nothing in the group writes or serializes.
+`ENV-SEPARATION`, `ENV-BOUNDS`, `VERIFY-LATCH`, the `ENV-LATCH` ordering anchors, and
+`ENV-SHUTDOWN`'s window belong to the Environment steps and were not attacked.
+
+**Result: no defects, no open attacks.** Nothing landed; no file under `src/` or `tests/`
+changed. Two observations, no action, are recorded below.
+
+### Latch
+
+| # | Attack | Resolution |
+|---|---|---|
+| L1 | `new()`: not pending, `take` None, `close` None | pinned — `latch_pending_state::pending_is_true_only_while_an_error_waits`, `latch_observation::empty_take_keeps_the_latch_open`, `latch_close::publication_after_close_is_discarded` |
+| L2 | first `publish` on Empty makes it pending and returnable | pinned — `empty_take_keeps_the_latch_open`, `pending_is_true_only_while_an_error_waits` |
+| L3 | second `publish` while pending: first kept; second dropped at once | pinned for retention — `latch_first_wins::first_publication_is_kept_and_later_discarded`; drop timing is on `review-adversarial.md`'s Considered list, no new argument |
+| L4 | `publish` on Reported: dropped before return; later `take` and `close` None | pinned — `latch_first_wins::take_marks_reported_forever`, `latch_precedence::a_pending_error_wins_and_discards_the_local_error` (drop-tracked) |
+| L5 | `publish` on Closed, after a close on Empty and on Pending: dropped at once, never pending, `take` None | pinned — `publication_after_close_is_discarded`, `latch_precedence::a_local_error_leaves_the_latch_open_for_a_later_publication` (drop-tracked) |
+| L6 | `take` on Empty leaves the latch open | pinned — `empty_take_keeps_the_latch_open` |
+| L7 | `take` on Pending: Some once; second `take` None; `close` None | pinned — `take_marks_reported_forever` |
+| L8 | `take` on Closed returns None and the state stays Closed rather than Reported | pinned for the return — `close_returns_the_pending_error_exactly_once`; the state difference is unobservable, see below |
+| L9 | `close` on Empty, Pending, Reported; a second `close` after each | pinned — `publication_after_close_is_discarded`, `close_returns_the_pending_error_exactly_once`, `take_marks_reported_forever` |
+| L10 | order: publish→take→close and publish→close→take each yield the Error exactly once | pinned — `take_marks_reported_forever`, `close_returns_the_pending_error_exactly_once` |
+| L11 | two publications then `close` returns the first | derived — L3's retained Pending(first) plus L9's close-on-Pending |
+| L12 | `resolve_local_error` on Pending: pending wins, local dropped before return, latch reported, a later local returned unchanged | pinned — `a_pending_error_wins_and_discards_the_local_error` |
+| L13 | `resolve_local_error` on Empty: local returned, owned by the caller, latch still open, the next publication leaves through the report | pinned — `a_local_error_wins_when_the_latch_is_empty`, `a_local_error_leaves_the_latch_open_for_a_later_publication` |
+| L14 | `resolve_local_error` on Closed | unreachable under `ENV-SERIAL`: the close runs inside the consuming `shutdown`; by construction otherwise, L8's None plus `unwrap_or` |
+| L15 | `close_into_report` across {Quiesced, Incomplete} × {Empty, Pending}; a second report | pinned — `latch_close::close_into_report_preserves_quiescence_and_emits_once` ({Incomplete, Pending}, then a second {Quiesced, None}), `a_local_error_leaves_the_latch_open_for_a_later_publication` ({Quiesced, Pending}); the two Empty cells derive from L9's close-on-Empty and the pinned quiescence pass-through |
+| L16 | `is_pending` in all four states | pinned — `pending_is_true_only_while_an_error_waits` |
+| L17 | an untaken pending Error is dropped with the latch; `E` zero-sized, `!Send`, `!Debug`; nothing runs between `take`'s replace and its restore | by construction — Rust drop order, no bounds on `E`, straight-line code |
+
+### Environment contract
+
+| # | Attack | Resolution |
+|---|---|---|
+| T1 | `Quiescence` derives match the design API block; `ShutdownReport` derives nothing, as the design shows | pinned for `PartialEq`/`Eq` — `quiescence_variants::both_states_are_distinct_and_comparable`; the rest by construction |
+| T2 | Stop path, all four report shapes: {Quiesced, None} Stopped; {Quiesced, Some} and {Incomplete, Some} `Environment(Shutdown)` with the quiescence retained; {Incomplete, None} `Core(ShutdownIncomplete)` | pinned — `engine::tests::stopped_carries_the_final_state`; `faults::environment_fault_matrix::each_operation_error_maps_to_its_cause_and_quiescence`; `record::tests::a_report_error_outranks_incomplete`, `::incomplete_without_error_is_shutdown_incomplete`; conformance `ShutdownFailure`, `IncompleteShutdown` |
+| T3 | Fatal path: every operation `Err` outranks an {Incomplete, Some} report; the report's Error is dropped | pinned — `the_operation_error_outranks_the_report_error` (four points), `engine::tests::the_shutdown_error_never_replaces_the_fixed_cause` (drop-tracked) |
+| T4 | `ENV-TIME`: a stamp below the last accepted one, against the start stamp and against a later Event's; equal stamps accepted; `last_time` follows each accepted Event | pinned — `faults::a_decreasing_stamp_is_time_regression` (start 100, offered 99), `record::tests::a_decreasing_stamp_is_time_regression_with_the_candidate_consumed` (index 4, last 10), `::an_equal_stamp_is_accepted`, `golden_journal::repeated_events_advance_indices_and_preserve_time_boundaries`; the check is one site, `record.rs:327` |
+| T5 | `ENV-SERIAL` as the Engine drives it: `start` first and once; `take_error` once per turn after every `dispatch`, on empty turns too; no `dispatch` on an empty batch; after `Err` or `take_error` Some only `shutdown`, once | pinned — the fake panics on any out-of-graph call and every run in `faults.rs`, `conformance.rs`, `golden_journal.rs` completes; call lists in `a_start_error_performs_no_shutdown`, `a_failed_dispatch_retains_only_the_successful_handoff_prefix`, `repeated_events_advance_indices_and_preserve_time_boundaries`; `shutdown_count == 1` in every post-start matrix test; the fake's graph in `scripted_environment_graph::rejects_operations_outside_the_environment_graph` |
+| T6 | `take_error` Some on a later turn, not the start turn | derived — one production call site, `record.rs:280`, reached by the same `effects` for every turn; the start-turn pin is conformance `CheckpointFailure` and `environment_fault_matrix` |
+| T7 | `next_event` `Err` at the first position and after an accepted Event | pinned first — `environment_fault_matrix` `NextEvent` point; the later position derived through T6's single-site argument at `record.rs:319` |
+| T8 | ownership of a Command whose `dispatch` fails; the remaining batch never offered | pinned — `a_failed_dispatch_retains_only_the_successful_handoff_prefix`; the Command moves by value, by construction |
+| T9 | a bespoke implementor: `start` `Err` after committing activation, `dispatch` `Err` after a handoff, `take_error` Some twice, a `Drop` that works after a failed start | trusted — `TRUST-ENV`; the Core has no guard and no row claims one; a second Some is unreachable after the first under T5 |
+| T10 | trait rustdoc versus the `ENV-*` rows and the design API block | by inspection — `take_error`, `shutdown`, and `ShutdownReport::error` docs are verbatim |
+
+### Observations, no action
+
+- **Reported and Closed are indistinguishable through the API.** Only `is_pending`,
+  `take`, `close`, and `publish` observe the state, and all four answer identically on
+  both. The restore in `take`'s Closed arm is therefore untestable from outside; kept
+  per `review-simplification.md`.
+- **On a `start` failure the Environment is dropped when `run` returns**, after
+  `finalize` builds the exit at `engine.rs:183`. `ENV-START` says only that the drop is
+  safe, so no row fixes the instant.

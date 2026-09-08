@@ -42,6 +42,7 @@ impl<T> BoundedBuffer<T> {
         self.items.len()
     }
 
+    #[cfg(test)]
     pub(crate) const fn capacity(&self) -> usize {
         self.capacity
     }
@@ -62,7 +63,7 @@ impl<T> BoundedBuffer<T> {
         self.items.drain(..)
     }
 
-    const fn remaining(&self) -> usize {
+    pub(crate) const fn remaining(&self) -> usize {
         assert!(
             self.items.len() <= self.capacity,
             "A6: bounded-buffer length must never exceed its logical capacity"

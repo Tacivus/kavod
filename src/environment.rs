@@ -15,19 +15,25 @@ pub trait Environment {
 
     /// Activates run-scoped activity and returns its frozen start time.
     ///
+    /// # Errors
+    ///
     /// An error leaves the Environment quiesced and safe to drop without a later
     /// shutdown call.
     fn start(&mut self) -> Result<Timestamp, Self::Error>;
 
     /// Waits for and consumes exactly one candidate Event on success.
     ///
+    /// # Errors
+    ///
     /// An error means no candidate was consumed by this call.
     fn next_event(&mut self) -> Result<(Self::Event, Timestamp), Self::Error>;
 
-    /// Attempts a non-waiting handoff of one Command.
+    /// Attempts a non-waiting handoff of one Command; success transfers
+    /// ownership of the Command.
     ///
-    /// Success transfers ownership of the Command; an error means it was not
-    /// handed off.
+    /// # Errors
+    ///
+    /// An error means the Command was not handed off.
     fn dispatch(&mut self, command: Self::Command) -> Result<(), Self::Error>;
 
     /// Takes the first currently latched Error without waiting for one.
@@ -41,6 +47,8 @@ pub trait Environment {
 }
 
 /// The Environment's final account of run-scoped activity and latched failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use = "a dropped report loses the run's quiescence and its latched Error"]
 pub struct ShutdownReport<E> {
     /// Whether the Environment accounted every unit of run-scoped activity
     /// complete before its bounded shutdown wait ended.
@@ -51,7 +59,7 @@ pub struct ShutdownReport<E> {
 }
 
 /// Whether the Environment accounted all run-scoped activity complete.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Quiescence {
     /// Every unit of run-scoped activity was accounted complete.
     Quiesced,
@@ -153,37 +161,18 @@ mod tests {
                 Timestamp::from_nanos(11),
                 "next_event must return the scripted Event timestamp"
             );
-            assert_eq!(error, None, "take_error must return the scripted empty latch");
+            assert_eq!(
+                error, None,
+                "take_error must return the scripted empty latch"
+            );
             assert_eq!(
                 report.quiescence,
                 Quiescence::Quiesced,
                 "shutdown must return the scripted quiescence"
             );
-            assert_eq!(report.error, None, "shutdown must return the scripted empty latch");
-        }
-    }
-
-    mod quiescence_variants {
-        use super::*;
-
-        /// Invariant: complete and incomplete shutdown accounts are distinct
-        /// comparable states, and each state compares equal to itself.
-        #[test]
-        fn both_states_are_distinct_and_comparable() {
             assert_eq!(
-                Quiescence::Quiesced,
-                Quiescence::Quiesced,
-                "the complete quiescence state must equal itself"
-            );
-            assert_eq!(
-                Quiescence::Incomplete,
-                Quiescence::Incomplete,
-                "the incomplete quiescence state must equal itself"
-            );
-            assert_ne!(
-                Quiescence::Quiesced,
-                Quiescence::Incomplete,
-                "complete and incomplete quiescence must remain distinct"
+                report.error, None,
+                "shutdown must return the scripted empty latch"
             );
         }
     }
