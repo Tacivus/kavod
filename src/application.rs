@@ -1,5 +1,5 @@
 use crate::bounded_buffer::BoundedBuffer;
-use crate::{EventIndex, Timestamp};
+use crate::time::{EventIndex, Timestamp};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,6 +85,7 @@ impl<'a, C> Context<'a, C> {
         }
     }
 
+    #[must_use]
     pub(crate) const fn overflowed(&self) -> bool {
         self.overflowed
     }
@@ -93,10 +94,6 @@ impl<'a, C> Context<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn reserved<C>(capacity: usize) -> BoundedBuffer<C> {
-        BoundedBuffer::new(capacity).expect("a test batch must be reservable")
-    }
 
     /// One handler invocation over `buffer`, at the start turn.
     fn fresh<C>(buffer: &mut BoundedBuffer<C>) -> Context<'_, C> {
@@ -111,7 +108,7 @@ mod tests {
         /// Design Doc: APP-EMIT
         #[test]
         fn commands_append_in_call_order_through_exact_capacity() {
-            let mut buffer = reserved(3);
+            let mut buffer = BoundedBuffer::reserved(3);
             let mut context = fresh(&mut buffer);
 
             context.emit("first");
@@ -130,7 +127,7 @@ mod tests {
         /// Design Doc: APP-CONTEXT
         #[test]
         fn remaining_reports_exact_free_capacity() {
-            let mut buffer = reserved(3);
+            let mut buffer = BoundedBuffer::reserved(3);
             let mut context = fresh(&mut buffer);
 
             assert_eq!(
@@ -162,7 +159,7 @@ mod tests {
         /// that the handler exceeded the command bound.
         #[test]
         fn zero_capacity_rejects_first_command_and_sets_marker() {
-            let mut buffer = reserved(0);
+            let mut buffer = BoundedBuffer::reserved(0);
             let mut context = fresh(&mut buffer);
 
             assert_eq!(
@@ -189,7 +186,7 @@ mod tests {
         /// marking the batch as overflowed.
         #[test]
         fn one_slot_capacity_accepts_one_command_without_overflow() {
-            let mut buffer = reserved(1);
+            let mut buffer = BoundedBuffer::reserved(1);
             let mut context = fresh(&mut buffer);
 
             context.emit("accepted");
@@ -214,7 +211,7 @@ mod tests {
         /// Design Doc: APP-OVERFLOW
         #[test]
         fn first_over_bound_emit_stores_nothing_and_sets_the_marker() {
-            let mut buffer = reserved(2);
+            let mut buffer = BoundedBuffer::reserved(2);
             let mut context = fresh(&mut buffer);
             context.emit(1);
             context.emit(2);
@@ -237,7 +234,7 @@ mod tests {
         /// Design Doc: APP-OVERFLOW
         #[test]
         fn every_later_emit_stores_nothing() {
-            let mut buffer = reserved(1);
+            let mut buffer = BoundedBuffer::reserved(1);
             let mut context = fresh(&mut buffer);
             context.emit("accepted");
             context.emit("first rejected");
@@ -257,7 +254,7 @@ mod tests {
         /// Design Doc: APP-OVERFLOW
         #[test]
         fn remaining_is_zero_once_the_marker_is_set() {
-            let mut buffer = reserved(1);
+            let mut buffer = BoundedBuffer::reserved(1);
             let mut context = fresh(&mut buffer);
             context.emit("accepted");
             context.emit("rejected");
@@ -273,7 +270,7 @@ mod tests {
         /// overflowed until another command is emitted.
         #[test]
         fn exact_capacity_keeps_overflow_marker_clear() {
-            let mut buffer = reserved(2);
+            let mut buffer = BoundedBuffer::reserved(2);
             let mut context = fresh(&mut buffer);
 
             context.emit(1);
@@ -301,7 +298,7 @@ mod tests {
             }
 
             let drops = Rc::new(Cell::new(0));
-            let mut buffer = reserved(0);
+            let mut buffer = BoundedBuffer::reserved(0);
             let mut context = fresh(&mut buffer);
 
             context.emit(DropCommand(Rc::clone(&drops)));
@@ -327,7 +324,7 @@ mod tests {
         /// Design Doc: APP-OVERFLOW
         #[test]
         fn fresh_invocation_starts_empty_with_a_clear_marker() {
-            let mut buffer = reserved(2);
+            let mut buffer = BoundedBuffer::reserved(2);
             {
                 let mut context = fresh(&mut buffer);
                 context.emit(1);
@@ -360,7 +357,7 @@ mod tests {
         /// prior invocation as well as from an overflowed one.
         #[test]
         fn fresh_invocation_clears_a_non_overflowed_batch() {
-            let mut buffer = reserved(2);
+            let mut buffer = BoundedBuffer::reserved(2);
             {
                 let mut context = fresh(&mut buffer);
                 context.emit("prior");

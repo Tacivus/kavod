@@ -118,6 +118,12 @@ macro_rules! reconstruct_engine {
                 }
             }
 
+            impl<AE, EE> From<record::JournalFatal> for FatalCause<AE, EE> {
+                fn from(fatal: record::JournalFatal) -> Self {
+                    Self::Journal(fatal)
+                }
+            }
+
             mod record {
                 include!("../../../src/engine/record.rs");
             }

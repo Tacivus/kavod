@@ -112,7 +112,7 @@ where
     ) -> EngineExit<A::State, A::Error, E::Error> {
         let quiescence = match finalization {
             Finalization::StartFailed => Quiescence::Quiesced,
-            Finalization::Unconsumed(environment) => environment.shutdown().quiescence,
+            Finalization::Unconsumed(env) => env.shutdown().quiescence,
             Finalization::Retained(quiescence) => quiescence,
         };
 
@@ -129,15 +129,15 @@ where
     )]
     fn effects<M: answer::Answer>(
         certificate: Certificate<W, TurnOpen<M>>,
-        environment: &mut E,
+        env: &mut E,
         batch: &mut BoundedBuffer<A::Command>,
     ) -> Result<Certificate<W, Checkpointed<M>>, FatalCause<A::Error, E::Error>> {
         let certificate = if batch.is_empty() {
             certificate.no_commands(batch)
         } else {
-            certificate.dispatch_batch(environment, batch)?
+            certificate.dispatch_batch(env, batch)?
         };
-        certificate.checkpoint(environment)
+        certificate.checkpoint(env)
     }
 
     fn drive(
@@ -147,23 +147,20 @@ where
         batch: &mut BoundedBuffer<A::Command>,
         certificate: Certificate<W, Initial>,
     ) -> Result<Certificate<W, StopPending>, FatalCause<A::Error, E::Error>> {
-        let mut certificate = certificate.run_started().map_err(FatalCause::Journal)?;
+        let mut certificate = certificate.run_started()?;
         let mut accepted_event = None;
 
         loop {
             match Self::turn(app, state, accepted_event.as_ref(), batch, certificate)? {
                 ClassifiedTurn::Continue(classified) => {
                     let (next, event) = Self::effects(classified, env, batch)?
-                        .complete_continue()
-                        .map_err(FatalCause::Journal)?
+                        .complete_continue()?
                         .accept_event(env)?;
                     accepted_event = Some(event);
                     certificate = next;
                 }
                 ClassifiedTurn::Stop(classified) => {
-                    return Self::effects(classified, env, batch)?
-                        .request_stop()
-                        .map_err(FatalCause::Journal);
+                    return Ok(Self::effects(classified, env, batch)?.request_stop()?);
                 }
             }
         }
@@ -230,6 +227,12 @@ impl<AE, EE> FatalCause<AE, EE> {
     }
 }
 
+impl<AE, EE> From<JournalFatal> for FatalCause<AE, EE> {
+    fn from(fatal: JournalFatal) -> Self {
+        Self::Journal(fatal)
+    }
+}
+
 impl<AE, EE> fmt::Display for FatalCause<AE, EE> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -258,7 +261,7 @@ where
 
 /// Names the operation where the Error was observed - not necessarily where it was
 /// caused (`ENV-LATCH`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnvironmentFatal<EE> {
     pub error: EE,
     pub operation: EnvironmentOperation,
@@ -601,10 +604,6 @@ mod tests {
         }
     }
 
-    fn reserved(capacity: usize) -> BoundedBuffer<u8> {
-        BoundedBuffer::new(capacity).expect("an Engine test batch must reserve its capacity")
-    }
-
     fn start_turn(logical_time: Timestamp) -> Certificate<Vec<u8>, TurnOpen> {
         let journal = Journal::new(
             Vec::new(),
@@ -631,7 +630,7 @@ mod tests {
             clean_report(),
         );
         certificate
-            .no_commands(&reserved(1))
+            .no_commands(&BoundedBuffer::<u8>::reserved(1))
             .checkpoint::<_, ScriptedError>(&mut environment)
             .expect("a later-turn fixture checkpoint must be clear")
             .complete_continue()
@@ -814,7 +813,7 @@ mod tests {
         fn index_zero_calls_on_start_once() {
             let Scripted { app, calls, .. } = one_turn(&[], Outcome::Continue);
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             let certificate = start_turn(Timestamp::from_nanos(41));
 
             let result = TestEngine::turn(&app, &mut state, None, &mut batch, certificate);
@@ -842,7 +841,7 @@ mod tests {
         fn a_later_index_calls_on_event_once() {
             let Scripted { app, calls, .. } = one_turn(&[], Outcome::Stop);
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             let (certificate, event) = later_turn(23, Timestamp::from_nanos(u64::MAX));
 
             let result = TestEngine::turn(&app, &mut state, Some(&event), &mut batch, certificate);
@@ -878,7 +877,7 @@ mod tests {
                     app, calls, drops, ..
                 } = one_turn(&[0, 1], answer);
                 let mut state = Vec::new();
-                let mut batch = reserved(1);
+                let mut batch = BoundedBuffer::<u8>::reserved(1);
                 let certificate = start_turn(Timestamp::from_nanos(0));
 
                 let result = TestEngine::turn(&app, &mut state, None, &mut batch, certificate);
@@ -928,7 +927,7 @@ mod tests {
                 app, calls, drops, ..
             } = one_turn(&[0, 1], Outcome::Fatal(FATAL));
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             let (certificate, event) = later_turn(29, Timestamp::from_nanos(53));
 
             let result = TestEngine::turn(&app, &mut state, Some(&event), &mut batch, certificate);
@@ -978,7 +977,7 @@ mod tests {
                 app, calls, drops, ..
             } = one_turn(&[0], Outcome::Fatal(FATAL));
             let mut state = Vec::new();
-            let mut batch = reserved(2);
+            let mut batch = BoundedBuffer::<u8>::reserved(2);
             let certificate = start_turn(Timestamp::from_nanos(7));
 
             let result = TestEngine::turn(&app, &mut state, None, &mut batch, certificate);
@@ -1028,7 +1027,7 @@ mod tests {
                 app, calls, drops, ..
             } = one_turn(&[0], Outcome::Fatal(FATAL));
             let mut state = Vec::new();
-            let mut batch = reserved(2);
+            let mut batch = BoundedBuffer::<u8>::reserved(2);
             let (certificate, event) = later_turn(31, Timestamp::from_nanos(59));
 
             let result = TestEngine::turn(&app, &mut state, Some(&event), &mut batch, certificate);
@@ -1081,7 +1080,7 @@ mod tests {
         fn fresh_turn_replaces_stale_batch_at_exact_capacity() {
             let Scripted { app, .. } = one_turn(&[0], Outcome::Continue);
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             batch
                 .try_push(99)
                 .expect("the stale command must fit before the fresh turn begins");
@@ -1113,7 +1112,7 @@ mod tests {
         fn start_turn_with_event_panics_before_handler() {
             let Scripted { app, calls, .. } = one_turn(&[], Outcome::Continue);
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             let certificate = start_turn(Timestamp::from_nanos(0));
             let event = 1;
 
@@ -1141,7 +1140,7 @@ mod tests {
         fn later_turn_without_event_panics_before_handler() {
             let Scripted { app, calls, .. } = one_turn(&[], Outcome::Continue);
             let mut state = Vec::new();
-            let mut batch = reserved(1);
+            let mut batch = BoundedBuffer::<u8>::reserved(1);
             let (certificate, _) = later_turn(1, Timestamp::from_nanos(1));
 
             let panic = catch_unwind(AssertUnwindSafe(|| {

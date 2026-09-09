@@ -4,7 +4,10 @@ use crate::environment::{Environment, Quiescence};
 use crate::journal::{Journal, JournalError};
 use crate::time::{EventIndex, Timestamp};
 use serde::{Serialize, Serializer};
-use std::{error::Error, fmt, io, marker::PhantomData};
+use std::error::Error;
+use std::fmt;
+use std::io;
+use std::marker::PhantomData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordKind {
@@ -30,6 +33,12 @@ impl RecordKind {
     }
 }
 
+impl fmt::Display for RecordKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tag())
+    }
+}
+
 pub(super) trait RecordPayload {
     const KIND: RecordKind;
 
@@ -44,6 +53,7 @@ pub(super) trait RecordPayload {
 pub(super) struct Kind<P>(PhantomData<fn() -> P>);
 
 impl<P> Kind<P> {
+    #[must_use]
     pub(super) const fn new() -> Self {
         Self(PhantomData)
     }
@@ -137,6 +147,15 @@ pub enum TurnOutcome {
     Stop,
 }
 
+impl fmt::Display for TurnOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Continue => "Continue",
+            Self::Stop => "Stop",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct JournalFatal {
     /// The kind of the record whose commit failed.
@@ -150,8 +169,8 @@ pub struct JournalFatal {
 impl fmt::Display for JournalFatal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.outcome {
-            Some(outcome) => write!(f, "the TurnCompleted({outcome:?}) record did not commit"),
-            None => write!(f, "the {} record did not commit", self.record_kind.tag()),
+            Some(outcome) => write!(f, "the TurnCompleted({outcome}) record did not commit"),
+            None => write!(f, "the {} record did not commit", self.record_kind),
         }
     }
 }
@@ -279,8 +298,7 @@ impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
             record_kind: Kind::new(),
             index: self.index,
             commands: commands.as_slice(),
-        })
-        .map_err(FatalCause::Journal)?;
+        })?;
 
         for (position, command) in commands.drain().enumerate() {
             environment.dispatch(command).map_err(|error| {
@@ -291,8 +309,7 @@ impl<W: io::Write, A: answer::Answer> Certificate<W, TurnOpen<A>> {
         self.commit(&CommandsDispatchedRecord {
             record_kind: Kind::new(),
             index: self.index,
-        })
-        .map_err(FatalCause::Journal)?;
+        })?;
 
         Ok(self.advance())
     }
@@ -363,8 +380,7 @@ impl<W: io::Write> Certificate<W, BetweenTurns> {
             index: next_index,
             logical_time: offered,
             event: &event,
-        })
-        .map_err(FatalCause::Journal)?;
+        })?;
         self.index = next_index;
         self.last_time = offered;
         Ok((self.advance(), event))
@@ -412,7 +428,7 @@ impl<W: io::Write> Certificate<W, StopPending> {
             index: self.index,
             outcome: TurnOutcome::Stop,
         })
-        .map_err(|error| fatal(FatalCause::Journal(error)))?;
+        .map_err(|error| fatal(error.into()))?;
         Ok(self.advance())
     }
 }
@@ -960,8 +976,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "RUN-ENFORCEMENT")]
         fn no_commands_panics_on_a_nonempty_buffer() {
-            let mut commands =
-                BoundedBuffer::new(2).expect("a two-command batch must be reservable");
+            let mut commands = BoundedBuffer::reserved(2);
             commands
                 .try_push("pending")
                 .expect("the first command must fit");
@@ -1082,8 +1097,7 @@ mod tests {
         #[test]
         fn full_batch_rejection_preserves_buffer_and_journal() {
             let mut bytes = Vec::new();
-            let mut commands =
-                BoundedBuffer::new(2).expect("a two-command batch must be reservable");
+            let mut commands = BoundedBuffer::reserved(2);
             commands
                 .try_push("first")
                 .expect("the first command must fit");
@@ -1155,7 +1169,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), None);
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(3);
             for command in [10, 20, 30] {
                 commands
                     .try_push(command)
@@ -1199,7 +1213,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), None);
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(1));
-            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(3);
             for command in [10, 20, 30] {
                 commands
                     .try_push(command)
@@ -1244,7 +1258,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), Some(1));
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(1).expect("one command slot must reserve");
+            let mut commands = BoundedBuffer::reserved(1);
             commands.try_push(7).expect("the scripted command must fit");
 
             let fatal = journal_fatal(dispatch(certificate, &mut environment, &mut commands));
@@ -1288,7 +1302,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), Some(2));
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(2);
             commands.try_push(4).expect("the first command must fit");
             commands.try_push(5).expect("the second command must fit");
 
@@ -1351,7 +1365,7 @@ mod tests {
                 .classify(TurnOutcome::Stop),
             );
             let mut environment = ScriptedEnvironment::new(calls, None);
-            let mut commands = BoundedBuffer::new(1).expect("one command slot must reserve");
+            let mut commands = BoundedBuffer::reserved(1);
             commands
                 .try_push(9)
                 .expect("the sole command must fit exactly");
@@ -1391,7 +1405,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), None);
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(0));
-            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(3);
             for command in [1, 2, 3] {
                 commands
                     .try_push(command)
@@ -1422,7 +1436,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), None);
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), Some(2));
-            let mut commands = BoundedBuffer::new(3).expect("three command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(3);
             for command in [1, 2, 3] {
                 commands
                     .try_push(command)
@@ -1468,8 +1482,7 @@ mod tests {
             let calls = record_calls();
             let certificate = continue_turn(Rc::clone(&calls), None);
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands =
-                BoundedBuffer::new(1).expect("one unserializable command slot must reserve");
+            let mut commands = BoundedBuffer::reserved(1);
             commands
                 .try_push(Unserializable)
                 .unwrap_or_else(|_| panic!("the unserializable command must fit"));
@@ -1546,7 +1559,7 @@ mod tests {
                 0,
             );
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(2);
             for command in [10, 20] {
                 commands
                     .try_push(command)
@@ -1589,7 +1602,7 @@ mod tests {
                 0,
             );
             let mut environment = ScriptedEnvironment::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(2);
             for command in [10, 20] {
                 commands
                     .try_push(command)
@@ -1677,7 +1690,7 @@ mod tests {
                 .classify(TurnOutcome::Continue),
             );
             let mut environment = ScriptedEnvironment::<u8>::new(Rc::clone(&calls), None);
-            let mut commands = BoundedBuffer::new(2).expect("two command slots must reserve");
+            let mut commands = BoundedBuffer::reserved(2);
             commands.try_push(4).expect("the first command must fit");
             commands.try_push(5).expect("the second command must fit");
 

@@ -12,6 +12,7 @@ pub struct EventIndex(u64);
 pub struct Timestamp(u64);
 
 impl EventIndex {
+    #[must_use]
     pub(crate) const fn new(index: u64) -> Self {
         Self(index)
     }

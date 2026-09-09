@@ -1,4 +1,4 @@
-use crate::{Quiescence, ShutdownReport};
+use crate::environment::{Quiescence, ShutdownReport};
 use std::mem;
 
 #[derive(Debug)]
@@ -6,7 +6,6 @@ use std::mem;
     clippy::redundant_pub_crate,
     reason = "crate-private reach is deliberate until Wiring settles the export"
 )]
-#[allow(dead_code, reason = "used by later Environment build steps")]
 pub(crate) struct Latch<E> {
     state: State<E>,
 }
@@ -19,7 +18,6 @@ enum State<E> {
     Closed,
 }
 
-#[allow(dead_code, reason = "used by later Environment build steps")]
 impl<E> Default for Latch<E> {
     fn default() -> Self {
         Self {
@@ -28,7 +26,10 @@ impl<E> Default for Latch<E> {
     }
 }
 
-#[allow(dead_code, reason = "used by later Environment build steps")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by later Environment build steps")
+)]
 impl<E> Latch<E> {
     #[must_use]
     pub(crate) const fn new() -> Self {

@@ -1,4 +1,4 @@
-use crate::Timestamp;
+use crate::time::Timestamp;
 
 /// The Core's boundary for serial interaction with the outside world.
 ///
