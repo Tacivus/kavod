@@ -1,0 +1,13 @@
+error[E0451]: fields `journal`, `index`, `last_time` and `_phase` of struct `Certificate` are private
+  --> tests/grammar_fixture/cases/certificate_forgery_by_literal.rs:10:13
+   |
+ 9 |         let _closed: Certificate<Vec<u8>, record::Closed> = Certificate {
+   |                                                             ----------- in this type
+10 |             journal,
+   |             ^^^^^^^ private field
+11 |             index: crate::time::EventIndex::new(0),
+   |             ^^^^^ private field
+12 |             last_time: Timestamp::from_nanos(0),
+   |             ^^^^^^^^^ private field
+13 |             _phase: std::marker::PhantomData,
+   |             ^^^^^^ private field

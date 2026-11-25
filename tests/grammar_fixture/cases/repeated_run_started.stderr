@@ -1,0 +1,12 @@
+error[E0599]: no method named `run_started` found for struct `Certificate<Vec<u8>, TurnOpen>` in the current scope
+ --> tests/grammar_fixture/cases/repeated_run_started.rs:5:41
+  |
+5 |         let _second_start = turn_open().run_started();
+  |                                         ^^^^^^^^^^^ method not found in `Certificate<Vec<u8>, TurnOpen>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `run_started` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, Initial>`

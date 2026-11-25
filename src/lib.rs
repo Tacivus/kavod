@@ -1,16 +1,21 @@
-#![allow(dead_code)]
+#![forbid(unsafe_code)]
 
-pub mod cache;
-pub mod clock;
-pub mod context;
-pub mod decimal;
-pub mod graph;
-pub mod handler;
-pub mod kernel;
-pub mod log;
-pub mod message;
-pub mod price;
-pub mod quantity;
-pub mod reducer;
-pub mod schedule;
-pub mod time;
+mod application;
+mod bounded_buffer;
+mod engine;
+mod environment;
+mod journal;
+mod latch;
+mod port;
+mod time;
+pub use application::{Application, Context, Outcome};
+pub use engine::{
+    BuildError, CoreError, Engine, EngineConfig, EngineExit, EnvironmentFatal,
+    EnvironmentOperation, FatalCause, JournalFatal, RecordKind, TurnOutcome,
+};
+pub use environment::{Environment, Quiescence, ShutdownReport};
+pub use journal::{Journal, JournalBuildError, JournalError, SinkOperation};
+#[expect(unused_imports, reason = "used by later Environment build steps")]
+pub(crate) use latch::Latch;
+pub use port::{Never, PortContract};
+pub use time::{EventIndex, Timestamp};

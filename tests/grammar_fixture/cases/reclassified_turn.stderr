@@ -1,0 +1,25 @@
+error[E0599]: no method named `classify` found for struct `Certificate<Vec<u8>, TurnOpen<answer::Continue>>` in the current scope
+ --> tests/grammar_fixture/cases/reclassified_turn.rs:5:37
+  |
+5 |         let _stop = continue_turn().classify(TurnOutcome::Stop);
+  |                                     ^^^^^^^^ method not found in `Certificate<Vec<u8>, TurnOpen<answer::Continue>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `classify` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, TurnOpen>`
+
+error[E0599]: no method named `classify` found for struct `Certificate<Vec<u8>, TurnOpen<answer::Stop>>` in the current scope
+ --> tests/grammar_fixture/cases/reclassified_turn.rs:9:37
+  |
+9 |         let _continue = stop_turn().classify(TurnOutcome::Continue);
+  |                                     ^^^^^^^^ method not found in `Certificate<Vec<u8>, TurnOpen<answer::Stop>>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `classify` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, TurnOpen>`

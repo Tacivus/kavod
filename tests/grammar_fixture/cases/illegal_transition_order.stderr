@@ -1,0 +1,12 @@
+error[E0599]: no method named `classify` found for struct `Certificate<Vec<u8>, Initial>` in the current scope
+ --> tests/grammar_fixture/cases/illegal_transition_order.rs:5:37
+  |
+5 |         let _classified = initial().classify(TurnOutcome::Continue);
+  |                                     ^^^^^^^^ method not found in `Certificate<Vec<u8>, Initial>`
+  |
+ ::: tests/grammar_fixture/cases/../../../src/engine/record.rs
+  |
+  | pub(super) struct Certificate<W: io::Write, P> {
+  | ---------------------------------------------- method `classify` not found for this struct
+  |
+  = note: the method was found for `Certificate<W, TurnOpen>`
